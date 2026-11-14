@@ -24,6 +24,7 @@
 #![cfg_attr(not(test), forbid(clippy::disallowed_macros))]
 
 use std::collections::BTreeSet;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -1684,13 +1685,24 @@ pub fn write_question_payload<T: Serialize>(
 /// last … so a kill mid-census leaves a husk the next census completes".
 /// Removing the marker first would leave a marker-less husk carrying content,
 /// which the next census retains rather than finishes.
+///
+/// **A listing that fails removes nothing.** Its error is returned as
+/// [`UpstrokeError::Io`] for `public` before the first removal: what the
+/// directory holds is exactly what the failure leaves unknown, and an empty
+/// list in its place would go straight on to the marker
+/// (`SWEEP-CLASSIFY-009`).
+///
+/// # Errors
+///
+/// The listing's error, or the first removal's.
 pub fn remove_public_husk(public: &Path, hooks: &mut dyn RunDirHooks) -> Result<(), UpstrokeError> {
     funnel(
         hooks,
         EffectSiteId::RunDir(RunDirSite::RemovePublicHusk),
         || {
-            for entry in read_dir_names(public) {
-                if entry == MARKER {
+            let entries = read_dir_names(public)?;
+            for entry in entries {
+                if entry == OsStr::new(MARKER) {
                     continue;
                 }
                 let path = public.join(&entry);
@@ -1745,16 +1757,84 @@ fn remove_file_if_present(path: &Path) -> Result<(), UpstrokeError> {
     }
 }
 
-fn read_dir_names(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+/// The names of `dir`'s entries, sorted, each exactly as the directory holds
+/// it; a directory that does not exist has none.
+///
+/// `OsString`s, never lossy strings, because the names are identity:
+/// [`remove_public_husk`] joins each one onto the husk to remove it, and both
+/// that function and the ownership proof's `unbound_shape` compare them with a
+/// marker's name as an `OsStr`. A name that is not valid UTF-8 did not survive
+/// the `to_string_lossy` this used to apply: the husk's removal joined a path
+/// that does not exist, stopped on its `NotFound`, and left the husk for every
+/// later census to report again (`SWEEP-NAMES-005`).
+///
+/// **A listing that failed is an error, never an empty list**
+/// (`SWEEP-CLASSIFY-009`). Both production callers read an empty list as a
+/// bare directory, and a bare husk is one the census reclaims. This used to
+/// answer empty when `read_dir` itself failed, and its `.flatten()` dropped
+/// every entry whose read failed, so a transient failure (`EMFILE`, say)
+/// turned a committed run's public directory -- `events.jsonl` and no marker
+/// -- into a bare husk, and the removal, listing it again once the failure
+/// had passed, deleted the event log. Only `NotFound` on opening `dir` is the
+/// empty answer, because absence is a fact: a directory that is not there
+/// holds nothing.
+///
+/// # Errors
+///
+/// [`UpstrokeError::Io`] for `dir`, carrying `read_dir`'s error for anything
+/// but `NotFound`, or the first error reading an entry.
+fn read_dir_names(dir: &Path) -> Result<Vec<OsString>, UpstrokeError> {
+    let io_error = |source| UpstrokeError::Io {
+        path: dir.to_path_buf(),
+        source,
     };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
+    let read = match fs::read_dir(dir) {
+        Ok(read) => read,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_error(error)),
+    };
+    collect_entry_names(
+        listing_fault::entries(dir, read).map(|entry| entry.map(|entry| entry.file_name())),
+    )
+    .map_err(io_error)
+}
+
+/// The names `entries` yields, sorted, or the first error it yields.
+///
+/// Split from [`read_dir_names`] so a failure on an entry *after* the
+/// directory opened can be witnessed: dropping that entry instead would make
+/// a committed run's public directory read as bare (`SWEEP-CLASSIFY-009`).
+fn collect_entry_names(
+    entries: impl IntoIterator<Item = io::Result<OsString>>,
+) -> io::Result<Vec<OsString>> {
+    let mut names = entries.into_iter().collect::<io::Result<Vec<OsString>>>()?;
     names.sort();
-    names
+    Ok(names)
+}
+
+/// Each entry an opened listing yields, or the error reading it, in the
+/// directory's order: [`read_dir_names`]'s one observation of a listing after
+/// it opened. Production hands the listing back unchanged.
+///
+/// A module of its own, twinned by configuration exactly as the ownership
+/// proof's `locator_fault` is, so that a test can fail a real directory's
+/// listing after it opened, for one path (`SWEEP-CLASSIFY-009`): the test
+/// build's twin is this file's last item, so no production item stands below
+/// the census boundary. The seam carries the raw entries, not their names, so
+/// that [`read_dir_names`] maps entries to names itself and that mapping -- the
+/// line a dropping `.flatten()` once stood on -- is compiled, and witnessed,
+/// in both builds.
+#[cfg(not(test))]
+mod listing_fault {
+    use super::{Path, fs, io};
+
+    #[inline]
+    pub(super) fn entries(
+        _dir: &Path,
+        read: fs::ReadDir,
+    ) -> impl Iterator<Item = io::Result<fs::DirEntry>> {
+        read
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2803,3 +2883,72 @@ pub(crate) fn plant_report_staging_of_a_dead_writer(public: &Path, private: &Pat
 
 #[cfg(test)]
 mod tests;
+
+// ===========================================================================
+// The test build's listing fault: the test-only tail
+// ===========================================================================
+
+/// The test build's twin of the production `listing_fault` above: the same
+/// entries, except for exactly the directory an armed [`ListingFault`] names,
+/// where the read after the first entry fails with the armed kind in place of
+/// whatever the directory holds next, as a `readdir` that fails mid-listing
+/// does, and the listing ends there. The last item of this file.
+#[cfg(test)]
+mod listing_fault {
+    use super::{Path, PathBuf, fs, io};
+
+    /// The armed failure's text: what a retained answer's `detail` carries
+    /// when it is the filesystem's own error and nothing added to it.
+    pub(super) const FAILURE: &str =
+        "the listing failed after the directory opened (an armed test fault)";
+
+    /// An armed [`ListingFault`] for exactly `dir` yields its error kind after
+    /// the first entry; every other directory lists as production lists it.
+    pub(super) fn entries(
+        dir: &Path,
+        read: fs::ReadDir,
+    ) -> impl Iterator<Item = io::Result<fs::DirEntry>> {
+        let armed = FAULTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(path, _)| path == dir)
+            .map(|(_, kind)| *kind);
+        let before = if armed.is_some() { 1 } else { usize::MAX };
+        read.take(before)
+            .chain(armed.map(|kind| Err(io::Error::new(kind, FAILURE))))
+    }
+
+    /// The armed faults, keyed by the exact directory path a test's husk
+    /// lists, so a fault one test arms reaches no other test's directory.
+    static FAULTS: std::sync::Mutex<Vec<(PathBuf, io::ErrorKind)>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// While this guard lives, every listing of `dir` fails after its first
+    /// entry with the armed kind; the fault is removed when the guard drops,
+    /// on a panicking assertion as on a normal return.
+    pub(super) struct ListingFault {
+        dir: PathBuf,
+    }
+
+    impl ListingFault {
+        pub(super) fn arm(dir: &Path, kind: io::ErrorKind) -> Self {
+            FAULTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((dir.to_path_buf(), kind));
+            Self {
+                dir: dir.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for ListingFault {
+        fn drop(&mut self) {
+            FAULTS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|(path, _)| path != &self.dir);
+        }
+    }
+}

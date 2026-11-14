@@ -686,12 +686,17 @@ the arm's whole content — see below.
 
 **The retaining answer, taken before any second observation.** The probe could
 not read this directory's `events.jsonl`; the lock probe, the marker read and
-the ownership proof are three more questions about the same directory, and each
-of them folds its own failures towards reclaiming — `read_dir_names` answers
-`[]` when `read_dir` fails, which is the shape `unbound_shape` reclaims
-(`SWEEP-CLASSIFY-009`). So the census stops here and retains, rather than
-asking them and hoping. Nothing is deleted and nothing is repaired, and the
-entry names why: `RetainReason::ClassificationIncomplete`.
+the ownership proof are three more questions about the same directory. The
+proof no longer folds a failed listing towards reclaiming: `read_dir_names`
+returns the error, and `unbound_shape` answers it with
+`RetainReason::PublicDirUnreadable` rather than the bare shape it reclaims
+(`SWEEP-CLASSIFY-009`'s repair). The reason to retain here has changed with
+it, and is now the probe's failure alone: those three questions are the ones
+a husk is asked, and this directory has not been shown to be one — its first
+line may be a `run_started` the probe could not finish reading. So the census
+stops here and retains, rather than asking them and hoping. Nothing is deleted
+and nothing is repaired, and the entry names why:
+`RetainReason::ClassificationIncomplete`.
 
 `locator: None` for the same reason. The marker would parse and would name a
 private half, but a locator is a claim about a private half this census has

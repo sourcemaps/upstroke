@@ -50,9 +50,9 @@
 )]
 
 use super::{
-    COMMIT_RECORD, CreatingMarker, MARKER, MARKER_STAGED, OWNER_RECORD, OwnerField, OwnerRecord,
-    Path, PathBuf, PrivateHalfOwnership, RepoKey, RetainReason, UnboundShape, fs, io,
-    read_dir_names, runner_policy_sha256,
+    COMMIT_RECORD, CreatingMarker, MARKER, MARKER_STAGED, OWNER_RECORD, OsStr, OwnerField,
+    OwnerRecord, Path, PathBuf, PrivateHalfOwnership, RepoKey, RetainReason, UnboundShape,
+    UpstrokeError, fs, io, read_dir_names, runner_policy_sha256,
 };
 
 /// Proof that one private half belongs to one public husk of this
@@ -324,10 +324,31 @@ mod locator_fault {
 /// content". Read literally: anything other than the staging file is other
 /// content, the empty run skeleton included, because retention costs a
 /// report and reclamation cannot be undone.
+///
+/// **Both reclaiming answers need a listing that completed.** A listing that
+/// failed is retained as [`RetainReason::PublicDirUnreadable`], carrying the
+/// error as the filesystem gave it -- the I/O error's own text, not the crate
+/// error's, whose `failed to read <path>` would name the directory a second
+/// time in a report that names it already, as [`RetainReason::LocatorUnreadable`]
+/// carries the bare error too. A failed listing is no evidence that nothing is
+/// there, and the bare answer it used to stand in for let a transient `EMFILE`
+/// authorise deleting a committed run's `events.jsonl` (`SWEEP-CLASSIFY-009`).
+/// A directory that does not exist still lists as empty, and so still answers
+/// bare.
 fn unbound_shape(public: &Path) -> PrivateHalfOwnership {
-    match read_dir_names(public).as_slice() {
+    let names = match read_dir_names(public) {
+        Ok(names) => names,
+        Err(unlisted) => {
+            let detail = match unlisted {
+                UpstrokeError::Io { source, .. } => source.to_string(),
+                other => other.to_string(),
+            };
+            return PrivateHalfOwnership::Retained(RetainReason::PublicDirUnreadable { detail });
+        }
+    };
+    match names.as_slice() {
         [] => PrivateHalfOwnership::NothingBound(UnboundShape::Bare),
-        [only] if only == MARKER_STAGED => {
+        [only] if only == OsStr::new(MARKER_STAGED) => {
             PrivateHalfOwnership::NothingBound(UnboundShape::StagedMarkerOnly)
         }
         _ => PrivateHalfOwnership::Retained(RetainReason::MarkerlessWithContent),

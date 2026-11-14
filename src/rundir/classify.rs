@@ -275,8 +275,11 @@ impl Allowance {
 /// (`SWEEP-CLASSIFY-001`). A source that answers `Interrupted` past
 /// [`INTERRUPTED_ALLOWANCE`] classifies [`RunDirClass::Indeterminate`], which
 /// no reader treats as a husk. The other folds are unchanged and still answer
-/// `Husk`; making *them* say so is `SWEEP-CLASSIFY-009` and the P3 row against
-/// this file, and neither is taken here.
+/// `Husk`, and making *them* say so is the P3 row against this file, not taken
+/// here; what changed is downstream, where a `Husk` is reclaimed only through
+/// the ownership proof, whose listing now fails closed and retains the
+/// directory where it used to read a failed listing as empty
+/// (`SWEEP-CLASSIFY-009`'s repair).
 #[must_use]
 pub fn classify_run_dir(public: &Path) -> RunDirClass {
     class_of(first_committed_line(public))
@@ -367,18 +370,18 @@ fn first_committed_line(public: &Path) -> Observed<RunStartedHeader> {
     // `proof_cases`' "marker-less husk carrying run-scoped content" and "bare
     // public directory".
     //
-    // The residual is that the listing is a *second* observation of a directory
-    // this probe already failed to read once, and `super::read_dir_names` folds
-    // two different failures into `[]` — the reclaiming answer. It answers `[]`
-    // when `read_dir` itself fails, and its `.flatten()` drops an entry whose
-    // iteration step fails, so a directory that opened but could not be walked
-    // past `events.jsonl` also reads as bare. A transient whole-process failure
-    // (`EMFILE`, `ENFILE`) reaches the `open` below, the marker read and that
-    // listing at the same moment, and `remove_public_husk` lists the directory
-    // again once it has passed. Neither fold is in this file; both are
-    // `SWEEP-CLASSIFY-009`, deferred against `src/rundir.rs` and
-    // `src/rundir/ownership.rs`, and `read_dir_names` is PR #139's subject
-    // while this is written — do not repair it from here.
+    // That listing is a *second* observation of a directory this probe already
+    // failed to read once, and its failure is no longer read as bare.
+    // `super::read_dir_names` returns an error when `read_dir` fails or an
+    // entry cannot be read — a directory that does not exist still lists as
+    // empty — and `unbound_shape` answers that error with
+    // `RetainReason::PublicDirUnreadable`. A transient whole-process failure
+    // (`EMFILE`, `ENFILE`) reaching the `open` below, the marker read and that
+    // listing at the same moment therefore ends in that retention, and
+    // `remove_public_husk`, which lists the directory again, returns a failed
+    // listing as an error before its first removal. Before
+    // `SWEEP-CLASSIFY-009`'s repair the listing folded both failures into `[]`,
+    // the reclaiming answer.
     if !fs::symlink_metadata(&path).is_ok_and(|entry| entry.is_file()) {
         return Observed::Absent;
     }
@@ -749,9 +752,10 @@ fn read_up_to<R: Read>(
 /// [`RunDirClass::Indeterminate`]'s sentence. That is a *narrower* answer than
 /// `read_to_end`'s was here (it folded into `Husk` with every other I/O
 /// failure) and it is deliberately not a re-decision of the other folds, which
-/// stay `Husk` as `SWEEP-CLASSIFY-009` records: this is a site this repair
-/// created, and the rule it is written under is the one the repair
-/// implements.
+/// stay `Husk` (since `SWEEP-CLASSIFY-009`'s repair the ownership proof's
+/// listing fails closed, so they no longer authorise a deletion on a failed
+/// listing): this is a site this repair created, and the rule it is written
+/// under is the one the repair implements.
 ///
 /// [`reserve`] then `extend_from_slice`: past a successful reservation the
 /// append cannot allocate again, because the capacity for exactly those bytes
