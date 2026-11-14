@@ -34,7 +34,12 @@ source, documentation, workflows, release machinery and this file.
      repaired head gets a fresh pass.
    - A relevant finding that is not serious is fixed at the author's discretion or logged as tech
      debt: a ledger row with a stable id, an honest failure sequence, and disposition `deferred`
-     or `accepted-risk`.
+     or `accepted-risk`. A P3, in every lane, may be recorded as `accepted-risk`, by the owner's
+     ruling of 2026-11-13: it is filed under `findings/` like every open finding, with
+     `disposition: accepted-risk`, and the audit accepts it without the owner's read, provided its
+     ledger row records the review's severity. A P2 or higher recorded as `accepted-risk` is still
+     the owner's call. The two rules that
+     outrank the label (below) are unchanged, so a witnessed or `MUST` P3 is still fixed.
    - A finding that is **not relevant to the change** — pre-existing, out of scope, or against an
      unswept file under a transitional standard (`standards/SWEEP.md`) — is logged the same way or
      `rejected` with the reason, and blocks nothing.
@@ -467,9 +472,10 @@ request's lane from its branch prefix alone, counts only the owner's review comm
 `ready-to-merge` is advisory: it reports the audit's verdict on the head it read, while the act
 bound to that head is the enqueue itself, which names the commit), and with `--enqueue` adds
 each ready pull request to the queue in the order its arguments give, so the caller states the
-priority. A finding a lane need not fix is filed and deferred: one file per finding under
-`findings/` with a `deferred` ledger row. A witnessed defect or a `MUST` deviation is
-fixed whatever its label, as step 5 says.
+priority. A finding a lane need not fix is filed, one file per finding under `findings/`, with a
+`deferred` ledger row, or, for an unwitnessed, non-`MUST` P3, an `accepted-risk` row recording the
+review's own severity, which the audit accepts without the owner's read. A witnessed defect or a
+`MUST` deviation is fixed whatever its label, as step 5 says.
 
 **Trust boundary.** There is one trusted same-repository writer: the owner. A pull request can
 edit `ci.yml`, `pr-policy.yml` and the validators they run and still turn both contexts green, so

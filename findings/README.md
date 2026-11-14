@@ -1,7 +1,9 @@
 # The finding ledger: one file per open finding
 
 **Every finding gets its own file. One per finding — never one per pull request, and never one
-per review pass.** A pass that returns six findings produces six files.
+per review pass.** A pass that returns six findings produces six files. A P3 recorded as
+`accepted-risk` is filed here like every other open finding, and accepted without the owner's read
+when its ledger row records the review's severity (below).
 
 **When a finding is resolved, delete the file.** This directory is the outstanding work and
 nothing else. An `ls` is the queue, worst first, with nothing to run and nothing to filter.
@@ -59,6 +61,14 @@ Input or state, then the step that goes wrong, then the wrong result. Concrete, 
 
 The fields are the columns of a body's ledger row, so a row and a file carry the same facts and
 neither is transcribed from the other by hand.
+
+**An accepted P3 is filed, and accepted without a manual read.** A P3, in every lane, may be
+recorded as `accepted-risk`, by the owner's ruling of 2026-11-13. It is still open, so it is filed
+here like every other open finding, with `disposition: accepted-risk`; what the ruling changes is
+that `scripts/pr-ready-audit.sh` accepts it without the owner's read, provided its ledger row
+records the review's severity. A P2 or higher recorded as `accepted-risk` is still the owner's
+call. A P3 carrying a failing test, reproduction or mutation witness, or a
+`MUST` deviation, is still fixed whatever its row says (`MAINTAINING.md` step 5).
 
 ## Deleting is safe, and where the permanent record lives
 

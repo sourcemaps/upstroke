@@ -349,7 +349,11 @@ VERDICT_RUN = re.compile(r"VERDICT:\**:? *" + NOT_SPACE + r"*")
 VERDICT_WHOLE = re.compile(r"VERDICT:[*]*:? *([A-Z_]+)[*]*\Z")
 NUMBERED_FINDING = re.compile(r"[0-9]+\. \*\*(P[0-3])")
 
-USAGE = "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE"
+USAGE = (
+    "usage: pr-review-parse.py {review|ledger} [--nul] [--out FILE] FILE\n"
+    "  review: the review's kind, reviewed commit, verdict, base, stray token and findings\n"
+    "  ledger: the pull-request body's ledger rows, each as its id, severity and disposition"
+)
 
 
 class Unparsed(Exception):
@@ -1018,51 +1022,143 @@ def review_fields(result):
 
 
 LEDGER_HEADING = "## Review finding ledger"
-LEDGER_ID_HEADER = re.compile(r" *ID *\Z")
-LEDGER_SEPARATOR = re.compile(r"-+\Z")
+# validate-pr-body.sh's `expected_header` and `expected_separator`, byte for byte.
+LEDGER_HEADER = (
+    "| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category"
+    " | First bad / prior ID | Regression or documented guard | Disposition |"
+)
+LEDGER_SEPARATOR = "|---|---|---|---|---|---|---|---|---|"
+LEDGER_NONE = "None yet"
 
 
 def ledger_result(args):
-    """ledger FILE: the id and disposition of every row of the pull-request body's finding ledger.
+    """ledger FILE: the id, severity and disposition of every row of the body's finding ledger.
 
-    The header row, the separator and the canonical `None yet` row are not rows, exactly as the
-    awk this replaces judged them -- on the untrimmed cell, which is why the patterns carry their
-    own spaces. Everything else in the section is a row and is reported as one; a cell holding
-    something no finding id could equal can neither match a finding nor hide a match, so there is
-    nothing here for a malformed row to gain.
+    THE TABLE IS THE VALIDATOR'S TABLE, AND ITS PARTS ARE FOUND BY POSITION. This reads exactly the
+    table `validate-pr-body.sh` checks (see below for how the two walks meet). After the heading,
+    the header is the first `|` line and must be the canonical header. The separator is the line right after it and must be the canonical
+    separator. The rows are the contiguous `|` lines after that, and the first line that is not a
+    `|` line ends them: a blank line, prose or a `## ` line. Every one of those lines is a row, and
+    the one whose id, trimmed, is exactly `None yet` (the validator's own test) is the canonical
+    empty row and is not reported. NO CELL'S CONTENT DECIDES WHICH LINE IS THE HEADER, so a row
+    whose id is `ID` is a row. A row too short to reach a column reports that column empty.
+
+    WHAT LIES OUTSIDE THAT TABLE IS REFUSED, NOT SKIPPED. The section used to be read as every `|`
+    line in it, and the header and separator were told from the rows by their id cell. That gave
+    two ways to reach READY on a row no validator had checked. (PR382-POST-TABLE-ROW-ACCEPTED) the
+    canonical table held only `None yet`, a blank line ended it for both validators, and a later
+    `|` row in the same section recorded the review's P3 as `accepted-risk`. This returned that row.
+    (The regression lens's P1) a finding whose id is `ID` had its canonical row, recording P2
+    `accepted-risk`, dropped as a header. A second row after a blank line, with tabs around `ID`
+    so the header pattern missed it, recorded P3, and it was the only row returned. Now any `|`
+    line in the section after the table has ended is refused. So is a section whose first two `|`
+    lines are not the canonical header and separator, and so is a section with no table at all.
+
+    THE SEVERITY IS THE ROW'S OWN, the table's second column, and it is reported so the audit can
+    hold it against the review's. Without it an `accepted-risk` row was judged on the review's
+    severity alone: a review P3 whose row recorded P2 read READY, though a P2 recorded as
+    `accepted-risk` is the owner's call. A row too short to carry the column reports it empty,
+    which equals no severity a review can give -- so it, too, can only block.
+
+    ONE LEDGER, OPENED ONLY BY ITS HEADING, AND ONE ROW PER ID. A section opened at any line that
+    BEGAN with the heading, so a `## Review finding ledger (draft)` placed before the real one was
+    read too and its rows came first; the audit takes the first row carrying a finding's id, and a
+    draft row recording a P3 `accepted-risk` stood in for the real row recording P2 -- READY, where
+    the real ledger says `severity-mismatch`. Now a ledger opens only at a line that IS the heading,
+    with trailing whitespace allowed and nothing else, and any other `## ` line closes it. A body
+    with more than one such line is refused, and so is a ledger with an id in more than one row:
+    either leaves two readings of one finding, and choosing between them is exactly what went wrong.
+    So every id this returns is returned once, and the audit's lookup has nothing to choose.
+
+    THE LINES ARE THE VALIDATOR'S LINES. `validate-pr-body.sh` deletes every carriage return
+    (`tr -d '\\r'`) and its command substitution drops every NUL before it compares a line, so both
+    are deleted here first. Kept, `## Review fi<CR>nding ledger` was the heading to the validator
+    and not to this, and a trailing-space copy elsewhere in the body was the only heading this saw:
+    the validator checked one section and the audit read another.
+
+    AGAINST THE VALIDATORS this is stricter, and is never looser. `validate-pr-body.sh` takes the
+    heading only as the exact line and refuses a second one. Every line it takes this takes, so a
+    body it passes has one ledger section here too, and the same one. A body carrying the exact
+    heading and a copy with a trailing space passes there as one ledger and another section, and
+    is refused here. In the section, that validator takes as the header the one line equal to the
+    canonical header, wherever it falls. It refuses a second such line, wants the separator on the
+    next line, and reads the rows from there to the first blank, non-`|` or `## ` line. This
+    requires that header to be the section's FIRST `|` line, so a body this reads has the
+    validator's header, separator and rows, and nothing else. The `|` lines that validator steps
+    over before the header or after the rows are refused here. A repeated id is refused among the
+    table's rows by both. `validate-pr-ledger-evidence.sh` does not look at the heading: it reads
+    from the first canonical header line anywhere in the body, and does not look for a repeated id.
+
+    EVERY CELL RETURNED IS TRIMMED OF ALL SURROUNDING WHITESPACE, as the body validator trims it
+    (`[[:space:]]`). Trimmed of spaces alone, a policy-valid row with a tab either side of `P3`
+    reached the audit as a tabbed severity and blocked as `severity-mismatch`. Where `str.strip()`
+    and `[[:space:]]` could differ, the difference can only block: a character the validator keeps
+    fails its id, severity and disposition patterns, and one this keeps matches no finding's id and
+    no severity.
     """
     if len(args) != 1:
         raise Unparsed("ledger takes one file")
     rows = []
-    in_ledger = False
-    for line in read_input(args[0]).split("\n"):
-        if line.startswith(LEDGER_HEADING):
-            in_ledger = True
+    ids = set()
+    headings = 0
+    # Where the walk stands: outside the ledger section, or inside it before the header, at the
+    # separator, among the rows, or past the end of the table.
+    place = "outside"
+    for line in read_input(args[0]).replace("\r", "").replace(NUL, "").split("\n"):
+        if line.rstrip() == LEDGER_HEADING:
+            headings += 1
+            if headings > 1:
+                raise Unparsed("the body carries more than one %r heading" % LEDGER_HEADING)
+            place = "header"
             continue
         if line.startswith("## "):
-            in_ledger = False
-        if not in_ledger or not line.startswith("|"):
+            if place in ("header", "separator"):
+                raise Unparsed("the ledger section ends before its header and separator")
+            place = "outside"
+            continue
+        piped = line.startswith("|")
+        if place == "outside" or (place == "header" and not piped):
+            continue
+        if place == "header":
+            if line != LEDGER_HEADER:
+                raise Unparsed("the ledger's first `|` line is not the canonical header")
+            place = "separator"
+            continue
+        if place == "separator":
+            if line != LEDGER_SEPARATOR:
+                raise Unparsed("the ledger's header is not followed by the canonical separator")
+            place = "rows"
+            continue
+        if place == "ended" or not piped:
+            if piped:
+                raise Unparsed("the ledger section carries a `|` line after its table has ended")
+            place = "ended"
             continue
         cells = line.split("|")
-        identifier = cells[1] if len(cells) > 1 else ""
-        if LEDGER_ID_HEADER.match(identifier) or LEDGER_SEPARATOR.match(identifier):
+        identifier = (cells[1] if len(cells) > 1 else "").strip()
+        if identifier == LEDGER_NONE:
             continue
-        if "None yet" in identifier:
-            continue
+        if identifier in ids:
+            raise Unparsed("the ledger records %r in more than one row" % identifier)
+        ids.add(identifier)
         rows.append(
             {
-                "id": identifier.strip(" "),
-                "disposition": (cells[9] if len(cells) > 9 else "").strip(" "),
+                "id": identifier,
+                "severity": (cells[2] if len(cells) > 2 else "").strip(),
+                "disposition": (cells[9] if len(cells) > 9 else "").strip(),
             }
         )
+    if place in ("header", "separator"):
+        raise Unparsed("the ledger section ends before its header and separator")
     return {"tag": "ledger", "rows": rows}
 
 
 def ledger_fields(result):
-    """The ledger as flat fields: two, the second of which is the row count, then two each."""
+    """The ledger as flat fields: two, the second of which is the row count, then three per row --
+    its id, its severity and its disposition, in that order."""
     fields = ["ledger", str(len(result["rows"]))]
     for row in result["rows"]:
-        fields += [row["id"], row["disposition"]]
+        fields += [row["id"], row["severity"], row["disposition"]]
     return fields
 
 
