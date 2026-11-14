@@ -160,6 +160,8 @@ struct RawKindRouting {
     timeout_secs: Option<u64>,
 
     enabled: Option<bool>,
+
+    cross_family: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -366,6 +368,8 @@ pub struct Config {
 
     pub review_enabled: bool,
 
+    pub review_cross_family: bool,
+
     pub review_pass_timeout: Duration,
 
     implementation_effort_override: Option<Effort>,
@@ -552,6 +556,7 @@ pub fn load_captured_with(
     let mut overrides = Vec::new();
     let mut review_tier: Option<Tier> = None;
     let mut review_enabled = true;
+    let mut review_cross_family = true;
     let mut review_pass_timeout = DEFAULT_REVIEW_PASS_TIMEOUT;
     let mut implementation_effort_override = None;
     let mut review_effort_override = None;
@@ -563,13 +568,17 @@ pub fn load_captured_with(
 
     if let Some(routing) = raw.routing {
         if let Some(value) = routing.effort {
-            let policy: RawRoleEffort =
-                value.try_into().map_err(|e| UpstrokeError::Config {
-                    path: repo_path.clone(),
-                    message: format!(
-                        "[routing.effort]: {e} (expected optional `implementation` and `review` effort strings)"
-                    ),
-                })?;
+            let policy: RawRoleEffort = match value.try_into() {
+                Ok(policy) => policy,
+                Err(e) => {
+                    return Err(UpstrokeError::Config {
+                        path: repo_path,
+                        message: format!(
+                            "[routing.effort]: {e} (expected optional `implementation` and `review` effort strings)"
+                        ),
+                    });
+                }
+            };
             implementation_effort_override = parse_role_effort(
                 policy.implementation.as_deref(),
                 "implementation",
@@ -581,29 +590,35 @@ pub fn load_captured_with(
         for (key, value) in routing.kinds {
             let Some(kind) = TaskKind::parse(&key) else {
                 if key == "review" {
-                    let rr: RawKindRouting =
-                        value.try_into().map_err(|e| UpstrokeError::Config {
-                            path: repo_path.clone(),
-                            message: format!(
-                                "routing entry `review`: {e} (expected `tier`, `timeout_secs`, or \
+                    let rr: RawKindRouting = match value.try_into() {
+                        Ok(rr) => rr,
+                        Err(e) => {
+                            return Err(UpstrokeError::Config {
+                                path: repo_path,
+                                message: format!(
+                                    "routing entry `review`: {e} (expected `tier`, `timeout_secs`, \
+                             `cross_family = false` to name no other-family reviewer, or \
                              `enabled = false` to run without review)"
-                            ),
-                        })?;
+                                ),
+                            });
+                        }
+                    };
                     if rr.attempts_per.is_some() {
                         return Err(UpstrokeError::Config {
-                            path: repo_path.clone(),
+                            path: repo_path,
                             message:
                                 "[routing] `review`: attempts_per applies only to task-kind roles"
                                     .to_owned(),
                         });
                     }
                     review_enabled = rr.enabled.unwrap_or(true);
+                    review_cross_family = rr.cross_family.unwrap_or(true);
                     review_tier = rr
                         .tier
                         .or_else(|| rr.chain.and_then(|c| c.first().copied()));
                     if rr.timeout_secs == Some(0) {
                         return Err(UpstrokeError::Config {
-                            path: repo_path.clone(),
+                            path: repo_path,
                             message: "[routing] `review`: timeout_secs must be at least 1; omit it for the default of 5400 seconds".to_owned(),
                         });
                     }
@@ -619,13 +634,18 @@ pub fn load_captured_with(
                 ));
                 continue;
             };
-            let kr: RawKindRouting = value.try_into().map_err(|e| UpstrokeError::Config {
-                path: repo_path.clone(),
-                message: format!("routing entry `{key}`: {e}"),
-            })?;
+            let kr: RawKindRouting = match value.try_into() {
+                Ok(kr) => kr,
+                Err(e) => {
+                    return Err(UpstrokeError::Config {
+                        path: repo_path,
+                        message: format!("routing entry `{key}`: {e}"),
+                    });
+                }
+            };
             if kr.attempts_per == Some(0) {
                 return Err(UpstrokeError::Config {
-                    path: repo_path.clone(),
+                    path: repo_path,
                     message: format!(
                         "[routing] `{key}`: attempts_per must be at least 1 — omit it for the \
                          default of {DEFAULT_ATTEMPTS_PER}"
@@ -634,7 +654,7 @@ pub fn load_captured_with(
             }
             if kr.timeout_secs.is_some() {
                 return Err(UpstrokeError::Config {
-                    path: repo_path.clone(),
+                    path: repo_path,
                     message: format!(
                         "[routing] `{key}`: timeout_secs applies only to the `review` role"
                     ),
@@ -642,9 +662,17 @@ pub fn load_captured_with(
             }
             if kr.enabled.is_some() {
                 return Err(UpstrokeError::Config {
-                    path: repo_path.clone(),
+                    path: repo_path,
                     message: format!(
                         "[routing] `{key}`: enabled applies only to the `review` role"
+                    ),
+                });
+            }
+            if kr.cross_family.is_some() {
+                return Err(UpstrokeError::Config {
+                    path: repo_path,
+                    message: format!(
+                        "[routing] `{key}`: cross_family applies only to the `review` role"
                     ),
                 });
             }
@@ -672,21 +700,24 @@ pub fn load_captured_with(
 
             let second_opinion = match ov.second_opinion.as_deref() {
                 None => None,
-                Some(raw) => Some(SecondOpinion::parse(raw).ok_or_else(|| {
-                    UpstrokeError::Config {
-                        path: repo_path.clone(),
-                        message: format!(
-                            "[[routing.overrides]] entry {n}: `second_opinion = \"{raw}\"` is not \
+                Some(raw) => match SecondOpinion::parse(raw) {
+                    Some(parsed) => Some(parsed),
+                    None => {
+                        return Err(UpstrokeError::Config {
+                            path: repo_path,
+                            message: format!(
+                                "[[routing.overrides]] entry {n}: `second_opinion = \"{raw}\"` is not \
                          recognized (accepted: {})",
-                            SecondOpinion::ACCEPTED.join(", ")
-                        ),
+                                SecondOpinion::ACCEPTED.join(", ")
+                            ),
+                        });
                     }
-                })?),
+                },
             };
 
             if ov.start_at.is_none() && second_opinion.is_none() {
                 return Err(UpstrokeError::Config {
-                    path: repo_path.clone(),
+                    path: repo_path,
                     message: format!(
                         "[[routing.overrides]] entry {n} has neither `start_at` nor \
                          `second_opinion`, so it would have no effect — give it a tier floor, a \
@@ -696,16 +727,28 @@ pub fn load_captured_with(
             }
             let mut builder = GlobSetBuilder::new();
             for pattern in &ov.paths {
-                let glob = Glob::new(pattern).map_err(|e| UpstrokeError::Config {
-                    path: repo_path.clone(),
-                    message: format!("invalid glob `{pattern}` in [[routing.overrides]]: {e}"),
-                })?;
+                let glob = match Glob::new(pattern) {
+                    Ok(glob) => glob,
+                    Err(e) => {
+                        return Err(UpstrokeError::Config {
+                            path: repo_path,
+                            message: format!(
+                                "invalid glob `{pattern}` in [[routing.overrides]]: {e}"
+                            ),
+                        });
+                    }
+                };
                 builder.add(glob);
             }
-            let globs = builder.build().map_err(|e| UpstrokeError::Config {
-                path: repo_path.clone(),
-                message: format!("building glob set for [[routing.overrides]]: {e}"),
-            })?;
+            let globs = match builder.build() {
+                Ok(globs) => globs,
+                Err(e) => {
+                    return Err(UpstrokeError::Config {
+                        path: repo_path,
+                        message: format!("building glob set for [[routing.overrides]]: {e}"),
+                    });
+                }
+            };
             overrides.push(CompiledOverride {
                 raw_paths: ov.paths,
                 start_at: ov.start_at,
@@ -757,7 +800,7 @@ pub fn load_captured_with(
         let effort = match pin.effort.as_deref().map(Effort::parse) {
             Some(None) => {
                 return Err(UpstrokeError::Config {
-                    path: repo_path.clone(),
+                    path: repo_path,
                     message: format!(
                         "pin for tier `{}` sets effort `{}`, which is not one of: {}",
                         pin.tier,
@@ -797,6 +840,7 @@ pub fn load_captured_with(
         shell: engine.shell,
         review_tier,
         review_enabled,
+        review_cross_family,
         review_pass_timeout,
         implementation_effort_override,
         review_effort_override,
@@ -1310,6 +1354,65 @@ model = "claude-opus-4-8"
                 .to_string()
                 .contains("applies only to the `review` role"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn review_cross_family_defaults_on_parses_off_and_is_review_only() {
+        let mut warnings = Vec::new();
+        let off = scratch(
+            "crossfamilyoff.toml",
+            "[routing]\nreview = { cross_family = false }\n",
+        );
+        let cfg = load(Some(&off), &hermetic(), Some(&missing()), &mut warnings)
+            .expect("cross_family = false is accepted on review");
+        assert!(!cfg.review_cross_family);
+        assert!(cfg.review_enabled, "it narrows review, not disables it");
+
+        for (name, body) in [
+            (
+                "crossfamilyunset.toml",
+                "[routing]\nreview = { tier = \"frontier\" }\n",
+            ),
+            ("crossfamilynorouting.toml", "# nothing configured\n"),
+        ] {
+            let path = scratch(name, body);
+            let cfg =
+                load(Some(&path), &hermetic(), Some(&missing()), &mut warnings).expect("loads");
+            assert!(
+                cfg.review_cross_family,
+                "{name}: unset keeps today's rebind"
+            );
+        }
+
+        let task = scratch(
+            "taskcrossfamily.toml",
+            "[routing]\nfix = { chain = [\"frontier\"], cross_family = false }\n",
+        );
+        let error = load(Some(&task), &hermetic(), Some(&missing()), &mut warnings)
+            .expect_err("task routing must not silently ignore a review-only switch");
+        let message = error.to_string();
+        assert!(
+            message.contains("cross_family applies only to the `review` role"),
+            "{message}"
+        );
+        assert!(message.contains("`fix`"), "names the entry: {message}");
+
+        let misspelled = scratch(
+            "misspelledcrossfamily.toml",
+            "[routing]\nreview = { cross_familly = false }\n",
+        );
+        let error = load(
+            Some(&misspelled),
+            &hermetic(),
+            Some(&missing()),
+            &mut warnings,
+        )
+        .expect_err("an unknown review-routing key must not fall back to the rebind");
+        let message = error.to_string();
+        assert!(
+            message.contains("cross_family = false"),
+            "the hint names the accepted switch: {message}"
         );
     }
 

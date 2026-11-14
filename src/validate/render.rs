@@ -14,7 +14,7 @@ use crate::route::ResolvedChain;
 
 use super::{Report, Row};
 
-pub(super) fn review_echo(plan: &ReviewPlan) -> String {
+pub(super) fn review_echo(plan: &ReviewPlan, cross_family: bool) -> String {
     let Some(primary) = &plan.primary else {
         return "review: disabled ([routing] review = { enabled = false })".to_owned();
     };
@@ -28,14 +28,34 @@ pub(super) fn review_echo(plan: &ReviewPlan) -> String {
         plan.pass_timeout_secs
             .expect("freshly resolved review plans always record their timeout")
     );
+    let demanded = plan.second_opinion.iter().flatten().count();
     match &plan.alternative {
         Some(alt) => line.push_str(&format!(
             " (tasks it implements itself would be reviewed by {} instead, if installed)",
             alt.describe()
         )),
+        None if !cross_family && demanded > 0 => {
+            let mut agents: Vec<String> = Vec::new();
+            for binding in plan.second_opinion.iter().flatten() {
+                let described = binding.describe();
+                if !agents.contains(&described) {
+                    agents.push(described);
+                }
+            }
+            line.push_str(&format!(
+                " (the cross-family alternative is turned off by [routing] review = {{ \
+                 cross_family = false }}; the explicit second opinions [[routing.overrides]] ask \
+                 for are not — they still run on {} and still need {} installed)",
+                agents.join(", "),
+                if agents.len() == 1 { "it" } else { "them" }
+            ));
+        }
+        None if !cross_family => line.push_str(
+            " (the alternative reviewer for tasks its own family implements is turned off by \
+             [routing] review = { cross_family = false }, so it reviews those tasks itself)",
+        ),
         None => line.push_str(" (no cross-family reviewer exists in this build)"),
     }
-    let demanded = plan.second_opinion.iter().flatten().count();
     if demanded > 0 {
         line.push_str(&format!(
             "; {demanded} task(s) also require a second opinion, which pre-flight refuses to \

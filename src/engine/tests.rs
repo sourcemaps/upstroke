@@ -26136,6 +26136,33 @@ fn a_fresh_run_records_the_case_policy_and_a_resume_never_changes_it() {
 /// Nothing installs it.
 const ABSENT_REVIEWER_CLI: &str = "upstroke-p12-w17-absent-reviewer-cli";
 
+fn probe_an_absent_cli(
+    adapter: &'static str,
+    program: &'static str,
+    runner: &dyn crate::runner::Runner,
+) -> Result<Caps, UpstrokeError> {
+    let request = crate::agent::probe_request(
+        adapter,
+        CommandSpec::new(program).arg("--version"),
+        0,
+        Duration::from_secs(60),
+    )?;
+    let output = runner.run_blocking(&request).map_err(|cause| {
+        crate::agent::bin::boundary_refused(
+            program,
+            "nothing installs it",
+            &UpstrokeError::from(cause),
+        )
+    })?;
+    Err(UpstrokeError::Agent {
+        message: format!(
+            "`{program}` answered with {:?}, so the witness's premise, an absent CLI, does not \
+             hold",
+            output.code
+        ),
+    })
+}
+
 /// A `copilot` adapter whose CLI is not installed: its probe asks the run's own
 /// runner to start a program that is not on `PATH`, and refuses the way
 /// `CopilotAdapter` does when its CLI is absent (`agent::bin::boundary_refused`).
@@ -26147,26 +26174,11 @@ impl AgentAdapter for AbsentReviewerCli {
     }
 
     fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
-        let request = crate::agent::probe_request(
+        probe_an_absent_cli(
             crate::agent::copilot::ADAPTER_ID,
-            CommandSpec::new(ABSENT_REVIEWER_CLI).arg("--version"),
-            0,
-            Duration::from_secs(60),
-        )?;
-        let output = runner.run_blocking(&request).map_err(|cause| {
-            crate::agent::bin::boundary_refused(
-                ABSENT_REVIEWER_CLI,
-                "nothing installs it",
-                &UpstrokeError::from(cause),
-            )
-        })?;
-        Err(UpstrokeError::Agent {
-            message: format!(
-                "`{ABSENT_REVIEWER_CLI}` answered with {:?}, so the witness's premise, an absent \
-                 CLI, does not hold",
-                output.code
-            ),
-        })
+            ABSENT_REVIEWER_CLI,
+            runner,
+        )
     }
 
     fn build(&self, _run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
@@ -26267,54 +26279,8 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
         "after the execution root's claim, before P4 certified: {said}"
     );
     assert!(said.contains(ABSENT_REVIEWER_CLI), "{said}");
-    assert_eq!(
-        execution_roots_under(&private_root_for(&repo)),
-        Vec::<String>::new(),
-        "the creator settled the root it claimed before it reclaimed either half: {said}"
-    );
     assert!(said.contains("could not be executed"), "{said}");
-
-    assert_eq!(
-        rundir::run_dir_names(&repo),
-        Vec::<String>::new(),
-        "no run directory is left behind"
-    );
-    let private_runs = private_root_for(&repo).join("runs");
-    let mut committed_records = Vec::new();
-    let mut stack = vec![private_runs];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .file_name()
-                .is_some_and(|name| name == "committed.json")
-            {
-                committed_records.push(path);
-            }
-        }
-    }
-    assert_eq!(
-        committed_records,
-        Vec::<PathBuf>::new(),
-        "no private half carries a commit record"
-    );
-    assert_eq!(
-        git_in(
-            &repo,
-            &[
-                "for-each-ref",
-                "--format=%(refname)",
-                "refs/heads/upstroke/"
-            ]
-        ),
-        "",
-        "no integration ref"
-    );
+    assert_a_refused_creation_left_nothing(&repo, &said);
 
     let present = PresentReviewerCli(&stub);
     let report = run_with(
@@ -26331,6 +26297,217 @@ fn a_configured_reviewer_whose_cli_is_absent_fails_creation_before_p5b_and_commi
         first["data"]["probed_agents"],
         serde_json::json!(["claude-code", "copilot"]),
         "{first}"
+    );
+    until_released(&repo, &report.run_id);
+}
+
+fn assert_a_refused_creation_left_nothing(repo: &Path, said: &str) {
+    assert_eq!(
+        execution_roots_under(&private_root_for(repo)),
+        Vec::<String>::new(),
+        "the creator settled the root it claimed before it reclaimed either half: {said}"
+    );
+    assert_eq!(
+        rundir::run_dir_names(repo),
+        Vec::<String>::new(),
+        "no run directory is left behind"
+    );
+    let private_runs = private_root_for(repo).join("runs");
+    let mut committed_records = Vec::new();
+    let mut stack = vec![private_runs.clone()];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if dir == private_runs && error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            Err(error) => panic!("list {}: {error}", dir.display()),
+        };
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("read an entry of {}: {error}", dir.display()))
+                .path();
+            let is_dir = fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("stat {}: {error}", path.display()))
+                .is_dir();
+            if is_dir {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == "committed.json")
+            {
+                committed_records.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        committed_records,
+        Vec::<PathBuf>::new(),
+        "no private half carries a commit record"
+    );
+    assert_eq!(
+        git_in(
+            repo,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/heads/upstroke/"
+            ]
+        ),
+        "",
+        "no integration ref"
+    );
+}
+
+#[test]
+#[should_panic(expected = "list ")]
+fn an_absent_alternative_reviewer_cli_refusal_check_fails_on_a_runs_it_cannot_list() {
+    let (_tree, repo) = temp_engine_repo("refusal-check-unlistable-runs");
+    let private_root = private_root_for(&repo);
+    fs::create_dir_all(&private_root).expect("create the private root");
+    fs::write(private_root.join("runs"), "not a directory")
+        .expect("put a file where the private runs directory would be");
+    assert_a_refused_creation_left_nothing(&repo, "a fixture, not a refusal");
+}
+
+const ABSENT_ALTERNATIVE_CLI: &str = "upstroke-absent-codex-alternative-cli";
+
+#[derive(Default)]
+struct AbsentAlternativeCli {
+    probes: std::sync::atomic::AtomicUsize,
+    builds: std::sync::atomic::AtomicUsize,
+}
+
+impl AbsentAlternativeCli {
+    fn asked(&self) -> (usize, usize) {
+        (
+            self.probes.load(std::sync::atomic::Ordering::SeqCst),
+            self.builds.load(std::sync::atomic::Ordering::SeqCst),
+        )
+    }
+}
+
+impl AgentAdapter for AbsentAlternativeCli {
+    fn id(&self) -> &'static str {
+        crate::agent::codex::ADAPTER_ID
+    }
+
+    fn probe(&self, runner: &dyn crate::runner::Runner) -> Result<Caps, UpstrokeError> {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        probe_an_absent_cli(
+            crate::agent::codex::ADAPTER_ID,
+            ABSENT_ALTERNATIVE_CLI,
+            runner,
+        )
+    }
+
+    fn build(&self, _run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(UpstrokeError::Agent {
+            message: "an absent CLI is never built".to_owned(),
+        })
+    }
+
+    fn parse(&self, _out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        Err(UpstrokeError::Agent {
+            message: "an absent CLI is never parsed".to_owned(),
+        })
+    }
+}
+
+const FRONTIER_IMPLEMENTS_CONFIG: &str =
+    "[routing]\nimplement = { chain = [\"frontier\"], attempts_per = 1 }\n";
+
+const FRONTIER_IMPLEMENTS_CROSS_FAMILY_OFF_CONFIG: &str = "[routing]\n\
+     implement = { chain = [\"frontier\"], attempts_per = 1 }\n\
+     review = { cross_family = false }\n";
+
+#[test]
+fn an_absent_alternative_reviewer_cli_refuses_creation_while_cross_family_is_unset() {
+    let (_tree, repo) = temp_engine_repo("topology-absent-alternative-unset");
+    seed(&repo, ONE_ATTEMPT_PLAN, Some(FRONTIER_IMPLEMENTS_CONFIG));
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let codex = AbsentAlternativeCli::default();
+    let refused = run_with(
+        &topology_options(&repo),
+        &StubAndReviewer {
+            stub: &stub,
+            reviewer: &codex,
+        },
+    )
+    .expect_err("with cross_family unset, the alternative's absent CLI refuses creation");
+    let said = refused.to_string();
+    assert!(
+        said.contains("stopped at P3c"),
+        "after the execution root's claim, before P4 certified: {said}"
+    );
+    assert!(said.contains(ABSENT_ALTERNATIVE_CLI), "{said}");
+    assert!(said.contains("could not be executed"), "{said}");
+    assert_eq!(
+        codex.asked(),
+        (1, 0),
+        "the alternative was probed once and never built: {said}"
+    );
+    assert_a_refused_creation_left_nothing(&repo, &said);
+}
+
+#[test]
+fn an_absent_alternative_reviewer_cli_is_never_probed_once_cross_family_is_false() {
+    let (_tree, repo) = temp_engine_repo("topology-absent-alternative-off");
+    seed(
+        &repo,
+        ONE_ATTEMPT_PLAN,
+        Some(FRONTIER_IMPLEMENTS_CROSS_FAMILY_OFF_CONFIG),
+    );
+    let stub = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+    let codex = AbsentAlternativeCli::default();
+    let report = run_with(
+        &topology_options(&repo),
+        &StubAndReviewer {
+            stub: &stub,
+            reviewer: &codex,
+        },
+    )
+    .expect("with cross_family = false, the alternative's absent CLI does not refuse creation");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:#?}");
+    assert!(
+        committed(&report, "t1") && committed(&report, "t2"),
+        "{report:#?}"
+    );
+    let first = first_line_of_the_log(&repo, &report.run_id);
+    assert_eq!(
+        first["data"]["probed_agents"],
+        serde_json::json!(["claude-code"]),
+        "{first}"
+    );
+    assert_eq!(
+        codex.asked(),
+        (0, 0),
+        "the alternative's CLI was neither probed nor run"
+    );
+    for id in ["t1", "t2"] {
+        assert_eq!(
+            task(&report, id).review_models,
+            ["claude-opus-5"],
+            "the primary reviewed `{id}`, the work its own model implemented"
+        );
+    }
+    let switched: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("cross_family = false"))
+        .collect();
+    assert_eq!(
+        switched.len(),
+        1,
+        "exactly one cross_family = false warning: {:?}",
+        report.warnings
+    );
+    assert!(
+        switched[0].contains("claude-code/claude-opus-5"),
+        "it names the primary that reviews its own work: {switched:?}"
     );
     until_released(&repo, &report.run_id);
 }

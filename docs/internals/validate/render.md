@@ -34,7 +34,7 @@ does not read lowers (`GUARD-DECISION-SILENT-PRODUCTION-FILES-OUTSIDE-THE-ROLL-C
 names the pair the day it is dropped. `forbid` compiles because nothing here
 allows a governed lint.
 
-## `pub(super) fn review_echo(plan: &ReviewPlan) -> String {`
+## `pub(super) fn review_echo(plan: &ReviewPlan, cross_family: bool) -> String {`
 
 Who judges the work (§11.2–§11.3), for the preview.
 
@@ -44,6 +44,36 @@ probe. Pre-flight is where a named reviewer has to prove it can actually
 run — and where a missing one either warns or refuses. The line says so,
 because a preview that reads as a promise is worse than one that reads as a
 plan.
+
+`cross_family` is the config's `review_cross_family`, passed in because the
+plan alone cannot say why it has no alternative: nothing of another family
+at the review tier in this build, and
+`[routing] review = { cross_family = false }`, both leave `alternative`
+`None`. Only the first is "no cross-family reviewer exists in this build".
+Saying it of the second is false — the same build resolves one the moment
+the switch is unset — so with the switch off the line names the
+configuration that turned the reviewer off instead.
+
+The line says what the switch turned off and nothing wider: the *alternative*
+reviewer, the one that would stand in for the primary on tasks the primary's
+own family implemented, so the primary reviews those tasks itself. It does
+not say cross-family review is off, because that is false: a task
+implemented by another vendor (say `copilot/gpt-5-mini`) is still judged by a
+primary of a different family (`claude-code/claude-sonnet-5`), which is
+cross-family review all the same (`PR378-PREVIEW-CROSS-FAMILY-FALSE-CLAIM`).
+
+The switch turns off the *alternative* only. A `[[routing.overrides]]`
+entry's `second_opinion` is an explicit demand the switch leaves alone
+(`cross_family_off_leaves_an_explicit_second_opinion_alone`): those passes
+stay in the plan, the task rows show them, and creation still requires
+their agent. So when the switch is off and the plan demands at least one
+second opinion, a line that stopped at the alternative would leave the
+second opinions in the rows beneath it unexplained; the line says instead
+that the switch turned off the alternative, and that the second opinions
+still run on the agents it names (each distinct binding once) and still
+need them installed. With the switch off and no second opinion demanded,
+the line is the plain sentence above: the alternative for same-family tasks
+is off, and the primary reviews them itself.
 
 ## `pub(super) fn capacity_echo(`
 
