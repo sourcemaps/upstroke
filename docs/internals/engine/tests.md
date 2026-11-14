@@ -2960,6 +2960,44 @@ exist: a success with output, an unknown revision, an unknown option (Git's
 usage text, several lines, trimmed) and a `-C` that cannot be entered each get
 the answer `probe_git` gives the same command, to the byte.
 
+## `fn the_gate_role_probe_stand_in_writer_leaves_no_writer_in_another_threads_fork() {`
+
+Linux only. The deterministic witness of pull request #368's repair of
+`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`, described under the gate role's test
+below. It runs `gate_probe_writer_helper` in an isolated child through
+`agent::proc::test_support::run_test_isolated`, with no added environment
+variables and a 180-second deadline, and asserts that the child succeeded and that its output
+reports "1 passed", as `runner::host::tests`'
+`the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork` does for the
+container relay writer. The child keeps the oracle's held fork away from the
+other tests of this process. The gate role's section below names this test as
+the deterministic witness of the repair's writer half. With `write_the_gate_probe_stand_in`
+writing through `fs::write(git, script)` instead of
+`runner::container::write_program_in_its_own_process`, it fails, and the child's
+output carries the oracle's "the fork inherited a shim writer" with a
+`WouldBlock` read; with the helper put back, it passes.
+
+## `fn gate_probe_writer_helper() {`
+
+Linux only, and ignored: the child the test above runs. In a scratch tree from
+`temp_engine_scratch` it calls
+`runner::host::tests::inherited_writer::writes_leave_no_writer_in_another_threads_fork`
+with a FIFO path whose name holds shell metacharacters, and a closure that
+writes the oracle's `shim_script(marker)` there through
+`write_the_gate_probe_stand_in`, the writer the gate role's cases use. The FIFO
+is what the gate role's section below found missing: its pipe is smaller than
+the script, so the write stays open, blocked, while another thread of this
+process forks, and the window is entered by construction rather than by racing.
+Once the writer is done, the reader sees end-of-file only if that fork holds no
+writer of the FIFO. The writer helper writes from a process of its own and leaves
+none there; a write from this process leaves its descriptor in the fork, the
+read answers `WouldBlock`, and the oracle fails. The oracle reads the inherited
+writer, not `ETXTBSY`, since a FIFO cannot be executed: what it shows is that
+the stand-in's writer leaves no descriptor for a fork to keep, which is the
+writer half of the repair and holds without the isolated child's single test
+thread, because the oracle makes its own fork from another thread. The stand-in
+writer's `fs::set_permissions` gives the FIFO mode 0700 as it does the stand-in.
+
 ## `fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {`
 
 Unix only. The call site itself: the gate role (`v1_role_probe_gate`, this test
@@ -2983,6 +3021,68 @@ from a Git `SIGKILL` ended (no inherited disposition can ignore it), unfinished,
 or with an empty line after it, and for the gate's own registration and an
 unrelated failure. With the call site put back to `probe_git`, the first case
 records `FAIL`.
+
+The cases and their assertions run in `the_gate_role_probe_cases_child`, an
+isolated child that this test starts through
+`agent::proc::test_support::run_test_isolated` under a 300-second deadline,
+naming in `GATE_PROBE_TREE` (`UPSTROKE_W924_GATE_PROBE_TREE`) the scratch
+directory the child works in, and the test asserts that the child passed and
+recorded that it reached the end of its cases. The child writes the stand-in
+through `write_the_gate_probe_stand_in`, never through a descriptor of its own
+process: `runner::container::write_program_in_its_own_process` writes it from a
+process of its own, because a fork another thread made while this process held
+it open for writing kept that writer until it execed, and the gate role's exec
+of the stand-in failed with "Text file busy"
+(`CI-FLAKE-GATE-PROBE-TEXT-FILE-BUSY`), and `fs::set_permissions` then gives it
+mode 0700, as before that fix (the helper makes it 0755). The helper's end
+waits for its reaper without a bound. This test's call to it is bounded, by the
+isolated child it runs in and that child's deadline (`FUA-I4-RELAY`). Before #368
+the test wrote the stand-in with `fs::write`; only #368's first review round
+called the helper from the test's own process. Other callers of the helper are
+not all bounded: ordinary tests call it with no outer bound at nine sites,
+through `git_shim`, `a_fake_cmd` and `delivery_program` and two Docker-stub
+tests in `src/engine/tests.rs`, through `capability_control` (two sites) and one
+Docker-stub test in `src/runner/container/tests.rs`, and one Docker-stub test in
+`src/runner/container/exec/tests.rs`, recorded as finding
+`PR368-WRITER-HELPER-UNBOUNDED-CALLERS`.
+
+The two CI failures this repair answers each recorded "Text file busy". CI run
+41984755598, job 127102847397, `test (ubuntu-latest)`, 2026-11-05: the test
+panicked at `src/engine/tests.rs:11125:9` in the case `own-registration`, where
+the probe's record held
+`gate worktree-true FAIL Err("Text file busy (os error 26)")`
+and the case expected
+`FAIL Err("fatal: failed to read /r/.git/worktrees/upstroke-gates-1/commondir: Success")`;
+3676 passed, 1 failed. CI run 42976030457, job 130375210467, `test (ubuntu-latest)`,
+2026-11-11: the test panicked at `src/engine/tests.rs:11155:9` in the case
+`signal`, with three probes failing `Err("Text file busy (os error 26)")`; 3736
+passed, 1 failed. The race those runs met needs a fork made by another thread
+of the same test process while the stand-in is open for writing. This repair
+has two halves, and either one closes that window: the isolated child, which
+`run_test_isolated` runs with `--test-threads=1` (`src/agent/proc.rs`), so that
+no sibling test thread exists in it to fork while the write is open; and the
+writer helper, which never opens the stand-in in the test's process. Putting
+`fs::write` back while the cases stay in the isolated child would not bring that
+race back; putting the cases back into the shared test process with `fs::write`
+would. The second half has a cost: the helper runs through the process funnel
+once for each stand-in the child writes, and each such run ends by waiting for
+its reaper; if one stalls, the child is ended at its 300-second deadline and the
+test fails. A plain `fs::write` inside the isolated child has no such path. The
+helper is kept as a defence that does not depend on the test staying isolated.
+When `write_the_gate_probe_stand_in` writes the stand-in from the test's own
+process, `the_gate_role_probe_stand_in_writer_leaves_no_writer_in_another_threads_fork`
+(above) fails deterministically: it runs that writer under the inherited-writer
+oracle of `runner::host::tests`. That oracle needs a fork taken while the
+writer's descriptor is open. `fs::write` opens, writes and closes a regular file
+in one call. A write to a regular file can block when the device has to act, and
+a file on a filesystem that can hold a write could be used to place a fork
+inside it, but this tree has no practical, portable way to hold the stand-in's
+write open while another thread forks, so the witness points the same writer at
+a FIFO instead of the stand-in. The host oracle makes the window deterministic by
+blocking the writer on a FIFO. A FIFO cannot be executed (`execve` refuses it
+with `EACCES`), so that oracle cannot end in `ETXTBSY`. The host suite's
+`ETXTBSY` control opens a writer of its own, so it passes whichever writer made
+the file.
 
 ## `fn the_v1_include_names_the_managed_repository_however_its_path_is_spelled() {`
 

@@ -11037,11 +11037,76 @@ fn a_gates_worktree_setting_answers_what_the_probe_answers_when_nothing_tears() 
 }
 
 #[cfg(unix)]
-#[test]
-fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {
+fn write_the_gate_probe_stand_in(git: &Path, script: &str) {
     use std::os::unix::fs::PermissionsExt;
 
+    crate::runner::container::write_program_in_its_own_process(git, script);
+    fs::set_permissions(git, fs::Permissions::from_mode(0o700)).expect("an executable Git");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_gate_role_probe_stand_in_writer_leaves_no_writer_in_another_threads_fork() {
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::gate_probe_writer_helper",
+        &[],
+        Duration::from_secs(180),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()),
+        "the isolated inherited-writer witness ended within its bound: {ended}"
+    );
+    assert!(
+        ended.stdout.contains("1 passed"),
+        "the helper must run one test: {ended}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "subprocess helper; holds forked descriptors away from other tests"]
+fn gate_probe_writer_helper() {
+    let tree = temp_engine_scratch("gate-probe-writer");
+    crate::runner::host::tests::inherited_writer::writes_leave_no_writer_in_another_threads_fork(
+        &tree.path().join("gate probe fifo ' $name"),
+        |fifo, marker| {
+            write_the_gate_probe_stand_in(
+                fifo,
+                &crate::runner::host::tests::inherited_writer::shim_script(marker),
+            );
+        },
+    );
+}
+
+#[cfg(unix)]
+const GATE_PROBE_TREE: &str = "UPSTROKE_W924_GATE_PROBE_TREE";
+
+#[cfg(unix)]
+#[test]
+fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir() {
     let tree = temp_engine_scratch("w924-gate-probe");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "engine::tests::the_gate_role_probe_cases_child",
+        &[(GATE_PROBE_TREE, tree.path().as_os_str())],
+        Duration::from_secs(300),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "an isolated child ran the gate role's cases within its bound: {ended}"
+    );
+    assert!(
+        tree.path().join("ran").exists(),
+        "the isolated child reached the end of its cases: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "subprocess helper"]
+fn the_gate_role_probe_cases_child() {
+    let Some(tree) = std::env::var_os(GATE_PROBE_TREE).map(PathBuf::from) else {
+        return;
+    };
     let other = "fatal: failed to read /r/.git/worktrees/upstroke-gates-2/commondir: Success";
     let own = "fatal: failed to read /r/.git/worktrees/upstroke-gates-1/commondir: Success";
     let refused = format!("Err({other:?})");
@@ -11096,7 +11161,7 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
             "FAIL Err(\"fatal: w924 unrelated\")".to_owned(),
         ),
     ] {
-        let place = tree.path().join(case);
+        let place = tree.join(case);
         let here = place.join("upstroke-gates-1");
         let probe = place.join("probe");
         let bin = place.join("bin");
@@ -11107,9 +11172,9 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
         let calls = place.join("calls");
         let answered = place.join("answered");
         let git = bin.join("git");
-        fs::write(
+        write_the_gate_probe_stand_in(
             &git,
-            format!(
+            &format!(
                 "#!/bin/sh\n\
                  if [ \"$3 $4 $5 $6\" = 'config --worktree core.useReplaceRefs true' ]; then\n\
                  \x20 echo probed >> \"$UPSTROKE_W924_CALLS\"\n\
@@ -11122,9 +11187,7 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
                  fi\n\
                  exit 1\n"
             ),
-        )
-        .expect("the case's Git");
-        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("an executable Git");
+        );
         Command::new(std::env::current_exe().expect("this test binary"))
             .args([
                 "--exact",
@@ -11162,6 +11225,7 @@ fn the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_e
             "{case}"
         );
     }
+    fs::write(tree.join("ran"), "").expect("the child's record that its cases ran");
 }
 
 #[test]
