@@ -1607,12 +1607,31 @@ The image variable that is **not** a credential location, so "the
 withheld keys were overridden" is distinguishable from "the image
 environment was wiped".
 
+## `const ROOM_FOR_A_SLOW_CONTAINER_START: Duration = Duration::from_secs(30);`
+
+The deadline the two real-Docker tests that run an invocation to its timeout give it: the
+never-read invocation of `real_docker_a_containerized_program_reads_its_exact_stdin_then_eof` and
+the gate of `real_docker_a_container_contains_a_daemonised_descendant`. An invocation's deadline
+also covers Docker creating and starting its container, and a start the deadline overtakes is
+refused rather than timed out. The two tests had three seconds, so a slow daemon turned the
+timeout they wait for into the runner's refusal of `start`; thirty seconds is room for a slow
+start and still far below what either program sleeps (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+One value for both, named for what it is for, and
+`real_docker_a_container_slow_to_start_still_reaches_its_timeout` is what fails if it shrinks
+back. The descendant test's probe container has the same deadline for the same reason, though
+it reaches it only where its process cannot be seen (`let probe = gate_request(`, below).
+
 ## `fn skipped(reason: &str) {`
 
-What a Docker-gated test does when there is no runtime.
+What a Docker-gated test does when there is no runtime, or when the
+runtime's processes cannot be seen from this host.
 
 It **reads** the reason rather than returning silently, so a skip that
-stopped saying why would not compile.
+stopped saying why would not compile. It takes exactly the two reasons
+`fake` writes: `absent_reason`, the `docker_gate` refusal every gated test
+can meet, and `processes_out_of_sight_reason`, which only
+`real_docker_a_container_contains_a_daemonised_descendant` gives, for the
+cause its probe container establishes.
 
 ## `fn no_image(reason: &str) {`
 
@@ -1691,6 +1710,12 @@ two collided with `Conflict. The container name … is already in use`.
 ## `("credenv", "01KZR3BGATED00000000000001"),`
 
 Repair R3b, with its own round prefix for the reason above.
+
+## `("slowstart", "01KZCFGATED000000000000001"),`
+
+The run id of `slow_docker_start_child`'s container, for
+`real_docker_a_container_slow_to_start_still_reaches_its_timeout`. `CF` for the CI flake it
+guards, `CI-FLAKE-REAL-DOCKER-START-DEADLINE`, a prefix of its own for the reason above.
 
 ## `struct LeaveNoResidue {`
 
@@ -1807,9 +1832,14 @@ Root's D-C on a real runtime, three containers:
   sent;
 - a program that reads 16 bytes of a mebibyte and exits 7: the run reports
   exit 7, promptly, and the undelivered rest holds nothing;
-- a program that never reads a mebibyte of input, with a three-second
+- a program that never reads a mebibyte of input, with a thirty-second
   timeout: the timeout path stops and removes it, with the write still
   pending, within a bound.
+
+The timeout also covers Docker creating and starting the container, so it is
+`ROOM_FOR_A_SLOW_CONTAINER_START`, thirty seconds: room for a slow daemon to
+start it, and still far below the program's six-hundred-second `sleep`
+(`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
 
 ## `struct MountedReal {`
 
@@ -2112,31 +2142,127 @@ host process-group kill (`agent::proc`'s whole subject), and it is
 observed **in the host's own process table** rather than by timing: a
 container's processes are ordinary host processes in another namespace,
 so `/proc/<pid>/cmdline` can name them. Each `sleep` carries a marker
-argument nothing else on the machine uses.
+argument this run computes from its own pid, pid namespace and clock,
+so another run sharing it is ruled out by construction rather than left
+to chance, short of a wall clock set back to the nanosecond (see the
+markers below; `CONTAINER-DESCENDANT-TEST-SCANS-THE-WHOLE-HOST`).
 
 The intersection: {leader, detached descendant} × {container running,
 container reclaimed}. The two "running" cells are the control — without
 them a test in which nothing ever started would pass.
 
-## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `const LEADER_MARKER: &str = "903222";`
+It runs on **Linux only** (`#[cfg(target_os = "linux")]`), not on every
+Unix: it observes the container's processes through the host's own
+`/proc`, which holds only where the containers share the host's kernel.
+Docker Desktop and Lima on macOS run them inside a Linux virtual
+machine, and the macOS host has no `/proc` at all, so `pids_with` would
+find nothing, the controls in `let seen` would fail after the
+thirty-second invocation, and the failure would describe the host rather
+than the container (`PR366-MACOS-PROC-SAMPLER`). GitHub's macOS runners
+have no Docker, so CI never ran it there. Nothing outside the test is
+used by it alone: `SetOnDrop` and `pids_with` live in its body, and every
+helper it borrows is also used by tests compiled on every platform.
 
-Distinct markers, so the leader and the descendant are told apart by
-value and not by order.
+Linux is not enough on its own either. `docker_gate` accepts any daemon
+that answers, and a Linux client can reach one whose containers this
+host's `/proc` does not hold: a remote daemon (`DOCKER_HOST`), or one in
+another PID namespace (rootless Docker, a virtual machine). There the
+controls would fail exactly as on macOS, although the container contained
+everything. So before the measured run a probe container establishes that
+this host sees the daemon's processes, and where it does not the test
+**skips** with that cause, or fails under `UPSTROKE_REQUIRE_DOCKER`
+(`PR366-LINUX-DOCKER-PROC-TOPOLOGY`; `let probe = gate_request(`, below).
 
-They are the **durations** the two `sleep` calls are given, so they
+## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let clock = std::time::SystemTime::now()`
+
+The two markers, the run's own. `pids_with` reads every process on the
+host, so a fixed pair (it was `903222` and `903111`) was shared by every
+run of the suite on one machine: a run that had removed its container
+found another run's live `sleep` and reported it as its own leaked
+descendant (`CONTAINER-DESCENDANT-TEST-SCANS-THE-WHOLE-HOST`).
+
+Each marker is a decimal number. Its integer part is one role digit
+(`1` the leader, `2` the descendant, `3` the probe) and this process's id in seven
+digits (the kernel's ceiling, 4 194 304, fits). Its fraction is the
+inode of this process's pid namespace (`/proc/self/ns/pid`) in twenty
+digits and the wall clock's whole reading, nanoseconds since the epoch,
+untruncated, in thirty-nine. Every field has a fixed width, so no two
+(role, pid, namespace, clock) tuples spell the same string.
+
+- Two runs alive at once differ by construction: in one pid namespace
+  their pids differ, and in two live namespaces the namespace inodes
+  differ, so the local pid each sees may be the same without the
+  markers being so.
+- A run and a `sleep` left by an earlier run whose pid and namespace it
+  reuses differ by the clock, which is kept whole rather than wrapped,
+  so they meet only if the wall clock has been set back to the very
+  nanosecond the earlier run read.
+
+That last case is the one the construction does not rule out; nothing
+else shares the markers. Distinct roles, so the leader, the descendant
+and the probe are told apart by value and not by order.
+
+They are the **durations** the three `sleep` calls are given, so they
 have to be numbers — `sleep 999111r3b` answers `invalid number` and
 exits 1, which is a container that ends before its timeout and a
-fixture that measures nothing. Two implausible second counts, far
-apart in value, are what makes them recognisable in `/proc` without
-making them unrunnable.
+fixture that measures nothing. The fraction is where the identity
+goes so that the duration itself stays an ordinary one: the integer
+part is at most about 3·10⁷ seconds, far beyond the thirty-second
+timeout, and a `sleep` that parses fractions reads the long tail as a
+fraction of a second. A `sleep` that refused it would exit at once: the
+probe's assertion that its invocation timed out would fail, rather than
+the test skipping as if the host could not see it, and past the probe
+the controls in `let seen` would fail rather than pass vacuously. Where
+`/proc` is missing the namespace reads as zero, but there `pids_with`
+finds nothing either and those controls fail the same way.
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `fn pids_with(marker: &str) -> Vec<String> {`
 
 Every pid whose argv contains `marker`, read from `/proc`.
 
-`contains` over argv entries rather than a substring of the whole
-buffer, so this process's own command line — which carries the
-marker as a literal in the binary, not in argv — cannot match.
+Equality with whole argv entries rather than a substring of the whole
+buffer, so the `sh -c` that runs the fixture, whose single script
+argument mentions both markers, cannot match; only the `sleep`s, which
+take a marker as an argument of its own, do. It reads the whole host on purpose: the
+container's processes are host processes in another namespace, and the
+markers being the run's own is what makes the whole host safe to read.
+
+## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let probe = gate_request(`
+
+The premise, established rather than assumed: this host sees the
+daemon's container processes. `PR366-LINUX-DOCKER-PROC-TOPOLOGY`: on a
+Linux client of a remote daemon (`DOCKER_HOST`) or of one in another PID
+namespace (rootless Docker, a virtual machine), `pids_with` finds nothing,
+and without this the controls in `let seen` failed and blamed a
+containment that was correct.
+
+One container of the discovered image, through the same runner and so
+under the same private root, runs `sleep` with the probe marker, as its
+own gate invocation (`gate_id(1)`, so its container name is not the
+measured one's). A sampler looks for the marker every 50 ms and cancels
+the invocation the moment it finds it, so where the host can see, the
+probe costs one container start and its removal, and the measured run
+then goes ahead as before. The cancelled invocation is the runner's own
+cleanup, the path the measured run's timeout takes: it stops and removes
+the container and reports `ProcessFate::Gone`, which is asserted, and
+`LeaveNoResidue` still covers both containers if anything panics.
+
+The bound is the probe's own deadline, `ROOM_FOR_A_SLOW_CONTAINER_START`:
+the time to find a process is counted from before Docker creates the
+container, so a shorter one would turn a slow start into a skip, or into
+the runner's refusal of `start` (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+Only a host that cannot see the process waits it out. The sampler stops
+when the invocation returns, by the same `SetOnDrop` guard the measured
+run's sampler uses.
+
+What decides the skip is the pair of results. An invocation that timed
+out without its marker ever being seen ran its `sleep` to the deadline
+where this host could not see it: the test returns through `skipped` with
+`processes_out_of_sight_reason`, and under `UPSTROKE_REQUIRE_DOCKER` it
+fails instead, as `docker_gate` and `no_image` do when their prerequisite
+is missing. Anything else that is not the cancellation is a failure and
+never a skip: a `sleep` that ended before its deadline observed nothing,
+and an invocation that failed says nothing about visibility.
 
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let mut request = gate_request(`
 
@@ -2145,12 +2271,29 @@ own timeout is what stops the container, which is
 `slice_contract.cancellation`: "timeout or shutdown stops and removes
 the container".
 
+The timeout also covers Docker creating and starting the container, so it
+is `ROOM_FOR_A_SLOW_CONTAINER_START`, thirty seconds: room for a slow
+daemon to start it, and still far below the two `sleep`s, each more than
+ten days long (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+
 ## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let seen = std::thread::scope(|scope| {`
 
 The controls, sampled from another thread while the invocation is in
 flight: both processes really are on this machine.
 
-## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let leader = pids_with(LEADER_MARKER);`
+The sampler polls every 50 ms until it has seen both or `returned` is
+set. A `SetOnDrop` guard held across `run_blocking` sets it when the
+call ends either way: on return, before unwrapping or asserting on the
+result and before the join, and on unwind, when the guard is dropped as
+the panic leaves its block. So neither an invocation that fails nor one
+that panics can leave the scope waiting on a sampler with nothing to
+see; the scope joins the sampler and the panic carries on. It has no
+deadline of its own because the invocation's end already bounds it,
+and one of its own could expire during a slow Docker start the
+thirty-second timeout still allows, failing the controls although both
+processes ran (`CI-FLAKE-REAL-DOCKER-START-DEADLINE`).
+
+## `fn real_docker_a_container_contains_a_daemonised_descendant…` › `let leader = pids_with(&leader_marker);`
 
 The container is gone, and so is everything it contained. The
 descendant left the leader's session, so a cancellation that killed
@@ -2161,6 +2304,156 @@ only the leader's process group would leave it here.
 The descendant first: it is the invariant's subject, and a leader
 assertion that fires before it would report the wrong thing about a
 cancellation that left both alive.
+
+## `fn real_docker_a_container_descendant_test_is_gated_to_linux() {`
+
+The regression for `PR366-MACOS-PROC-SAMPLER`: the attributes directly
+above `real_docker_a_container_contains_a_daemonised_descendant` include
+`#[cfg(target_os = "linux")]`. Put `#[cfg(unix)]` back and this fails.
+It reads this module's source rather than running Docker, and carries no
+gate of its own, so it holds the rule on every platform. That includes
+macOS, the one platform where the rule matters and CI has no Docker to
+show it. The signature it looks for is built with `format!` so that this
+test's own text never spells `fn <that name>(`. `every_gated_test_of_this_lane_is_counted`
+and the effects contract mapping both look tests up by that spelling.
+
+`attributes_of_test` reads the source with its comments and its string, character, byte-string
+and raw-string literals blanked by `effects::blank_comments_and_strings`
+(`PR366-CFG-SCAN-LITERAL-SPOOF`). It used to search the raw text for the first spelling of the
+signature, so a block comment or a raw string earlier in the file holding a Linux-gated copy of
+it satisfied the scan while the real function was still `#[cfg(unix)]`. The blanker keeps every
+byte where it was and every `\n`, so the signature is found and the attribute lines are told
+apart in the blanked text, and each attribute line is read back from the original at the same
+offsets: blanked, `"linux"` is only spaces. `real_docker_a_container_descendant_gate_reads_lf_and_crlf_alike`
+holds an LF and a CRLF fragment, and
+`real_docker_a_container_descendant_gate_reads_past_a_decoy_in_a_comment_or_a_raw_string` puts
+each decoy, LF and CRLF, before a `#[cfg(unix)]` copy. Its control checks that the decoy is the
+signature's first raw spelling, and the scan must report the real function's `#[cfg(unix)]`.
+
+## `fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {`
+
+The regression for `CI-FLAKE-REAL-DOCKER-START-DEADLINE`: a container whose `docker start` is
+held five seconds still reaches the timeout `ROOM_FOR_A_SLOW_CONTAINER_START` gives its
+invocation, which ends in a timed-out output and not in the runner's refusal of `start`. Put
+three seconds back in the constant and this test fails, its helper reporting the refusal where it
+expects the output; at thirty it passes. Measured before the commit: at three seconds the
+helper's `expect` met the runner's refusal of `start`, its container "still created when the
+invocation's deadline passed, so it never started", while the other four
+`real_docker_a_contain` tests passed; restored to thirty, all five passed together in 43 seconds.
+
+It skips exactly as every other real-Docker test does: through `docker_gate`, which is why it is
+registered in `DOCKER_GATED_TESTS`, and through `discover` when the runtime holds none of
+`PREFERRED_IMAGES`. It does not look for the real `docker` itself: it takes its own inherited
+`PATH`, an `OsString` from `std::env::var_os` and never a string, so a `PATH` that is not UTF-8
+is carried unchanged, and the stand-in defers to the ordinary command search under that `PATH`
+(below). No path to the program is computed or written anywhere. It makes a scratch tree with an
+empty `bin` in it, and runs `slow_docker_start_child` under `run_test_isolated`, bounded at two
+minutes: this test binary again, selecting that one ignored test with `--exact`, `--ignored` and
+`--nocapture`, with a `PATH` that is the scratch `bin` and then this process's own, and told the
+scratch tree (`UPSTROKE_TEST_SLOW_START_SCRATCH`), this process's original `PATH`
+(`UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`) and the stand-in's mark, `delayed-starts` in the
+scratch tree (`UPSTROKE_TEST_SLOW_START_MARK`, an `OsStr` of a `PathBuf`). `DockerCli` runs `docker` by name, so a stand-in
+first on the child's `PATH` is the program every runtime question in it reaches, and only a
+child can be given a `PATH` of its own. The parent requires the child's success and libtest's
+`1 passed`, a misnamed helper running no test at all, and prints the child's output when either
+is missing.
+
+It costs about thirty-five seconds, most of it the thirty-second timeout itself, inside which the
+five-second hold falls; the rest is the helper's repository and the container's removal.
+
+What it shows holds while the runner starts a container with `start` as `docker`'s first
+argument, as it does today (`docker start --attach --interactive` for an invocation with input):
+a start spelled any other way would pass through the stand-in unheld, and this test would no
+longer fail at three seconds. That case, and a hold that never happened, no longer pass
+silently: the helper fails when the stand-in left no mark of a delayed `start`, and when a mark
+measures a hold shorter than the one asked for.
+
+Two mutations were applied, observed and restored before the commit. With
+`ROOM_FOR_A_SLOW_CONTAINER_START` at three seconds this test failed, the helper's `expect`
+meeting the runner's refusal of `start` ("still created when the invocation's deadline passed").
+With the stand-in's `sleep` replaced by `false` it failed too, the helper's `expect` meeting the
+refusal of a `start` whose client "ended (exit code 1)": the stand-in's own failure, with
+`docker` never run. Both were applied again once the hold had stopped reading the clock and run
+`sleep` under the parent's `PATH`: at three seconds the same refusal ("still created when the
+invocation's deadline passed"); with `sleep` replaced by a program name that does not exist, the
+refusal of a `start` whose attached client "ended (exit code 1)", the stand-in failing when the
+command search found no such program, before it wrote the mark and without running `docker`.
+Once the hold ran `/bin/sleep` and the mark carried the measured delay
+(`PR366-SLOW-START-NOOP-SLEEP`), one more was applied and restored: with the stand-in's
+`/bin/sleep 5` made `/bin/sleep 0`, a hold that succeeds at once as the ambient `sleep` the finding
+describes would, the helper failed at the mark, on `"delayed 0"`, and the other six
+`real_docker_a_contain` tests passed.
+
+## `fn slow_docker_start_child() {`
+
+The isolated helper `real_docker_a_container_slow_to_start_still_reaches_its_timeout` runs.
+Ignored, so libtest never runs it in its own process.
+
+It asserts, with `std::env::var_os`, that its parent set `UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH`
+on it, and takes the mark's path from `UPSTROKE_TEST_SLOW_START_MARK` the same way, into a
+`PathBuf`. Its first act, before it starts any process, is to write the
+stand-in `docker` into the `bin` its parent put first on its `PATH`, and make it executable: a
+`/bin/sh` script that, when its first argument is `start`, holds it `SLOW_START_HOLD_SECONDS`
+(five) seconds and then, whatever the arguments, replaces itself with
+`PATH="$UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH" exec docker "$@"`.
+
+The hold reads a clock, runs `/bin/sleep 5`, reads the clock again, and appends one line,
+`delayed <seconds>` with the seconds between the two readings, one `start` to a line, to the file
+`$UPSTROKE_TEST_SLOW_START_MARK` names. If a reading, the sleep or the append does not succeed,
+the script prints why on its standard error and exits 1 without running `docker`, so a hold that
+fails is a refused `start`, never a start that ran at once.
+
+`sleep` is named by its absolute path, `/bin/sleep`, so no `PATH` can supply another
+(`PR366-SLOW-START-NOOP-SLEEP`). It used to run under the parent's `PATH`, so it was found where the
+parent's `docker` is. That let a `sleep` on that `PATH` that succeeded at once write the mark with
+no delay, and the mark was then a fixed `delayed 5`, so this test passed with the deadline put back
+to three seconds. A host with no `/bin/sleep`, such as NixOS, whose `/bin` holds only `sh` and
+`env`, fails the stand-in before its mark: loudly, never holding nothing unnoticed. Nor is
+`sleep`'s exit status the evidence of the hold any more: the mark carries the delay as measured,
+and the helper asserts it (below), so a hold that returned early fails whichever program held it.
+
+`/bin/sh` has no waiting of its own (`read -t` is not POSIX and `dash` lacks it), so the external
+`sleep` is the hold, and it has no clock of its own either (`dash` has no `SECONDS`). Where
+`/proc/uptime` is readable the clock is the whole seconds of its first field, read with the `read`
+builtin: the kernel's time since boot, which a step of the wall clock does not move, so it cannot
+read a correct five-second hold as three. Elsewhere, the macOS hosts among them, it is
+`/bin/date +%s`, the wall clock, where a clock stepped back during the hold can still read it short
+and fail the test, the reason the script once read no clock at all; it is the one clock those
+hosts' `/bin/sh` reaches without a program found on a `PATH`. Whole seconds lose nothing the
+assertion needs: the whole-second parts of two readings at least five seconds apart differ by at
+least five.
+
+It runs `docker` by name under the parent's original `PATH`, so the system's own command
+search picks the program exactly as it would with no stand-in, skipping a `docker` that is not
+executable as that search does; the test never decides which program that is. The script's
+text holds the variable's name and not the `PATH` itself: the parent set the variable, as an `OsStr`, on this
+process, which is the process whose runner runs the stand-in, and the runner starts `docker`
+(`docker_command`) with the environment it inherits, so the stand-in reads the `PATH`'s bytes as
+they are, with nothing to quote. Every other
+question reaches the daemon unchanged, the held start is the real one once the hold ends, and no
+shell is left between the runner and the attached client it supervises. The helper then asserts that the stand-in is the
+`docker` this process resolves, so a `PATH` that put it anywhere but first fails here rather than
+holding nothing.
+
+The helper writes the stand-in, and not the parent, because the parent shares libtest's process
+with tests that start children: a child forked while the new file is open for writing inherits
+that descriptor until it execs, and a file any process holds open for writing cannot be executed
+(`ETXTBSY`). This process runs the one test, and nothing in it has started a child yet.
+
+Then one invocation shaped like the never-read one of
+`real_docker_a_containerized_program_reads_its_exact_stdin_then_eof`: a worker running
+`sleep 600` with a mebibyte of input it never reads, under `ROOM_FOR_A_SLOW_CONTAINER_START`,
+through a `ContainerRunner` built as that test builds its own (the image `discover` finds,
+`real_policy`, `real_identity` over the scratch tree with the `slowstart` run id,
+`image_environment_of`, a `LeaveNoResidue` guard). The result must be an output, and one that
+timed out: a start the deadline overtakes is an error, which fails the `expect`.
+
+After the invocation, the helper reads the mark. A mark that is missing or empty fails with "no
+`docker start` was delayed": the timeout was reached without the slow start this test exists to
+hold. Every line must be `delayed` and a whole number of seconds no smaller than
+`SLOW_START_HOLD_SECONDS`: the hold as the stand-in's clock measured it, at least as long as the
+`/bin/sleep` it asked for. A line that is anything else, a shorter delay among them, fails, naming
+the line.
 
 ## `fn every_gated_test_of_this_lane_is_counted() {`
 
@@ -2196,6 +2489,12 @@ PR12's D-C.
 Root's recorded-mounts disposition (2026-11-02): the three mount witnesses
 it requires, registered here, in `GATED_RUNS` (`mountro`, `mountrw`,
 `mountresume`) and in `DOCKER_GATED_TESTS`. Sixteen in all.
+
+## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_a_container_slow_to_start_still_reaches_its_timeout",`
+
+The regression for `CI-FLAKE-REAL-DOCKER-START-DEADLINE` (2026-11-11), registered here, in
+`GATED_RUNS` (`slowstart`, for its helper's container) and in `DOCKER_GATED_TESTS`. Seventeen in
+all.
 
 ## `fn removal_in_progress_diagnostic(name: &str) -> String {`
 
@@ -2987,6 +3286,242 @@ helper, reaper and backstop has ended, then every descendant collected. The harn
 collector and the coordinator handle are adapted from an earlier candidate's: the
 coordinator now also takes its worktree lock, the admission asks include the different
 run's, and the handle fails closed (below).
+
+## `#[cfg(target_os = "linux")]` › `fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {`
+
+Why this helper answers only from a pass over a process's tasks that nothing changed under
+(`CI-FLAKE-HANDOFF-CHILDREN-LIST-RACE`, a defect of the test helper: no product code reads
+these lists). The helper lists a process's tasks, `/proc/<pid>/task`, and then reads each
+listed task's children list. The listing and the reads are separate system calls, not one
+snapshot, and a thread can end between them. In CI run 42918059287, job 130185502003 (the
+Ubuntu test job of pull request #360, a change to documentation alone),
+`handoff_harness_child`'s `expect` on the coordinator's children lists panicked on a list
+that was not found: no such file or directory. Which of the coordinator's threads had ended
+is not known. One candidate is the thread of `handoff_coordinator_child` that reports the
+backstops: it returns as soon as its report is written, and that report is what the harness
+waits for before it reads the lists.
+
+**A vanished task is not read as a task with no children.** When a thread ends, the kernel
+hands its children to another live thread of the same process, and that may be a thread
+whose list the pass has already read. A thread that ends during a pass shows in one of two
+ways. Its list is not found, when it ended before the list was opened. Or its list is read
+empty, when it ended after the list was opened: the read of the already-open file succeeds
+with nothing in it. The first repair answered only the first way, by listing again on a
+not-found read. A review reproduced the second: that repair took the empty read as the
+thread's answer and made no further pass, and the child the thread had handed to a task
+already read was in neither list.
+
+**A task still listed may already be ending.** The second repair compared the two listings
+of a pass, which catches a thread that has left the listing. A second review reproduced what
+that misses: the kernel hands an ending thread's children on (`exit_notify`) before it takes
+the thread out of the task listing (`release_task`). So: list A and B; read A's list, empty;
+B begins to end and its child goes to A while B is still listed; read B's list, empty; list
+A and B again. The two listings are equal, the pass counted, and the child was in neither
+answer.
+
+**A task id may be reused.** Until `PR366-TID-REUSE-FALSE-STABILITY` the listings were of
+task ids alone, and the kernel gives a gone thread's id to a later one. So: list A and B;
+read A's list, empty; B ends after its list was opened, hands its child to A, already read,
+and its list reads empty; a new thread then takes B's id before the states are asked and
+the tasks listed again. Both listings hold A and B, the new B is running normally, the pass
+counted, and the child was in neither list. A task is therefore its id together with its
+start time: the `starttime` field of its own `/proc/<pid>/task/<tid>/stat`, read as
+`stat_of` reads a process's, after the last `)`, the twentieth whitespace-separated field
+(index 19). A thread that takes a reused id started after the thread that had it, so the
+second listing holds B with another start time, differs from the first, and the pass is
+discarded. A task whose `stat` has gone while the tasks are listed (not found, or `ESRCH`,
+as for the state below) is left out of that listing. That loses nothing: its `stat` goes
+when the kernel releases it (`release_task`), after it has handed its children on, and
+every list of the pass is read after the listing. Any other failure to read a `stat`, a
+`stat` with no twentieth field after the command, or a start time that does not parse is
+an error returned at once. The children list and the state are read through the id alone;
+the start time only tells the tasks of two listings apart.
+
+**The rule.** `children_in_passes` holds it, apart from the filesystem. A pass lists the
+tasks, each by its id and start time, reads every listed task's list, asks of every listed
+task whether it is still running normally, and lists the tasks again. It counts only if no
+read failed with not-found, every listed task was still running normally when asked, after
+the reads, and the second listing holds exactly the tasks of the first, ids and start times
+both. A thread that ended during the pass is missing from the second listing, whichever way
+its read went, or, if a new thread has taken its id, is listed with another start time; a
+thread that began to end during the pass and is still listed is reported as not running
+normally. A pass that does not count is discarded whole, the lists it did read included,
+and another is made, within the same five, after a pause. A pass that counts answers its
+children sorted and without repeats.
+
+**The pauses.** A thread that is ending stays listed, in its dead state, until the kernel
+releases it, and it can be descheduled in that window. Five passes made one straight after
+another take a few microseconds, so all five could see the same ending thread, be
+discarded, and end in the error, which callers that `expect` the helper turn into the
+intermittent failure this repair set out to remove. So between a discarded pass and the
+next the helper waits, and the wait grows: 1 ms before the second pass, 5 ms before the
+third, 20 ms before the fourth and 50 ms before the fifth, about 76 ms in all, and none
+after the fifth. The waits are a margin for the release, not a measurement of it.
+
+**Running normally,** as the helper reads it, is the state field of the task's own
+`/proc/<pid>/task/<tid>/stat`, the first field after the command, which closes at the last
+`)`. A task whose state is zombie (`Z`) or dead (`X`, or `x` on older kernels) is ending,
+and so is a task whose `stat` cannot be read because it has gone (not found, or `ESRCH`).
+Every other state, sleeping and stopped included, is running normally. Any other failure to
+read the state, or a `stat` with no state field, is an error returned at once. The kernel
+sets an ending thread's exit state in the same step, `exit_notify`, in which it hands its
+children on. So if a thread's state, asked after every list was read, is still not an exit
+state, it had not handed its children on when its own list was read, and they were in that
+list; and if it had handed them on before that, its state, asked later, says so. The state
+is read through the task's id, so where a new thread has taken the id it is that thread's
+state, running; it is the start time in the second listing, not the state, that tells the
+new thread from the one listed first.
+
+**The bound.** At most five passes are made. One more pass answers the interleaving that was
+seen, and the rest absorb a few threads ending in quick succession; five is that allowance,
+not a measurement. If the fifth pass does not count either, the helper returns an error that
+says what changed in it, the lists not found, the tasks not running normally and the two
+listings, and never an answer; a kernel with no children lists at all fails the same way,
+after five passes. Every other failure is returned at once, as before: a task directory that
+cannot be listed (as when the process itself is gone), a list or a state that fails for any
+other reason, a start time that cannot be read for any reason but the task's `stat` having
+gone, and a child that does not parse as a pid. Every caller therefore still
+receives an error for a list that stays unreadable, and what each does with one is
+unchanged. Each error names the task directory, `/proc/<pid>/task`, and every path is built
+by joining `Path` components, never by formatting.
+
+**What remains outside the rule.** A process's main thread that ends before its other
+threads stays listed as a zombie until the whole process ends. Under this rule every pass
+over such a process is refused, so the helper answers it with an error after five passes,
+never with children: it fails closed, and no child is lost to it. No process this harness
+reads is known to end its main thread first. The argument that the state closes the
+hand-off window is read from the kernel's exit path, not observed in a run: the reads of
+the lists and of the states take no lock in common with the exit, so it rests on the order
+of the steps in `exit_notify`, not on one snapshot of the process. The start time is
+counted in clock ticks since boot, so a thread that took a reused id in the same tick as
+the thread that had it would be listed as the same task; the kernel hands ids out in turn
+through the whole id space before it reuses one, so that would need the space cycled
+within one tick. That too is read from the kernel, not observed. And, as before, a child
+forked during a pass by a thread already read is not in the answer: a list read is
+discovery, never evidence that no child remains.
+
+**What witnesses it.** The interleavings cannot be produced on demand on a live process, so
+the rule is tested apart from the filesystem: the tests below drive `children_in_passes`
+with scripted closures, a task id reused between the listings of a pass included. The
+reading of the start time from `stat` is not scripted; it runs only where the harnesses
+call `children_of` on live processes.
+
+## `#[cfg(target_os = "linux")]` › `fn children_in_passes<T: Ord + std::fmt::Debug>(`
+
+The rule of `children_of`, over four closures: `list_tasks` lists a process's tasks,
+`read_children` reads one task's children list, `running_normally` says whether one task
+is still running normally, neither ending nor gone, and `pause` waits the time it is given.
+`children_of` gives it the three readers of the proc filesystem: each entry name of
+`/proc/<pid>/task`, which is a task id, paired with the start time in that task's `stat`
+(a task whose `stat` has gone is left out); the text of `<id>/children`; and the state
+field of `<id>/stat` (zombie, dead, or a `stat` gone is not running normally); and, as
+`pause`, `std::thread::sleep`. Both reads go through the id alone. The core chooses the waits, 1, 5, 20 and 50 ms, and asks
+`pause` for the next one before each pass after the first, that is after each discarded
+pass that has a pass after it, so at most four pauses and none after the fifth pass. The
+scripted tests give a `pause` that records the wait it is asked for and does not sleep.
+A read's error keeps its kind, which is how a not-found read
+is told from every other failure. After a pass's reads the core asks `running_normally` of
+every task of the first listing, in order, and only then lists the tasks again; a task
+reported not running normally discards the pass, and a failure to answer is returned at
+once. The two listings of a pass are compared as sets, so two tasks are the same only if
+every part of them is equal: for `children_of`, id and start time both. The task is
+generic, so the tests below name their tasks (`"A"`, `"B"`, a number, or a name paired
+with a start time, `("B", 2)`) and read no proc filesystem. The core's errors name the
+task; `children_of` puts the task directory in front of each.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened() {`
+
+The review's interleaving, scripted. The first listing holds A and B. A's list reads empty;
+B's list, opened before B ended, reads empty too, and B's child, 4242, is now A's, whose
+list this pass has already read; the second listing holds only A. The next pass lists A,
+reads A's list holding 4242, and lists A again. The core must answer 4242 from that second
+pass: four listings, and the reads of A, B and A in that order.
+
+Measured witness, restored byte-for-byte: with the comparison of the two listings made
+`if false`, so that a pass counts without it, this test fails at its first assertion,
+`left: Ok([])` against `right: Ok([4242])`: the first pass counted and the child was lost.
+The test below with tasks changing under every pass fails too, answering `Ok([4242])` where
+the error is required; the not-found test still passes. Its `running_normally` answers every
+task running, so the listing comparison alone discards its first pass.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_id_is_reused_between_the_listings() {`
+
+`PR366-TID-REUSE-FALSE-STABILITY`'s interleaving, scripted, each task a name paired with a
+start time. The first listing holds `("A", 1)` and `("B", 1)`. A's list reads empty; B's
+list, opened before B ended, reads empty too, and B's child, 4242, is now A's, whose list
+this pass has already read. A new thread then takes B's id: the second listing holds
+`("A", 1)` and `("B", 2)`, the same ids, B's with a new start time. `running_normally`
+answers every task running, as the state read through B's id, now the new thread's, would.
+The core must discard that pass for its listings alone and make another: it lists
+`("A", 1)` and `("B", 2)`, reads A's list holding 4242 and B's empty, lists the same two
+tasks again, and answers 4242: four listings, and the reads of `("A", 1)`, `("B", 1)`,
+`("A", 1)` and `("B", 2)` in that order.
+
+Measured witnesses, each restored byte-for-byte. With the first pass's second listing
+scripted as listings of ids alone would see it, `("B", 1)` in place of `("B", 2)`, this test
+alone fails, at its first assertion, `left: Ok([])` against `right: Ok([4242])`: the first
+pass counted and the child was lost. With the core's comparison of the two listings made
+`if false`, this test fails at the same assertion with the same `left` and `right`, and so
+do the test of a task that ends after its list was opened and the test of tasks changing
+under every pass; the other three tests of the core still pass.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {`
+
+The second review's interleaving, scripted. The first pass lists A and B, reads A's list
+empty and B's list empty, and is then told that A is running normally and that B is not: B
+began to end after its list was read and handed its child, 4242, to A, whose list this pass
+had already read. B is still listed, so the second listing holds A and B again and agrees
+with the first. The core must discard that pass and make another: it lists A, reads A's list
+holding 4242, finds A running normally, lists A again, and answers 4242. The test records
+every call to the three closures in one log and requires that order exactly: listing, the
+reads, the states asked after the reads, the second listing, then the same for the second
+pass.
+
+Measured witness, restored byte-for-byte: with the core ignoring `running_normally`'s
+answer (its `Ok(true)` arm made `Ok(_)`, so a task reported ending is taken as running),
+this test fails at its first assertion, `left: Ok([])` against `right: Ok([4242])`: the
+first pass counted and the child was lost. Under this mutation
+`an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending` fails as
+well: its first pass then counts with the task still ending, and the recorded pauses are
+empty where `[1ms, 5ms, 20ms]` is required. The other four tests of the core still pass.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending() {`
+
+The ending thread that stays listed, scripted across passes. B has handed its child, 4242,
+to A and is reported not running normally on each of the first three passes, while both
+listings of each of those passes hold A and B and both lists read empty. On the fourth pass
+B is gone: both listings hold A alone, and A's list holds 4242. The core must answer 4242
+from that fourth pass, and must have asked `pause` for 1, 5 and 20 ms, one wait after each
+of the three discarded passes, growing. The test records every call to the four closures
+in one log and requires that order exactly, each discarded pass followed by its pause, and
+requires that every scripted listing, read and state was used.
+
+Measured witness, restored byte-for-byte: with the core's call to `pause` removed, so that
+the passes follow one another with no wait, this test fails at its first assertion, on its
+count of pauses, `left: []` against `right: [1ms, 5ms, 20ms]`. The test of tasks changing
+under every pass fails too, on its pauses, `left: []` against
+`right: [1ms, 5ms, 20ms, 50ms]`; the other four tests of the core still pass.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {`
+
+A read that fails with not-found makes another pass. The first pass's two listings agree, A
+and B both times, so the not-found read of B's list is the only thing that discards it, and
+its read of A, which found child 7, is discarded with it. The next pass lists A, reads A's
+list holding 8, and lists A again; its answer, 8 alone, is the one returned.
+
+Measured witness, restored byte-for-byte: with the not-found arm returning its error at once
+instead of discarding the pass, this test alone fails at its first assertion,
+`left: Err("the children list of task \"B\" was not found (entity not found)")` against
+`right: Ok([8])`.
+
+## `#[cfg(target_os = "linux")]` › `fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_passes() {`
+
+Every listing holds a task id that no listing before it held, so the two listings of every
+pass differ, while every read finds a child. The core must answer an error after exactly
+five passes, ten listings, saying what changed in the last pass, and never the child its
+reads found. The scripted lister refuses an eleventh listing, so a core that lost its bound
+fails here rather than looping. The core must also have asked `pause` for exactly four
+waits, 1, 5, 20 and 50 ms, one between each pass and the next and none after the fifth.
 
 ## `#[cfg(target_os = "linux")]` › `fn helper_reaper_candidates(`
 

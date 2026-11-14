@@ -4739,11 +4739,13 @@ const CREDENTIAL_ENV_IMAGE: &str = "upstroke-test/credenv:v1";
 
 const CREDENTIAL_ENV_CONTROL: (&str, &str) = ("GH_CONFIG_DIR", "/image/gh");
 
+const ROOM_FOR_A_SLOW_CONTAINER_START: Duration = Duration::from_secs(30);
+
 fn skipped(reason: &str) {
-    assert_eq!(
-        reason,
-        crate::runner::container::fake::absent_reason(),
-        "a Docker-gated test skipped for a reason the gate does not know about"
+    use crate::runner::container::fake::{absent_reason, processes_out_of_sight_reason};
+    assert!(
+        [absent_reason(), processes_out_of_sight_reason()].contains(&reason.to_owned()),
+        "a Docker-gated test skipped for a reason the gate does not know about: {reason}"
     );
 }
 
@@ -4855,6 +4857,7 @@ const GATED_RUNS: &[(&str, &str)] = &[
     ("mountro", "01KZP12GATED00000000000004"),
     ("mountrw", "01KZP12GATED00000000000005"),
     ("mountresume", "01KZP12GATED00000000000006"),
+    ("slowstart", "01KZCFGATED000000000000001"),
 ];
 
 fn gated_run(tag: &str) -> &'static str {
@@ -5446,7 +5449,7 @@ fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
             .stdin(prompt("never-read", 1024 * 1024)),
         workspace,
         claude,
-        Duration::from_secs(3),
+        ROOM_FOR_A_SLOW_CONTAINER_START,
         worker_id(2),
     );
     let started = Instant::now();
@@ -5455,7 +5458,7 @@ fn real_docker_a_containerized_program_reads_its_exact_stdin_then_eof() {
         .expect("a timeout is an output, not an error");
     assert!(output.timed_out, "{}{}", output.stdout, output.stderr);
     assert!(
-        started.elapsed() < Duration::from_secs(90),
+        started.elapsed() < Duration::from_secs(120),
         "a pending input write held the timeout: {:?}",
         started.elapsed()
     );
@@ -6255,10 +6258,17 @@ fn real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_non
 }
 
 #[test]
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn real_docker_a_container_contains_a_daemonised_descendant() {
-    const LEADER_MARKER: &str = "903222";
-    const DESCENDANT_MARKER: &str = "903111";
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct SetOnDrop<'flag>(&'flag AtomicBool);
+
+    impl Drop for SetOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn pids_with(marker: &str) -> Vec<String> {
         let mut found = Vec::new();
@@ -6283,6 +6293,16 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         }
         found
     }
+
+    let clock = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let pid = std::process::id();
+    let namespace = std::fs::metadata(Path::new("/proc/self/ns/pid"))
+        .map_or(0, |found| std::os::unix::fs::MetadataExt::ino(&found));
+    let leader_marker = format!("1{pid:07}.{namespace:020}{clock:039}");
+    let descendant_marker = format!("2{pid:07}.{namespace:020}{clock:039}");
+    let probe_marker = format!("3{pid:07}.{namespace:020}{clock:039}");
 
     let trace = ContainerTrace::recording();
     let docker = match docker_gate(
@@ -6311,7 +6331,7 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
 
     let runner = ContainerRunner::new(
         real_policy(&image_id),
-        identity.clone(),
+        identity,
         &repo_dir,
         fixtures::plain_checkout(&repo_dir.join(".git")),
         image_environment_of(docker.as_ref(), &image_id),
@@ -6321,34 +6341,91 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
     .with_hooks(Box::new(RecordingHooks::new(trace.clone())))
     .with_poll(Duration::from_millis(10));
 
+    let probe = gate_request(
+        ShellKind::Sh.spec(&format!("sleep {probe_marker}")),
+        workspace.clone(),
+        ROOM_FOR_A_SLOW_CONTAINER_START,
+        gate_id(1),
+    );
+    let cancellation = Cancellation::new();
+    let probe_returned = AtomicBool::new(false);
+    let (visible, probed) = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| {
+            while !probe_returned.load(Ordering::SeqCst) {
+                if !pids_with(&probe_marker).is_empty() {
+                    cancellation.cancel();
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            false
+        });
+        let probed = {
+            let _returned = SetOnDrop(&probe_returned);
+            runner.run_blocking_with(&probe, RunnerCall::new(cancellation.clone()))
+        };
+        (
+            sampler.join().expect("the probe's sampler panicked"),
+            probed,
+        )
+    });
+    match probed {
+        Ok(output) => assert!(
+            output.timed_out,
+            "the probe's `sleep` ended before its deadline, so its absence from `/proc` says \
+             nothing about this host: {output:?}"
+        ),
+        Err(error) => {
+            assert!(error.is_cancelled(), "the probe invocation failed: {error}");
+            assert_eq!(
+                error.fate,
+                ProcessFate::Gone,
+                "the probe was cancelled and its container may outlive it: {error}"
+            );
+        }
+    }
+    if !visible {
+        let reason = crate::runner::container::fake::processes_out_of_sight_reason();
+        assert!(
+            std::env::var_os(crate::runner::container::fake::REQUIRE_DOCKER).is_none(),
+            "{} is set and this test would have skipped: {reason}",
+            crate::runner::container::fake::REQUIRE_DOCKER
+        );
+        return skipped(&reason);
+    }
+
     let mut request = gate_request(
         ShellKind::Sh.spec(&format!(
             "if command -v setsid >/dev/null 2>&1; then \
-               setsid sleep {DESCENDANT_MARKER} >/dev/null 2>&1 & \
+               setsid sleep {descendant_marker} >/dev/null 2>&1 & \
              else \
-               sleep {DESCENDANT_MARKER} >/dev/null 2>&1 & \
+               sleep {descendant_marker} >/dev/null 2>&1 & \
              fi; \
-             sleep {LEADER_MARKER}"
+             sleep {leader_marker}"
         )),
         workspace,
         Duration::from_secs(120),
         gate_id(0),
     );
-    request.timeout = Duration::from_secs(3);
+    request.timeout = ROOM_FOR_A_SLOW_CONTAINER_START;
 
+    let returned = AtomicBool::new(false);
     let seen = std::thread::scope(|scope| {
         let sampler = scope.spawn(|| {
-            let deadline = Instant::now() + Duration::from_secs(20);
             let mut leader = false;
             let mut descendant = false;
-            while Instant::now() < deadline && !(leader && descendant) {
-                leader |= !pids_with(LEADER_MARKER).is_empty();
-                descendant |= !pids_with(DESCENDANT_MARKER).is_empty();
+            while !(returned.load(Ordering::SeqCst) || (leader && descendant)) {
+                leader |= !pids_with(&leader_marker).is_empty();
+                descendant |= !pids_with(&descendant_marker).is_empty();
                 std::thread::sleep(Duration::from_millis(50));
             }
             (leader, descendant)
         });
-        let output = runner.run_blocking(&request).expect("runs");
+        let ran = {
+            let _returned = SetOnDrop(&returned);
+            runner.run_blocking(&request)
+        };
+        let output = ran.expect("runs");
         assert!(output.timed_out, "the fixture did not reach its timeout");
         sampler.join().expect("the sampler panicked")
     });
@@ -6359,8 +6436,8 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
          containment assertion below would hold vacuously"
     );
 
-    let leader = pids_with(LEADER_MARKER);
-    let descendant = pids_with(DESCENDANT_MARKER);
+    let leader = pids_with(&leader_marker);
+    let descendant = pids_with(&descendant_marker);
     assert!(
         descendant.is_empty(),
         "a `setsid`-detached descendant survived its container, so \
@@ -6371,6 +6448,255 @@ fn real_docker_a_container_contains_a_daemonised_descendant() {
         leader.is_empty(),
         "the invocation's leader survived its container: {leader:?}"
     );
+}
+
+#[test]
+fn real_docker_a_container_descendant_test_is_gated_to_linux() {
+    const GUARDED: &str = "real_docker_a_container_contains_a_daemonised_descendant";
+    let source = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("runner")
+            .join("container")
+            .join("exec")
+            .join("tests.rs"),
+    )
+    .expect("read this module");
+    let attributes = attributes_of_test(&source, GUARDED);
+    assert!(
+        attributes.contains(&"#[cfg(target_os = \"linux\")]"),
+        "`{GUARDED}` finds its container's processes through the host's own `/proc`, which a \
+         Docker Desktop or Lima host on macOS does not have, so anywhere but Linux it fails \
+         after its invocation instead of observing anything; its attributes are \
+         {attributes:?} (`PR366-MACOS-PROC-SAMPLER`)"
+    );
+}
+
+/// The attribute lines directly above `fn {name}() {` in `source`, nearest
+/// first, each with its trailing whitespace removed so that a CRLF checkout
+/// (the Windows guest's) reads the same as an LF one: `str::lines` keeps the
+/// `\r` of the last line, because `source[..at]` ends before its `\n`.
+///
+/// The signature and the attribute lines are found in `source` with its
+/// comments and literals blanked (`PR366-CFG-SCAN-LITERAL-SPOOF`), so a
+/// Linux-gated copy of the signature in a block comment or a raw string above
+/// the function cannot stand in for it. The blanker keeps every byte where it
+/// was and every `\n`, so each line it yields is read back from `source` at
+/// the same offsets: the blanked one spells `"linux"` as spaces.
+fn attributes_of_test<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    let blanked = crate::effects::blank_comments_and_strings(source);
+    let signature = format!("\nfn {name}() {{");
+    let at = blanked
+        .find(&signature)
+        .unwrap_or_else(|| panic!("`{name}` is not a test here"));
+    blanked[..at]
+        .lines()
+        .rev()
+        .zip(source[..at].lines().rev())
+        .take_while(|(code, _)| code.trim_end().starts_with("#["))
+        .map(|(_, line)| line.trim_end())
+        .collect()
+}
+
+#[test]
+fn real_docker_a_container_descendant_gate_reads_lf_and_crlf_alike() {
+    let lf = "}\n\n#[test]\n#[cfg(target_os = \"linux\")]\nfn guarded() {\n}\n";
+    let crlf = lf.replace('\n', "\r\n");
+    assert!(crlf.contains("\r\n#[cfg"), "the CRLF fragment is not CRLF");
+    for source in [lf, crlf.as_str()] {
+        assert_eq!(
+            attributes_of_test(source, "guarded"),
+            ["#[cfg(target_os = \"linux\")]", "#[test]"],
+            "the attributes of {source:?}"
+        );
+    }
+}
+
+#[test]
+fn real_docker_a_container_descendant_gate_reads_past_a_decoy_in_a_comment_or_a_raw_string() {
+    let decoy = "#[test]\n#[cfg(target_os = \"linux\")]\nfn guarded() {\n}\n";
+    let real = "\n#[test]\n#[cfg(unix)]\nfn guarded() {\n}\n";
+    let in_a_comment = format!("/*\n{decoy}*/\n{real}");
+    let in_a_raw_string = format!("const EXAMPLE: &str = r#\"\n{decoy}\"#;\n{real}");
+    for lf in [in_a_comment, in_a_raw_string] {
+        let crlf = lf.replace('\n', "\r\n");
+        for source in [lf.as_str(), crlf.as_str()] {
+            let first = source
+                .find("\nfn guarded() {")
+                .expect("the fixture spells the signature");
+            assert!(
+                source[..first]
+                    .trim_end()
+                    .ends_with("#[cfg(target_os = \"linux\")]"),
+                "the first spelling of the signature in {source:?} is not the decoy's, so a scan \
+                 of the raw text would not be fooled by it"
+            );
+            assert_eq!(
+                attributes_of_test(source, "guarded"),
+                ["#[cfg(unix)]", "#[test]"],
+                "the attributes of {source:?}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+const SLOW_START_SCRATCH: &str = "UPSTROKE_TEST_SLOW_START_SCRATCH";
+
+#[cfg(unix)]
+const SLOW_START_ORIGINAL_PATH: &str = "UPSTROKE_TEST_SLOW_START_ORIGINAL_PATH";
+
+#[cfg(unix)]
+const SLOW_START_MARK: &str = "UPSTROKE_TEST_SLOW_START_MARK";
+
+#[cfg(unix)]
+const SLOW_START_HOLD_SECONDS: u64 = 5;
+
+#[cfg(unix)]
+#[test]
+fn real_docker_a_container_slow_to_start_still_reaches_its_timeout() {
+    let docker = match docker_gate(
+        "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
+        ContainerTrace::off(),
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    if let Err(reason) = discover(docker.as_ref(), PREFERRED_IMAGES) {
+        return no_image(&reason);
+    }
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+
+    let tree = repo::scratch("real-slow-start");
+    let bin = tree.path().join("bin");
+    std::fs::create_dir(&bin).expect("the stand-in's directory");
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .expect("a PATH with the stand-in's directory first");
+    let mark = tree.path().join("delayed-starts");
+    let ended = crate::agent::proc::test_support::run_test_isolated(
+        "runner::container::exec::tests::slow_docker_start_child",
+        &[
+            ("PATH", path.as_os_str()),
+            (SLOW_START_SCRATCH, tree.path().as_os_str()),
+            (SLOW_START_ORIGINAL_PATH, inherited.as_os_str()),
+            (SLOW_START_MARK, mark.as_os_str()),
+        ],
+        Duration::from_secs(120),
+    );
+    assert!(
+        ended.status.is_some_and(|status| status.success()) && ended.stdout.contains("1 passed"),
+        "with `docker start` held {SLOW_START_HOLD_SECONDS} seconds, the helper's never-read invocation did not end \
+         in a timed-out output under {ROOM_FOR_A_SLOW_CONTAINER_START:?}: {ended}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore = "isolated helper of the slow container start witness"]
+fn slow_docker_start_child() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = PathBuf::from(
+        std::env::var_os(SLOW_START_SCRATCH).expect("the parent names its scratch directory"),
+    );
+    assert!(
+        std::env::var_os(SLOW_START_ORIGINAL_PATH).is_some(),
+        "the parent hands this process, whose runner runs the stand-in, its own `PATH` in \
+         {SLOW_START_ORIGINAL_PATH}"
+    );
+    let mark = PathBuf::from(
+        std::env::var_os(SLOW_START_MARK).expect("the parent names the stand-in's mark"),
+    );
+    let stand_in = scratch
+        .join("bin")
+        .join(crate::runner::container::DOCKER_PROGRAM);
+    std::fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\n\
+             fail() {{ echo \"stand-in docker: $1\" >&2; exit 1; }}\n\
+             clock() {{ if [ -r /proc/uptime ]; then read -r up _ </proc/uptime && echo \"${{up%%.*}}\"; \
+             else /bin/date +%s; fi; }}\n\
+             if [ \"$1\" = start ]; then\n\
+             \x20 began=$(clock) || fail 'no clock before the delay'\n\
+             \x20 /bin/sleep {SLOW_START_HOLD_SECONDS} || fail 'the delay failed'\n\
+             \x20 ended=$(clock) || fail 'no clock after the delay'\n\
+             \x20 echo \"delayed $((ended - began))\" >>\"${SLOW_START_MARK}\" || fail 'no mark'\n\
+             fi\n\
+             PATH=\"${SLOW_START_ORIGINAL_PATH}\" exec docker \"$@\"\n"
+        ),
+    )
+    .expect("the stand-in `docker`");
+    std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
+    assert_eq!(
+        crate::util::find_program(crate::runner::container::DOCKER_PROGRAM),
+        Some(stand_in),
+        "the stand-in is not the `docker` this process runs, so nothing below is slowed"
+    );
+
+    let docker = crate::runner::container::DockerCli::new(ContainerTrace::off());
+    let (_, image_id) = discover(&docker, PREFERRED_IMAGES).expect("the parent found an image");
+    let root = scratch.as_path();
+    let repo_dir = root.join("repo");
+    repo::repository(&repo_dir);
+    let identity = real_identity(root, &repo_dir, gated_run("slowstart"));
+    let workspace = root.join("ws-slow-start");
+    std::fs::create_dir_all(&workspace).expect("a workspace");
+    let _residue = LeaveNoResidue {
+        docker: docker.clone(),
+        private_root: identity.private_root.clone(),
+    };
+    let runner = ContainerRunner::new(
+        real_policy(&image_id),
+        identity,
+        &repo_dir,
+        fixtures::plain_checkout(&repo_dir.join(".git")),
+        image_environment_of(&docker, &image_id),
+        Box::new(docker.clone()),
+    )
+    .expect("a container policy")
+    .with_poll(Duration::from_millis(10));
+
+    let never = worker_request(
+        ShellKind::Sh
+            .spec("sleep 600")
+            .stdin(prompt("never-read", 1024 * 1024)),
+        workspace,
+        AgentId::new("claude-code"),
+        ROOM_FOR_A_SLOW_CONTAINER_START,
+        worker_id(0),
+    );
+    let output = runner
+        .run_blocking(&never)
+        .expect("a timeout is an output, not an error");
+    assert!(output.timed_out, "{}{}", output.stdout, output.stderr);
+
+    let delayed = match std::fs::read_to_string(&mark) {
+        Ok(delayed) => delayed,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!(
+            "the stand-in's mark {} is unreadable: {error}",
+            mark.display()
+        ),
+    };
+    assert!(
+        !delayed.trim().is_empty(),
+        "no `docker start` was delayed: the stand-in left no mark at {}, so the timeout above \
+         was reached without the slow start this test exists to hold",
+        mark.display()
+    );
+    for line in delayed.lines() {
+        let measured = line
+            .strip_prefix("delayed ")
+            .and_then(|seconds| seconds.parse::<u64>().ok());
+        assert!(
+            measured.is_some_and(|seconds| seconds >= SLOW_START_HOLD_SECONDS),
+            "a mark line that is not `delayed <seconds>` with at least the \
+             {SLOW_START_HOLD_SECONDS} seconds the stand-in's `/bin/sleep \
+             {SLOW_START_HOLD_SECONDS}` asked for, as its clock measured them: {line:?}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -6757,8 +7083,9 @@ fn every_gated_test_of_this_lane_is_counted() {
         "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
         "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
         "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
+        "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
     ];
-    assert_eq!(MINE.len(), 16);
+    assert_eq!(MINE.len(), 17);
     assert_eq!(GATED_RUNS.len(), MINE.len(), "one run id per gated test");
     let ids: BTreeSet<&str> = GATED_RUNS.iter().map(|(_, run)| *run).collect();
     assert_eq!(
@@ -9388,25 +9715,456 @@ fn stat_of(pid: libc::pid_t) -> Result<(Identified, char), String> {
 /// evidence that no child remains.
 #[cfg(target_os = "linux")]
 fn children_of(pid: &str) -> Result<Vec<libc::pid_t>, String> {
-    let tasks = std::fs::read_dir(format!("/proc/{pid}/task"))
-        .map_err(|error| format!("/proc/{pid}/task: {error}"))?;
-    let mut children = Vec::new();
-    for task in tasks {
-        let task = task.map_err(|error| format!("/proc/{pid}/task: {error}"))?;
-        let list = task.path().join("children");
-        let text = std::fs::read_to_string(&list)
-            .map_err(|error| format!("{}: {error}", list.display()))?;
-        for child in text.split_whitespace() {
-            children.push(
-                child
-                    .parse::<libc::pid_t>()
-                    .map_err(|error| format!("{}: {child}: {error}", list.display()))?,
-            );
+    let task_dir = Path::new("/proc").join(pid).join("task");
+    let gone = |error: &std::io::Error| {
+        error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
+    };
+    children_in_passes(
+        || {
+            // A task is its id and its start time, since ids are reused. The
+            // start time is the twentieth field after the command, which
+            // closes at the last `)`. A task whose `stat` is gone is left out.
+            let mut listed = BTreeSet::new();
+            for task in std::fs::read_dir(&task_dir)? {
+                let id = task?.file_name();
+                let stat = task_dir.join(&id).join("stat");
+                let text = match std::fs::read_to_string(&stat) {
+                    Ok(text) => text,
+                    Err(error) if gone(&error) => continue,
+                    Err(error) => return Err(error),
+                };
+                let start = text
+                    .rsplit_once(')')
+                    .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+                    .ok_or_else(|| {
+                        std::io::Error::other(format!("{}: no starttime field", stat.display()))
+                    })?
+                    .parse::<u64>()
+                    .map_err(|error| {
+                        std::io::Error::other(format!("{}: starttime: {error}", stat.display()))
+                    })?;
+                listed.insert((id, start));
+            }
+            Ok(listed)
+        },
+        |(task, _): &(std::ffi::OsString, u64)| {
+            std::fs::read_to_string(task_dir.join(task).join("children"))
+        },
+        |(task, _): &(std::ffi::OsString, u64)| {
+            // The state is the first field after the command, which closes at
+            // the last `)`. A zombie (`Z`) or dead (`X`, `x`) task is ending,
+            // and so is one whose `stat` is gone.
+            let stat = task_dir.join(task).join("stat");
+            match std::fs::read_to_string(&stat) {
+                Ok(text) => {
+                    let state = text
+                        .rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().next())
+                        .ok_or_else(|| {
+                            std::io::Error::other(format!("{}: no state field", stat.display()))
+                        })?;
+                    Ok(!matches!(state, "Z" | "X" | "x"))
+                }
+                Err(error) if gone(&error) => Ok(false),
+                Err(error) => Err(error),
+            }
+        },
+        std::thread::sleep,
+    )
+    .map_err(|error| format!("{}: {error}", task_dir.display()))
+}
+
+/// The rule of [`children_of`], with its readers passed in; the notes describe each.
+#[cfg(target_os = "linux")]
+fn children_in_passes<T: Ord + std::fmt::Debug>(
+    mut list_tasks: impl FnMut() -> std::io::Result<BTreeSet<T>>,
+    mut read_children: impl FnMut(&T) -> std::io::Result<String>,
+    mut running_normally: impl FnMut(&T) -> std::io::Result<bool>,
+    mut pause: impl FnMut(std::time::Duration),
+) -> Result<Vec<libc::pid_t>, String> {
+    const PASSES: usize = 5;
+    // The pause before the second pass, the third, the fourth and the fifth:
+    // growing, so that the passes span long enough for a thread that is
+    // ending, and still listed in its dead state, to be released.
+    const PAUSES: [std::time::Duration; PASSES - 1] = [
+        std::time::Duration::from_millis(1),
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(50),
+    ];
+    let mut last = String::new();
+    for pass in 0..PASSES {
+        if let Some(wait) = pass.checked_sub(1).and_then(|before| PAUSES.get(before)) {
+            pause(*wait);
         }
+        let before = list_tasks().map_err(|error| error.to_string())?;
+        let mut children = Vec::new();
+        let mut changed = Vec::new();
+        for task in &before {
+            match read_children(task) {
+                Ok(text) => {
+                    for child in text.split_whitespace() {
+                        let pid = child.parse::<libc::pid_t>().map_err(|error| {
+                            format!("the children list of task {task:?}: {child}: {error}")
+                        })?;
+                        children.push(pid);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    changed.push(format!(
+                        "the children list of task {task:?} was not found ({error})"
+                    ));
+                }
+                Err(error) => return Err(format!("the children list of task {task:?}: {error}")),
+            }
+        }
+        for task in &before {
+            match running_normally(task) {
+                Ok(true) => {}
+                Ok(false) => changed.push(format!(
+                    "task {task:?} was not running normally after the reads"
+                )),
+                Err(error) => return Err(format!("the state of task {task:?}: {error}")),
+            }
+        }
+        let after = list_tasks().map_err(|error| error.to_string())?;
+        if after != before {
+            changed.push(format!(
+                "the tasks listed after the reads, {after:?}, were not those listed before them, \
+                 {before:?}"
+            ));
+        }
+        if changed.is_empty() {
+            children.sort_unstable();
+            children.dedup();
+            return Ok(children);
+        }
+        last = changed.join(", and ");
     }
-    children.sort_unstable();
-    children.dedup();
-    Ok(children)
+    Err(format!(
+        "none of {PASSES} passes over the tasks counted; in the last, {last}"
+    ))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_not_lost_when_a_task_ends_after_its_list_was_opened() {
+    // B ends after its list was opened and hands its child to A, already read.
+    let mut listings = [
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [("A", ""), ("B", ""), ("A", "4242 ")].into_iter();
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |_| Ok(true),
+        |_| {},
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by a second pass, not lost to a first pass that read \
+         B's list empty after B ended"
+    );
+    assert_eq!(
+        listed, 4,
+        "two passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_not_lost_when_a_task_id_is_reused_between_the_listings() {
+    // B ends after its list was opened and hands its child to A, already read;
+    // a new thread takes B's id, with a new start time, before the second
+    // listing. Its state, read through the id, is running.
+    let mut listings = [
+        BTreeSet::from([("A", 1), ("B", 1)]),
+        BTreeSet::from([("A", 1), ("B", 2)]),
+        BTreeSet::from([("A", 1), ("B", 2)]),
+        BTreeSet::from([("A", 1), ("B", 2)]),
+    ]
+    .into_iter();
+    let mut reads = [
+        (("A", 1), ""),
+        (("B", 1), ""),
+        (("A", 1), "4242 "),
+        (("B", 2), ""),
+    ]
+    .into_iter();
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |_| Ok(true),
+        |_| {},
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by a second pass, not lost to a first pass whose two \
+         listings held the same task ids, B's taken by a new thread"
+    );
+    assert_eq!(
+        listed, 4,
+        "two passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_not_lost_when_a_task_still_listed_is_ending() {
+    // B is in both listings of the first pass, but begins to end after its
+    // list was read empty and hands its child to A, already read.
+    let events = std::cell::RefCell::new(Vec::new());
+    let mut listings = [
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [("A", ""), ("B", ""), ("A", "4242 ")].into_iter();
+    let mut states = [("A", true), ("B", false), ("A", true)].into_iter();
+    let answer = children_in_passes(
+        || {
+            events.borrow_mut().push("list".to_owned());
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            events.borrow_mut().push(format!("read {task}"));
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |task| {
+            events.borrow_mut().push(format!("state {task}"));
+            let (expected, running) = states.next().expect("a state the script holds");
+            assert_eq!(*task, expected, "the states asked follow the listed tasks");
+            Ok(running)
+        },
+        |_| {},
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by a second pass, not lost to a first pass whose two \
+         listings agreed while B was ending"
+    );
+    assert_eq!(
+        events.into_inner(),
+        [
+            "list", "read A", "read B", "state A", "state B", "list", "list", "read A", "state A",
+            "list",
+        ],
+        "two passes, each asking every listed task's state after its reads and before its second \
+         listing"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_found_after_pauses_when_a_task_stays_listed_while_ending() {
+    // B has handed its child to A and stays listed, ending, for three passes;
+    // on the fourth it is gone and the child is in A's list.
+    let events = std::cell::RefCell::new(Vec::new());
+    let mut pauses = Vec::new();
+    let ending = || BTreeSet::from(["A", "B"]);
+    let mut listings = [
+        ending(),
+        ending(),
+        ending(),
+        ending(),
+        ending(),
+        ending(),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [
+        ("A", ""),
+        ("B", ""),
+        ("A", ""),
+        ("B", ""),
+        ("A", ""),
+        ("B", ""),
+        ("A", "4242 "),
+    ]
+    .into_iter();
+    let mut states = [
+        ("A", true),
+        ("B", false),
+        ("A", true),
+        ("B", false),
+        ("A", true),
+        ("B", false),
+        ("A", true),
+    ]
+    .into_iter();
+    let answer = children_in_passes(
+        || {
+            events.borrow_mut().push("list".to_owned());
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            events.borrow_mut().push(format!("read {task}"));
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            Ok(list.to_owned())
+        },
+        |task| {
+            events.borrow_mut().push(format!("state {task}"));
+            let (expected, running) = states.next().expect("a state the script holds");
+            assert_eq!(*task, expected, "the states asked follow the listed tasks");
+            Ok(running)
+        },
+        |wait| {
+            events.borrow_mut().push("pause".to_owned());
+            pauses.push(wait);
+        },
+    );
+    assert_eq!(
+        pauses,
+        [
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(20),
+        ],
+        "a pause after each of the three discarded passes, each longer than the one before"
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![4242]),
+        "the child B handed to A is found by the fourth pass, made after B, ending through three \
+         passes, was released"
+    );
+    let pass_with_b_ending = [
+        "list", "read A", "read B", "state A", "state B", "list", "pause",
+    ];
+    let mut expected = pass_with_b_ending.repeat(3);
+    expected.extend(["list", "read A", "state A", "list"]);
+    assert_eq!(
+        events.into_inner(),
+        expected,
+        "three passes discarded for B ending, each followed by a pause, then a fourth that counts"
+    );
+    assert_eq!(listings.next(), None, "every scripted listing was made");
+    assert_eq!(reads.next(), None, "every scripted read was made");
+    assert_eq!(states.next(), None, "every scripted state was asked");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_children_are_read_in_another_pass_when_a_list_is_not_found() {
+    // The listings agree, so the not-found read alone discards the first pass.
+    let mut listings = [
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A", "B"]),
+        BTreeSet::from(["A"]),
+        BTreeSet::from(["A"]),
+    ]
+    .into_iter();
+    let mut reads = [("A", Some("7 ")), ("B", None), ("A", Some("8 "))].into_iter();
+    let mut listed = 0;
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            listings
+                .next()
+                .ok_or_else(|| std::io::Error::other("no listing is scripted"))
+        },
+        |task| {
+            let (expected, list) = reads.next().expect("a read the script holds");
+            assert_eq!(*task, expected, "the reads follow the listed tasks");
+            list.map(str::to_owned)
+                .ok_or_else(|| std::io::ErrorKind::NotFound.into())
+        },
+        |_| Ok(true),
+        |_| {},
+    );
+    assert_eq!(
+        answer,
+        Ok(vec![8]),
+        "a pass in which B's list was not found is discarded whole, its read of A included, and \
+         the next pass's answer is returned"
+    );
+    assert_eq!(
+        listed, 4,
+        "two passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(reads.next(), None, "every scripted read was made");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_engines_tasks_that_change_under_every_pass_end_in_an_error_after_five_passes() {
+    let mut listed = 0;
+    let mut pauses = Vec::new();
+    let answer = children_in_passes(
+        || {
+            listed += 1;
+            if listed > 10 {
+                return Err(std::io::Error::other("a listing after the fifth pass"));
+            }
+            Ok(BTreeSet::from([listed]))
+        },
+        |_| Ok("4242 ".to_owned()),
+        |_| Ok(true),
+        |wait| pauses.push(wait),
+    );
+    assert_eq!(
+        answer,
+        Err(
+            "none of 5 passes over the tasks counted; in the last, the tasks listed after the \
+             reads, {10}, were not those listed before them, {9}"
+                .to_owned()
+        ),
+        "tasks that change under every pass end in an error that says what changed in the last \
+         pass, never in the children its reads found"
+    );
+    assert_eq!(
+        listed, 10,
+        "five passes, each listing the tasks before and after its reads"
+    );
+    assert_eq!(
+        pauses,
+        [
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(50),
+        ],
+        "a growing pause between each pass and the next, and none after the fifth"
+    );
 }
 
 /// What is established about a process this harness identified. Only
