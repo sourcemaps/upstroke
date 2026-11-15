@@ -39,3 +39,35 @@ selected by a `run:` step (`rustup toolchain install 1.97.1 --component clippy` 
 `rustup default 1.97.1`) instead of a `uses:` action, which the oracle's `LANE_STEP_FIELDS`
 would then have to admit in place of the action. Either is a workflow and CI-contract change,
 the owner's to merge.
+
+## 2026-11-12: #375 makes the second-job shape
+
+#375 is the change this row's guard names, and it makes the shape "Why it stays" rejected: a
+second job id for the hosted route, `test-windows-hosted` (`test (windows-latest)`), beside the
+guest's `test-windows`, each with a job-level `if:` on the answer of a new job,
+`pick-windows-home`, and an aggregate that accepts `skipped` for one of the pair.
+
+**How the exactly-one rule answers the objection.** The objection was that an aggregate
+accepting `skipped` is the false green `merge-gate` exists to refuse. `merge-gate` does not
+accept `skipped` for either job on its own: it collects both results and passes only on exactly
+`success` beside `skipped`, either way round. Both skipped, both run, either failed or
+cancelled, or the picker failed -- which skips both -- is red, so no run in which no Windows suite
+ran can pass. The two conditions are pinned to one comparison of the picker's answer with its
+two values, `guest` and `hosted`, so on a run whose picker succeeded exactly one job runs.
+`the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate` executes the
+aggregate's script over every pair of the four results and every other gate failing; escape rows
+`MUT-AGGREGATE-ACCEPTS-BOTH-WINDOWS-JOBS-SKIPPED` and `-RUN` are refused. What the rule does not
+judge is whether the picker chose well: a run it sends to the twin is a real run of the suite on
+another machine, which is `PR299-HOSTED-QUEUE-DOES-NOT-PROVE-GUEST-BEHAVIOUR`'s risk, not a false
+green.
+
+**What of this finding remains.** Its failure sequence has not been reachable since `d3434ace`
+(2026-10-26) removed the hosted lane's install step from `test-windows`: the guest's job carries
+one `uses:` archive, `actions/checkout`, the oracle refuses a toolchain install in it, and #375's
+install step lives in the twin, a job the guest never sets up. The dependency of this row's kind
+that #375 adds is the picker: the guest's job now `needs: pick-windows-home`, a GitHub-hosted job
+that reads the Actions API, and when that job fails or is cancelled both Windows jobs are skipped
+and `upstroke-ci` is red. The picker answers `guest` on any API error it sees, so only its own
+failure, or a read that stalls to its 5-minute timeout (fix-check review of #375 at `873ff8c7`,
+finding 4), reds a run that way -- red, never a false green. Whether this row closes, or carries
+that dependency forward, is the owner's call; #375 records it here and deletes nothing.

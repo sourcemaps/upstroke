@@ -48,3 +48,24 @@ temporary directory: 41 bytes on the guest, under which the kill child's deepest
 against a hosted log that spells its own in 36. One difference from the sequence above: the guest-lane pull-request runs
 passed at a tree without #330, which the merged tree carries, rather than on a more forgiving machine. The repair is to
 the test, in the change that files that row, and not to the queue. This row's disposition is unchanged.
+
+## 2026-11-12: the hosted route is back, opt-in, on the guest's compiler (#375)
+
+From `d3434ace` (2026-10-26), which ran every lane on the guest, this row's failure sequence could not happen. #375
+brings a hosted route back in a different form. Any run -- a pull request, a push to `master` or a merge-queue entry --
+goes to the twin `test-windows-hosted` on `windows-latest` when `pick-windows-home` answers `hosted`, and it does that
+only when the operator has set `WINGUEST_BUSY` to `1`, or has set `WINGUEST_QUEUE_LIMIT` and the guest's queue has
+reached it; with neither set every run takes the guest. The twin installs the guest image's compiler, 1.97.1, and runs
+the guest's suite step character for character, its three compiler questions included, so the compiler pin this row's
+"Why it stays" relies on holds on the new route as well. What remains between the two homes is the machines' runtime
+differences, as before: what `RUNNER_ENVIRONMENT` reports, what the image carries, the filesystem and the temporary
+directory (the sighting above: 41 bytes against 36), the services.
+
+A run sent to the twin can pass where the guest would fail. The sequence is wider than #299's in one way: the
+pull-request lane can now leave the guest too, so a pull request and its queue entry both sent to the twin while the
+guest is busy can land a test that fails on the guest, and the first run to take the guest is the first to fail -- the
+push to `master`, or, if that push is sent to the twin as well, a later unrelated pull request, which takes the blame.
+It is narrower in another: the route is taken only while the operator has asked for it. As before, a red guest run
+after a green twin run is this finding and the fix is to the test; `MAINTAINING.md` step 3 says how to put a run on
+the other home to tell the two apart. Nothing short of one machine for every run closes it: either of the guard's two
+routes still would, provided the twin goes with it. The disposition is unchanged.

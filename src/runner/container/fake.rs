@@ -1516,6 +1516,7 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_a_read_only_configured_mount_is_readable_and_not_writable",
     "real_docker_a_read_write_configured_mount_is_writable_as_the_coordinators_user",
     "real_docker_a_resume_with_changed_mount_config_keeps_the_recorded_mounts",
+    "real_docker_a_container_slow_to_start_still_reaches_its_timeout",
 ];
 
 pub(crate) fn absent_reason() -> String {
@@ -1539,6 +1540,16 @@ pub(crate) fn docker_gate(test: &str, trace: ContainerTrace) -> Result<Box<Docke
         "{REQUIRE_DOCKER} is set and `{test}` would have skipped: {reason}"
     );
     Err(reason)
+}
+
+pub(crate) fn processes_out_of_sight_reason() -> String {
+    format!(
+        "the container runtime's processes are not visible in this host's `/proc`: a probe \
+         container ran to its deadline and no process of it appeared here, as with a `{}` \
+         daemon that is remote (`DOCKER_HOST`) or in another PID namespace (rootless Docker, a \
+         virtual machine)",
+        super::DOCKER_PROGRAM
+    )
 }
 
 pub(crate) fn slot_repo_key() -> &'static str {
