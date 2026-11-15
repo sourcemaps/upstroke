@@ -1332,19 +1332,21 @@ History: the fixtures used to live in `src/events/log.rs`'s doc comments, and
 this function lifted them out and stripped the doc-comment prefixes. That
 module now has no `compile_fail` fence; an edit there reaches no fixture.
 
-## `fn crate_under_test() -> (PathBuf, PathBuf) {`
-
-The `--extern` this crate's own rlib is reachable by, and the directory its
-dependencies are in.
-
-The test binary lives in `<target>/debug/deps` beside the rlib cargo built
-from the same sources, so both are found from `current_exe` rather than from
-a guessed target directory — `CARGO_TARGET_DIR` is set by the build wrapper
-this project uses and is not `target/`.
-
 ## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {`
 
 Type-check `body` against this crate and return rustc's diagnostics.
+
+## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {` › `let built = crate::effects::tests::crate_under_test();`
+
+The crate's rlib, and the directories its dependencies are in, come from the
+lookup the effects suite's fixture compilers use, as `rustc` arguments
+(`built.rustc_args()`). That lookup is one `--extern upstroke=<rlib>` and one
+`-L dependency=<dir>` per directory. This file used to carry its own
+`crate_under_test`, which found the rlib beside the test binary and handed
+`rustc` that one directory. Cargo 1.100.0 gives every unit a directory of its
+own, so that copy found nothing there, and this test failed on every pull
+request (`CI-RUST-1-100-BUILD-LAYOUT-RLIB-LOOKUP`). Both layouts are
+described at `crate_under_test` in `docs/internals/effects/tests.md`.
 
 ## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {` › `fs::write(&source, format!("fn main() {{\n{body}\n}}\n")).expect("the fixture");`
 
@@ -1379,17 +1381,30 @@ directly. Three things are asserted that a bare "it did not build" cannot:
   typo — which lands on `E0425`, `E0432`, `E0599` — fails this test;
 * the **count** is pinned, so a deleted fixture is loud.
 
-### The one boundary, stated rather than hidden
+### The boundaries, stated rather than hidden
 
-The fixtures are compiled against the rlib cargo built beside this test
-binary, so they see the crate as an external consumer does. Under the gate
-command that rlib is always current — `--all-targets` builds the `upstroke`
-binary, which links it. Under a bare `cargo test --lib` after a visibility
+The fixtures are compiled against the rlib the shared lookup,
+`crate::effects::tests::crate_under_test`, finds: the one beside this test
+binary under Cargo's old layout, or, under Cargo 1.100.0's per-unit layout,
+the newest `libupstroke-*.rlib` in the package's unit directories
+(`build/upstroke/<hash>/out/`). The lookup is described under `typecheck`'s
+`let built = crate::effects::tests::crate_under_test();` above. Either way
+they see the crate as an external consumer does. Where one checkout uses
+the build directory, as each CI job does, that rlib is always current under
+the gate command — `--all-targets` builds the `upstroke` binary, which links
+it. Under a bare `cargo test --lib` after a visibility
 change, cargo has no reason to rebuild the rlib, and a fixture could then
 refuse against yesterday's API. That is not guarded here on purpose: every
 guard available for it is a timestamp comparison, and a test binary that is
 legitimately newer than an unchanged rlib is the *ordinary* case, so the
-guard would be a flake rather than a check. The gate is unaffected.
+guard would be a flake rather than a check. Where one checkout uses the
+build directory, the gate is unaffected.
+
+The second boundary is a build directory shared with another checkout. There
+the newest library unit can be the other checkout's, even under the gate
+command: if it built after this checkout's last run and this checkout's own
+units are fresh, nothing is rewritten, and the fixtures type-check against
+the other checkout's API. That is the open finding `PR376-R1-NEWEST-WINS`.
 
 ## `fn every_declared_build_refusal_fails_for_the_reason_it_declares() {` › `let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))`
 

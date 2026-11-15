@@ -101,8 +101,9 @@ fn gate_timeout(started: &RunStarted4) -> Duration {
 /// What a refused reclaim leaves behind.
 ///
 /// **The token**, because a reclaim that did not happen returns it rather than
-/// dropping it ([`ScratchReclaimFailure::into_token`]): the tree is still there
-/// and somebody has to own it. A `Drop` cannot return anything, so it parks the
+/// dropping it ([`ScratchReclaimFailure::into_token`]): a refusal does not say
+/// whether the tree is still there, so nothing may treat it as gone and somebody
+/// has to keep owning it. A `Drop` cannot return anything, so it parks the
 /// token here and the witness that arranged the refusal re-arms a guard over it.
 ///
 /// **A copy of what the arm did with the report**, so that a witness can assert
@@ -110,7 +111,7 @@ fn gate_timeout(started: &RunStarted4) -> Duration {
 /// report goes out through the scratch subsystem's reporter or is raised, and
 /// `PR78-EMIT-UNWIND-REPORT-LOST` is what it cost when this slot was the whole
 /// of it — an ordinary fixture holds no external handle on its own slot, so the
-/// slot died with the tree's owner and the leak was silent.
+/// slot died with the tree's owner and the refusal went unreported.
 #[derive(Debug, Default)]
 struct Parked {
     /// The token handed back, for the holder to reclaim with.
@@ -119,7 +120,7 @@ struct Parked {
     reported: Option<Report>,
 }
 
-/// What became of a lost tree's report.
+/// What became of a refused reclaim's report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Report {
     /// Raised, on the normal path, where a panic is the report.
@@ -141,10 +142,16 @@ type ParkedSlot = Arc<Mutex<Parked>>;
 enum Reclaimed {
     /// The tree is gone and the token is spent.
     Done,
-    /// The tree is still there. **Slice 1's own refusal**, carrying the token
-    /// it handed back and the error the filesystem — or the injected remover —
-    /// actually produced. Nothing here fabricates one: the only way to build
-    /// this variant is to be given a [`ScratchReclaimFailure`].
+    /// The reclaim was refused and the token came back. That says nothing about
+    /// whether the tree is still there: on [`spend`]'s path the refusal follows
+    /// something the funnel checked or observed, and on [`refuses`]'s nothing
+    /// was observed at all. **Slice 1's own refusal**, carrying the token
+    /// it handed back and the error slice 1 recorded: on [`spend`]'s path, what
+    /// the identity check, the remover or the root-absence observation
+    /// answered; on [`refuses`]'s, the synthetic `PermissionDenied` that
+    /// [`refuse_to_reclaim`] builds without touching the filesystem. Nothing
+    /// here fabricates one: the only way to build this variant is to be given a
+    /// [`ScratchReclaimFailure`].
     Refused(ScratchReclaimFailure),
 }
 
@@ -163,8 +170,13 @@ type Reclaim = fn(ScratchTreeOwnership) -> Reclaimed;
 /// [`remove_scratch_tree`] is slice 1's test-only funnel: it takes the token
 /// **by value**, so the call spends it and it cannot authorise a second
 /// deletion, and it removes the token's own root rather than any path this file
-/// could name. `NotFound` is success — the tree is gone, which is what was
-/// asked for — and every other answer comes back carrying the token.
+/// could name, once that root's current directory matches the identity the
+/// token captured. It succeeds only on an **observed absent root**: a fresh
+/// stat of the root itself that answers `NotFound` ([`proves_absent`]). A
+/// remover's own `NotFound` can name a child and is not that proof, and nor is
+/// a remover's `Ok(())`; every other outcome — a refused identity check, a
+/// removal error, a root whose absence the stat did not prove — comes back
+/// carrying the token.
 fn spend(token: ScratchTreeOwnership) -> Reclaimed {
     match remove_scratch_tree(token) {
         Ok(()) => Reclaimed::Done,
@@ -174,14 +186,19 @@ fn spend(token: ScratchTreeOwnership) -> Reclaimed {
 
 /// A reclaim that refuses, deterministically and on every platform.
 ///
-/// **The refusal is slice 1's, not this file's.** [`refuse_to_reclaim`] drives
-/// the same private funnel [`remove_scratch_tree`] does, over the same by-value
-/// token, with a remover that lives inside `scratch_tree` and never leaves it.
-/// So the [`ScratchReclaimFailure`] the witness unpacks is the one slice 1
-/// built, from slice 1's own `NotFound`-only reading, and the token it carries
-/// is the token slice 1 handed back. An earlier revision fabricated that
-/// variant here; a hand-built refusal proves only that the hand that built it
-/// agreed with itself.
+/// **The refusal is slice 1's, not this file's, and it is synthetic.**
+/// [`refuse_to_reclaim`] does not drive [`remove_scratch_tree`]'s funnel: it
+/// builds a `PermissionDenied` [`ScratchReclaimFailure`] around the by-value
+/// token, unchanged, and runs no filesystem operation — no identity check, no
+/// removal, no observation of the root — so it refuses even an absent root.
+/// The failure the witness unpacks is therefore one slice 1 built, and the
+/// token it carries is the token handed in, its original claim intact. What
+/// the two cleanup-failure witnesses exercise is this file's handling of a
+/// refusal — the report, the parked token, the re-armed guard — and not the
+/// reclaim path: a real reclaim is [`spend`]'s, and succeeds only on an
+/// observed absent root. An earlier revision fabricated that variant here; a
+/// hand-built refusal proves only that the hand that built it agreed with
+/// itself.
 ///
 /// **This file supplies no remover, and cannot.** `refuse_to_reclaim` takes no
 /// path and no callback and has no success case in its return type, so the only

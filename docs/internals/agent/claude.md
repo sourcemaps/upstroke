@@ -259,6 +259,43 @@ suite green (`invariants_preserved[0]`, "adapter parsing unchanged").
 The agent's own summary mentioning 429s must not be read as the
 pool being exhausted — that would roll back verified work.
 
+## `mod tests` › `fn a_failed_attempt_whose_result_says_you_hit_your_limit_is_rate_limited() {`
+
+This is the failure Claude Code produced when an account reached its limit
+in run `01M740JX5N8HB94RNC7W2MM777` (2026-11-11): exit code 1,
+`"is_error":true`, and the message
+`You've hit your 5-hour limit · resets 5:30am (UTC)` as `result`. It must
+parse to `RateLimited`, which defers the task, rather than `AgentError`,
+which spends one of its attempts. That run read it as `AgentError`
+twenty-one times. The message must also come through as the detail, so the
+operator can see when the window resets without opening the transcript.
+
+## `mod tests` › `fn you_hit_your_limit_on_stderr_is_rate_limited() {`
+
+The same message on stderr, with nothing on stdout, also parses to
+`RateLimited`. `parse_output` asks the vocabulary about stderr as well as
+about the result text, and this test holds that route open for the new
+wording. The run's evidence is the result form. Nobody has seen the stderr
+form from the CLI.
+
+## `mod tests` › `fn a_failed_attempt_whose_result_says_you_hit_your_context_window_limit_is_an_agent_error() {`
+
+A failed attempt in the same shape as the five-hour one, exit code 1 and
+`"is_error":true`, whose result is
+`You've hit your context-window limit; shorten the prompt`. A context window
+is not a quota window, so it must parse to `AgentError`, which the ladder
+retries or escalates, and not to `RateLimited`, which would defer a real
+failure and tell the capacity engine the pool is exhausted. The message
+still comes through as the detail. Under the earlier rule, which took any
+"limit" after "hit your", this attempt was `RateLimited`.
+
+## `mod tests` › `fn a_successful_task_about_hitting_a_limit_is_not_rate_limited() {`
+
+A successful attempt whose summary says "you've hit your 5-hour limit"
+stays `Completed`. The text matches the vocabulary, but the vocabulary is
+only asked about failed attempts, so verified work about limit handling is
+not read as the pool running out.
+
 ## `fn json_error_failures_carry_a_reportable_detail()` › `let stdout = r#"{"is_error":true,"subtype":"error_during_execution"}"#;`
 
 Falls back to the subtype, then stderr, then a pointer.

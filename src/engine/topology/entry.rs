@@ -1616,7 +1616,9 @@ pub(crate) mod initial_log_read_fault {
 #[cfg(test)]
 pub(crate) mod container_runtime {
     use std::cell::RefCell;
+    use std::marker::PhantomData;
     use std::panic::Location;
+    use std::sync::MutexGuard;
 
     use crate::runner::container::DockerCli;
     use crate::runner::container::exec::RunIdentity;
@@ -1628,11 +1630,11 @@ pub(crate) mod container_runtime {
     }
 
     #[must_use]
-    pub(crate) struct Armed(());
+    pub(crate) struct Armed(PhantomData<MutexGuard<'static, ()>>);
 
     pub(crate) fn arm(journal: &Journal) -> Armed {
         ARMED.with(|armed| *armed.borrow_mut() = Some(journal.clone()));
-        Armed(())
+        Armed(PhantomData)
     }
 
     impl Drop for Armed {

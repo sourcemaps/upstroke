@@ -139,7 +139,9 @@ pub struct HookHarness {
     /// Whether the sequence begun last is still recording.
     ///
     /// The open sequence is always the last of `fast`: `begin_fast_sequence`
-    /// closes the previous one and then pushes, and nothing else adds to the
+    /// pushes the new one as the last element and then sets `recording`
+    /// unconditionally, whatever it held before, so the previous one stops
+    /// being open because it is no longer last, and nothing else adds to the
     /// vector. A flag beside `last_mut()` says that structurally, where the
     /// index this used to hold had to be *kept* true — and an index that went
     /// stale would either record into the wrong sequence or be defended

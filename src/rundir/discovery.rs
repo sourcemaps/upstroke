@@ -148,10 +148,11 @@ pub fn list_runs(repo_root: &Path) -> Vec<String> {
 ///
 ///
 /// **Where the classification comes from is a parameter one function over**,
-/// and this is one of the two bodies that supply it. See [`census_observed`]:
-/// the supply is what a test can replace, and replacing it is the only way a
-/// suite on this platform can put a classification the filesystem will not
-/// produce in front of a reader that has to decide from it.
+/// and this is one of the three bodies that supply it: [`census`], here, for
+/// the listing readers, and [`resolve_run_id`] and [`find_question`]. See
+/// [`census_observed`]: the supply is what a test can replace, and replacing it
+/// is the only way a suite on this platform can put a classification the
+/// filesystem will not produce in front of a reader that has to decide from it.
 fn census(repo_root: &Path) -> Vec<(String, RunDirClass)> {
     census_observed(repo_root, &mut classify_run_dir)
 }
@@ -159,10 +160,11 @@ fn census(repo_root: &Path) -> Vec<(String, RunDirClass)> {
 /// [`census`] with its one observation supplied — the seam the guard drives.
 ///
 /// **Every class any reader here decides from comes through this `observe`.**
-/// Production supplies [`classify_run_dir`] at the two call sites that name it,
-/// and nothing else in the module classifies anything, so "the census was taken
-/// once" is a statement about this parameter rather than about a call graph a
-/// reader has to trace.
+/// Production supplies [`classify_run_dir`] at the three call sites that name
+/// it — [`census`], [`resolve_run_id`] and [`find_question`] — and nothing else
+/// in the module classifies anything, so "the census was taken once" is a
+/// statement about this parameter rather than about a call graph a reader has
+/// to trace.
 ///
 /// **Why a seam and not a fixture.** `RunDirClass::Indeterminate` is what the
 /// first-line probe answers when a source interrupts it past its allowance or

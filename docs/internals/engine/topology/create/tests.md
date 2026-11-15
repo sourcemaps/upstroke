@@ -1701,9 +1701,13 @@ the creator's claim did, and a later census keeps the husk rather than reclaimin
 The arm of `stat_after_error` where the proof finds no private half bound (`NothingBound`) to a
 creator that owns its root: a marker naming an absent private half, a root claimed through
 [`RealRoot`], and an `Aborted` at P3c built by hand, because the protocol itself makes the private
-half before it claims a root, so only an outside actor removing it reaches this arm. The creator's
-authority over the root is its own claim, not the husk's proof, so the root is settled first here
-too. Scaffolding alone is pruned and then the public husk goes, in that order
+half before it claims a root, so the fixture arranges the absence by never making it. What the arm
+records is that absence and nothing more: `prove_private_half_ownership` answers
+`NothingBound(TargetAbsent)` only when the marker's private half is confirmed absent, a `NotFound`
+from the observation of its target (any other error retains the husk as `LocatorUnreadable`), so
+the arm says the private half is not there and nothing about who removed it, or whether anything
+did. The creator's authority over the root is its own claim, not the husk's proof, so the root is
+settled first here too. Scaffolding alone is pruned and then the public husk goes, in that order
 (`PublicHalfRemoved(TargetAbsent)`); a root holding content the run did not make is kept, with the
 public directory and its marker, `ExecutionRootRetained` naming no private half, neither remover
 called, and a sentence that does not claim an owner record was kept.

@@ -897,6 +897,14 @@ The two frontier slugs registered for the self-host binding, through the same
 `[[pins]]` path every operator uses: the pair is kept exactly as written, and
 its tier and family are the catalog's, not inferred from the name.
 
+## `fn a_fable_5_2_frontier_pin_loads_and_binds_the_frontier_tier_alone() {`
+
+`claude-code/claude-fable-5-2` was registered for explicit pins only, so this
+pins it the way an operator would and resolves a full small-mid-frontier chain
+through `route::resolve`. The frontier rung binds to the pin. Small and mid
+keep their catalog examples, so the new row does not leak into any tier it was
+not pinned to.
+
 ## `fn every_catalogued_model_still_loads_as_an_explicit_pin() {`
 
 Registering a model must not retire one: every roster entry, old or new, is
