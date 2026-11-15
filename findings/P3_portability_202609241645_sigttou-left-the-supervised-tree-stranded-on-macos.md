@@ -126,3 +126,35 @@ was re-run to try. The owner-authorized retrigger is the commit that adds this s
 pass is one more sample, and it closes nothing.
 
 The raw job log's SHA256 is `03f4bebb93614da3d832f81b1a0758a0f0e0d4ed9b7e19116d24d0c6d92b582f`.
+
+## Recurrence, 2026-11-11
+
+This section records a recurrence on native macOS CI. It establishes no cause and repairs nothing,
+and the frontmatter and the sections above are unchanged.
+
+**The run.** CI run 42976030457, job 130375210731 (`test (macos-latest)`), on pull request #365 at
+`e11840e4`. #365 is a documentation-only change, and its tree had passed CI three times as pull
+request #360's head. The job ran from 06:57:36Z to 07:30:45Z on 2026-11-11.
+
+**What is recorded.**
+
+- Unlike the 2026-10-29 sighting, the job was not cancelled, and libtest printed its failure block
+  and its summary: `3642 passed; 2 failed; 167 ignored`, finished in 1785.77 s.
+- `agent::proc::tests::terminal_input_and_output_stops_cover_the_isolated_tree` panicked at
+  `src/agent/proc/tests.rs:3027:28` with `signal 21 left the supervised tree stranded`. Signal 21
+  on macOS is `SIGTTIN`. Line 3027 is the `unwrap_or_else` on the ten-second wait for the helper to
+  exit after `finish` is written and `SIGCONT` is sent to the group, the step the failure sequence
+  above numbers 5. So this time the step that ran out was in the `SIGTTIN` pass, where the original
+  sighting's, at `ac1cdfbf`, was in the `SIGTTOU` pass.
+- The other failure in the same job was
+  `runner::host::tests::a_hook_started_runs_slot_worker_leaves_the_users_commit_as_the_user_made_it`,
+  which has its own finding, `G7-CI-MACOS-HOOK-COMMIT-FLAKE`.
+- The job took thirty-three minutes. That does not set it apart: the macOS test jobs of runs
+  42961933564 and 42968003215, on the same tree earlier the same day, each took thirty-four minutes
+  and passed.
+- In the same run the Windows test job and every lint and minimum-version job passed. The Ubuntu
+  test job failed on one other test,
+  `engine::tests::the_gate_role_sets_its_worktree_value_again_only_past_another_registrations_empty_commondir`.
+
+**The cause is still not established.** The guard in this finding's frontmatter now applies: the
+next step is to establish the cause, not to repair.

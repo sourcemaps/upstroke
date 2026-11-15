@@ -2378,8 +2378,18 @@ forbids `std::process::Command`, and this file's allowance is module-wide.
 `runner::host::tests::inherited_writer::the_reaper_relay_writer_leaves_no_writer_in_another_threads_fork`
 holds it with the host suites' FIFO oracle.
 
-Its callers are isolated children only: `fake.rs`'s `reaper_relay_install_child` and the host
-suites' `reaper_relay_writer_helper`, each started by `run_test_isolated` under a deadline. The
+It has twelve call sites. Three are bounded, each inside an isolated child started by
+`run_test_isolated` under a deadline: `fake.rs`'s `reaper_relay_install_child`, the host suites'
+`reaper_relay_writer_helper`, and the engine suite's `write_the_gate_probe_stand_in` under
+`the_gate_role_probe_cases_child`. Nine are in ordinary tests with no outer bound: in
+`container/tests.rs`, the test
+`an_attached_start_whose_client_ended_early_asks_its_diagnostic_within_its_own_bounds` and the
+helper `capability_control` (two sites); in `container/exec/tests.rs`, the test
+`a_running_container_whose_observation_stalls_settles_at_its_deadline_or_cancellation_and_keeps_its_fate`;
+and in `engine/tests.rs`, the helpers `git_shim`, `a_fake_cmd` and `delivery_program` and the tests
+`a_mount_inside_an_inherited_common_directory_is_refused_by_run_and_resume_before_the_runtime_is_asked`
+and `a_recorded_mount_whose_target_a_fresh_run_refuses_is_refused_by_the_resume_before_the_runtime_is_asked`.
+Those nine are recorded as finding `PR368-WRITER-HELPER-UNBOUNDED-CALLERS`. The
 funnel's end waits for its reaper's acknowledged exit without a bound, by design, so a call from
 a test's own process can hold the suite for as long as that reaper is stopped (`FUA-I4-RELAY`,
 PR #328's implementation review round 4).
