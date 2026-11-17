@@ -2722,8 +2722,9 @@ fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
 /// the public half with no commit-record check at all. What retains this
 /// directory is that `unbound_shape` reclaims only a bare directory or one
 /// holding the staging file alone, and this one holds an `events.jsonl`.
-/// `first_committed_line` carries the whole argument and the residual
-/// (`SWEEP-CLASSIFY-009`).
+/// `first_committed_line` carries the whole argument, including why a
+/// directory whose listing fails is retained rather than read as bare
+/// (`SWEEP-CLASSIFY-009`'s repair).
 #[test]
 fn a_log_with_no_newline_at_all_is_a_husk_however_long_it_is() {
     let tree = scratch("no-newline");
@@ -3450,6 +3451,21 @@ fn proof_cases() -> Vec<ProofCase> {
             expect: Expect::Retained("markerless-with-content", None),
         },
         ProofCase {
+            // `SWEEP-CLASSIFY-009`: a listing that fails is not a bare
+            // directory. A file where the directory was is the failure every
+            // platform gives the same way, as root too -- `ENOTDIR` on Unix,
+            // `ERROR_DIRECTORY` on Windows, neither `NotFound`. The
+            // permission-bit shape the finding is about is
+            // `a_public_directory_that_cannot_be_listed_is_retained`.
+            name: "public directory the filesystem will not list",
+            before: nothing,
+            after: |husk| {
+                fs::remove_dir_all(husk.public()).expect("remove the public directory");
+                write(&husk.public(), b"a file where the public directory was");
+            },
+            expect: Expect::Retained("public-dir-unreadable", None),
+        },
+        ProofCase {
             name: "private half carrying a commit record",
             before: nothing,
             after: |husk| write(&husk.private.join(COMMIT_RECORD), b"{}"),
@@ -4089,8 +4105,8 @@ fn a_public_husk_removal_that_fails_partway_leaves_the_marker_that_locates_it() 
     assert!(!public.exists(), "including the marker and the directory");
 }
 
-/// A public half whose only content is `.creating.tmp` is **removed**, not
-/// retained.
+/// A public half whose only content is a regular file named `.creating.tmp`
+/// is **removed**, not retained.
 ///
 /// The shape and the removal are each exercised and never composed. The
 /// grid's "staged marker only" case asserts `NothingBound(StagedMarkerOnly)`
@@ -4139,6 +4155,271 @@ fn probe_a_staged_marker_only_public_husk_is_removed() {
     assert!(!retried.exists(), "the next census finishes the job");
 }
 
+/// A marker-less husk whose one entry is named `.creating.tmp` and is not a
+/// regular file, built from a published husk with its marker removed: `plant`
+/// puts that entry at the path it is given.
+fn husk_with_staged_name(tag: &str, plant: impl FnOnce(&BoundHusk, &Path)) -> BoundHusk {
+    let husk = BoundHusk::new(tag);
+    husk.publish();
+    let public = husk.public();
+    fs::remove_file(public.join(MARKER)).expect("remove marker");
+    plant(&husk, &public.join(MARKER_STAGED));
+    assert_eq!(
+        read_dir_names(&public).expect("the public directory lists"),
+        vec![OsString::from(MARKER_STAGED)],
+        "the husk's one entry has the staged marker's name"
+    );
+    husk
+}
+
+/// A directory named `.creating.tmp` is content, not the staged marker
+/// (`PR369-STAGED-NAME-NOT-A-FILE`), and is retained with what it holds.
+///
+/// `StagedMarkerOnly` was removed by `remove_file`, which a directory refuses
+/// (`EISDIR` on Linux); it is now unlinked only while it is a regular file,
+/// and the `remove_dir` that follows refuses the husk while the directory is
+/// still in it. Either way, on every census, so a proof that answered it from
+/// the name alone planned a removal that could never succeed while `status`
+/// said the next write command would reclaim the husk. The base swept such a
+/// directory whole instead, deleting content no listing showed. The answer is
+/// neither: a marker-less husk carrying content.
+///
+/// A separate test rather than a `proof_cases` entry, for the reason
+/// `a_locator_beside_or_below_this_runs_private_half_cannot_authorize_deletion`
+/// gives: that grid asserts one distinct `RetainReason` per case, and its
+/// "marker-less husk carrying run-scoped content" case already answers
+/// `markerless-with-content`, so a second such case fails it (measured).
+#[test]
+fn a_directory_named_like_the_staged_marker_is_retained_as_content() {
+    type Fill = fn(&Path);
+    let cases: Vec<(&str, Fill)> = vec![
+        ("an empty directory", |_| {}),
+        ("a populated directory", |staged| {
+            write(
+                &staged.join(EVENT_LOG),
+                b"content no listing of the husk shows",
+            );
+            write(
+                &staged.join("nested").join("inside.txt"),
+                b"and deeper still",
+            );
+        }),
+    ];
+    for (index, (name, fill)) in cases.into_iter().enumerate() {
+        let husk = husk_with_staged_name(&format!("staged-name-dir{index}"), |_, staged| {
+            fs::create_dir(staged).expect("a directory named like the staged marker");
+            fill(staged);
+        });
+        let staged = husk.public().join(MARKER_STAGED);
+        let listed = read_dir_names(&staged).expect("the directory lists");
+        let before = snapshot_tree(&staged);
+
+        match husk.prove() {
+            PrivateHalfOwnership::Retained(reason) => {
+                assert_eq!(reason.kind(), "markerless-with-content", "{name}: {reason}");
+            }
+            other => panic!(
+                "{name}: a directory named `{MARKER_STAGED}` is content, not the staged \
+                     marker: {other:?}"
+            ),
+        }
+        assert!(staged.is_dir(), "{name}: the directory is left in place");
+        assert_eq!(
+            read_dir_names(&staged).expect("the directory still lists"),
+            listed,
+            "{name}: with every entry it held"
+        );
+        assert_eq!(
+            snapshot_tree(&staged),
+            before,
+            "{name}: and every byte of them"
+        );
+    }
+}
+
+/// A link named `.creating.tmp` is content too: the name is asked of
+/// `fs::symlink_metadata` and never followed, so a link — a POSIX symlink, or
+/// on Windows a junction — is neither the staged marker nor what it reaches.
+#[test]
+fn a_link_named_like_the_staged_marker_is_retained_as_content() {
+    let husk = husk_with_staged_name("staged-name-link", |husk, staged| {
+        let target = husk.root.join("reached-by-the-link");
+        write(&target.join("inside.txt"), b"content the link reaches");
+        link_dir(staged, &target);
+    });
+    let staged = husk.public().join(MARKER_STAGED);
+    let target = husk.root.join("reached-by-the-link");
+    let before = snapshot_tree(&target);
+
+    match husk.prove() {
+        PrivateHalfOwnership::Retained(reason) => {
+            assert_eq!(reason.kind(), "markerless-with-content", "{reason}");
+        }
+        other => panic!("a link named `{MARKER_STAGED}` is not the staged marker: {other:?}"),
+    }
+    assert!(
+        fs::symlink_metadata(&staged).is_ok(),
+        "the link is left in place"
+    );
+    assert_eq!(
+        snapshot_tree(&target),
+        before,
+        "and what it reaches is untouched"
+    );
+}
+
+/// A husk on disk in `shape`, built through the creation funnels and checked
+/// against the ownership proof, so the fixture is the shape the proof plans
+/// for and not merely one that looks like it.
+///
+/// `Bare` is P0 and `StagedMarkerOnly` is P1a, with no private half. The
+/// `TargetAbsent` husk carries a plan beside its marker, so its removal has
+/// content to list and remove before the marker.
+fn unbound_husk(tag: &str, shape: UnboundShape) -> BoundHusk {
+    let husk = BoundHusk::new(tag);
+    let public = husk.public();
+    match shape {
+        UnboundShape::Bare => create_public_dir(&public, &mut NoHooks).expect("P0"),
+        UnboundShape::StagedMarkerOnly => {
+            create_public_dir(&public, &mut NoHooks).expect("P0");
+            stage_marker(&public, &husk.marker, &mut NoHooks).expect("P1a");
+        }
+        UnboundShape::TargetAbsent => {
+            husk.publish();
+            fs::remove_dir_all(&husk.private).expect("remove the private half");
+            write(&public.join(PLAN), b"{}");
+        }
+    }
+    match husk.prove() {
+        PrivateHalfOwnership::NothingBound(proved) => {
+            assert_eq!(proved, shape, "the fixture is the shape it is built as");
+        }
+        other => panic!("{shape:?}: the fixture must bind nothing private: {other:?}"),
+    }
+    husk
+}
+
+/// Every [`UnboundShape`] removes a directory that matches it, and each
+/// removal consults `RunDir.RemovePublicHusk` once: one `Before` and one
+/// `After`, and no other site.
+#[test]
+fn an_unbound_husk_is_removed_by_its_planned_shape() {
+    let site = EffectSiteId::RunDir(RunDirSite::RemovePublicHusk);
+    for (index, shape) in UnboundShape::ALL.iter().copied().enumerate() {
+        let husk = unbound_husk(&format!("unbound-shape-{index}"), shape);
+        let public = husk.public();
+        let mut observer = Observer::default();
+
+        remove_unbound_husk(&public, shape, &mut observer)
+            .unwrap_or_else(|error| panic!("{shape:?}: a matching husk is removed: {error}"));
+
+        assert!(!public.exists(), "{shape:?}: the public directory is gone");
+        assert_eq!(
+            observer.reached,
+            vec![
+                (site.to_string(), HookPhase::Before),
+                (site.to_string(), HookPhase::After),
+            ],
+            "{shape:?}: the hook is consulted once, around the one removal"
+        );
+    }
+}
+
+/// A `Bare` or `StagedMarkerOnly` plan applied to a directory that has since
+/// gained a file is an error, and the file is still there afterwards.
+///
+/// These two shapes are defined by what the directory holds, and the removal
+/// does not list it again, so `remove_dir` refusing a directory that is not
+/// empty is what keeps an entry written after the proof answered. A removal
+/// that listed and emptied the directory, as `TargetAbsent`'s does, deletes
+/// the newcomer and passes every matching-shape case above.
+#[test]
+fn a_bare_or_staged_plan_leaves_a_file_the_directory_gained_since() {
+    let gained: &[u8] = b"written after the plan was made";
+    for (index, shape) in [UnboundShape::Bare, UnboundShape::StagedMarkerOnly]
+        .into_iter()
+        .enumerate()
+    {
+        let husk = unbound_husk(&format!("unbound-gained-{index}"), shape);
+        let public = husk.public();
+        let newcomer = public.join(EVENT_LOG);
+        write(&newcomer, gained);
+
+        let error = remove_unbound_husk(&public, shape, &mut NoHooks)
+            .expect_err("a directory that is no longer the planned shape is not removed");
+
+        match &error {
+            UpstrokeError::Io { path, .. } => assert_eq!(
+                path, &public,
+                "{shape:?}: the error names the directory remove_dir refused"
+            ),
+            other => panic!("{shape:?}: a refused remove_dir is an Io error: {other:?}"),
+        }
+        assert_eq!(
+            fs::read(&newcomer).expect("the gained file is still there"),
+            gained,
+            "{shape:?}: and its bytes are untouched"
+        );
+        assert!(public.is_dir(), "{shape:?}: so is the directory");
+    }
+}
+
+/// A `StagedMarkerOnly` plan applied after the staged marker was replaced by
+/// a link of the same name leaves the link, what it reaches and the directory
+/// (`PR369-STAGED-REPLACEMENT-DELETED`).
+///
+/// The proof planned the shape while `.creating.tmp` was a regular file; the
+/// removal used to unlink that name unconditionally, so whatever stood there
+/// when it ran went, the directory was empty, and `remove_dir` removed it too.
+/// The reviewer's replacement was a live Unix socket; a directory link is the
+/// same "not a regular file" on every platform and has no `sun_path` length
+/// limit. Measured: with the unlink made unconditional again, this fails on
+/// Linux.
+#[test]
+fn a_staged_marker_replaced_by_a_link_is_left_in_place() {
+    let husk = unbound_husk("staged-replaced-link", UnboundShape::StagedMarkerOnly);
+    let public = husk.public();
+    let staged = public.join(MARKER_STAGED);
+    let target = husk.root.join("reached-by-the-replacement");
+    let reached: &[u8] = b"content the replacement reaches";
+    write(&target.join("inside.txt"), reached);
+    fs::remove_file(&staged).expect("the planned staged marker goes");
+    link_dir(&staged, &target);
+    let before = snapshot_tree(&target);
+
+    let error = remove_unbound_husk(&public, UnboundShape::StagedMarkerOnly, &mut NoHooks)
+        .expect_err("a staged name that is no longer a regular file is not removed");
+
+    match &error {
+        UpstrokeError::Io { path, .. } => assert_eq!(
+            path, &public,
+            "the error names the directory remove_dir refused"
+        ),
+        other => panic!("a refused remove_dir is an Io error: {other:?}"),
+    }
+    assert!(
+        fs::symlink_metadata(&staged).is_ok(),
+        "the link is left in place"
+    );
+    assert_eq!(
+        fs::read(staged.join("inside.txt")).expect("the link still reaches its target"),
+        reached,
+        "through it, the bytes it reached"
+    );
+    assert_eq!(
+        snapshot_tree(&target),
+        before,
+        "and what it reaches is untouched"
+    );
+    assert!(public.is_dir(), "so is the public directory");
+    match husk.prove() {
+        PrivateHalfOwnership::Retained(reason) => {
+            assert_eq!(reason.kind(), "markerless-with-content", "{reason}");
+        }
+        other => panic!("the next census retains the link as content: {other:?}"),
+    }
+}
+
 /// P0 creates the **public** run directory and nothing else
 /// (`PR5-RUNDIR-036`).
 ///
@@ -4161,8 +4442,8 @@ fn p0_creates_the_public_directory_and_nothing_private() {
 
     assert!(public.is_dir(), "P0 created the public run directory");
     assert_eq!(
-        read_dir_names(&public),
-        Vec::<String>::new(),
+        read_dir_names(&public).expect("the public directory lists"),
+        Vec::<OsString>::new(),
         "and it is bare: no skeleton, no marker, no private half beneath it"
     );
     assert!(
@@ -4194,22 +4475,22 @@ fn the_owner_record_is_the_first_content_of_a_private_half() {
 
     create_private_dir(&private, &mut NoHooks).expect("P3");
     assert_eq!(
-        read_dir_names(&private),
-        Vec::<String>::new(),
+        read_dir_names(&private).expect("the private half lists"),
+        Vec::<OsString>::new(),
         "immediately after P3 the private half is empty"
     );
 
     stage_owner_record(&private, &owner, &mut NoHooks).expect("P3a");
     assert_eq!(
-        read_dir_names(&private),
-        vec![OWNER_RECORD_STAGED.to_owned()],
+        read_dir_names(&private).expect("the private half lists"),
+        vec![OsString::from(OWNER_RECORD_STAGED)],
         "the staged owner record is the only thing in it"
     );
 
     publish_owner_record(&private, &mut NoHooks).expect("P3b");
     assert_eq!(
-        read_dir_names(&private),
-        vec![OWNER_RECORD.to_owned()],
+        read_dir_names(&private).expect("the private half lists"),
+        vec![OsString::from(OWNER_RECORD)],
         "and after publication the owner record is the only content there has ever been"
     );
 }
@@ -13812,5 +14093,266 @@ fn an_ambiguous_husk_prefix_is_not_reported_as_one_husk() {
     assert!(
         !error.to_string().contains("never recorded a committed"),
         "two husks match, so naming one of them would be a guess: {error}"
+    );
+}
+
+// =======================================================================
+// A public husk's entries, by the names the directory holds
+// =======================================================================
+
+/// A public husk holding an entry whose name is not valid UTF-8 is reclaimed
+/// whole: `remove_public_husk` returns `Ok` and the directory is gone
+/// (`SWEEP-NAMES-005`).
+///
+/// `read_dir_names` handed the removal each name through `to_string_lossy`, so
+/// `a\xffb` came back as `a\u{FFFD}b`, `public.join` named a path that does not
+/// exist, and the removal stopped on its `NotFound` with the husk still
+/// standing. With that conversion restored, this test fails on exactly that
+/// error.
+///
+/// Linux only, because the name is spelt as bytes (`OsStrExt::from_bytes`) and
+/// the filesystems this project builds and tests on there accept it. A
+/// filesystem that holds only UTF-8 names refuses to create the entry, as APFS
+/// does with `EILSEQ` under macOS's temporary directory, and no husk on it can
+/// hold the name this defect needs. A refusal therefore fails the test with a
+/// diagnostic saying so, rather than letting it pass having asserted nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_public_husk_holding_a_name_that_is_not_utf8_is_reclaimed() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let tree = scratch("husknotutf8");
+    let public = tree.path().join("01HUSKNOTUTF8");
+    fs::create_dir_all(&public).expect("the public husk");
+    fs::write(public.join(MARKER), b"{}").expect("the husk's marker");
+    let name = std::ffi::OsStr::from_bytes(b"a\xffb");
+    assert!(
+        name.to_str().is_none(),
+        "the witness's entry name is not valid UTF-8"
+    );
+    if let Err(refused) = fs::write(public.join(name), b"run-scoped content") {
+        panic!(
+            "the filesystem under {} refused an entry whose name is not valid UTF-8 \
+             ({refused}); this test needs one that accepts such names",
+            public.display()
+        );
+    }
+
+    remove_public_husk(&public, &mut NoHooks)
+        .expect("a husk holding a name that is not valid UTF-8 is reclaimed");
+    assert!(
+        matches!(
+            fs::symlink_metadata(&public),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        ),
+        "the public husk is gone: {}",
+        public.display()
+    );
+}
+
+/// A public directory that cannot be listed is **retained**, never answered
+/// as a bare husk with nothing bound (`SWEEP-CLASSIFY-009`).
+///
+/// The finding's husk: a committed run's public directory holding
+/// `events.jsonl` and no marker, whose listing fails. `read_dir_names`
+/// answered every failure with an empty list, `unbound_shape` read that as
+/// `NothingBound(Bare)` -- the answer that authorises `remove_public_husk`,
+/// which lists the directory again and, once the failure has passed, deletes
+/// the event log. Here the failure is the directory's read permission removed,
+/// so listing it is refused with `PermissionDenied`, and the proof has to
+/// answer `public-dir-unreadable`. With the fold restored, this test fails on
+/// exactly that `NothingBound(Bare)`. The removal is then asked too, and has to
+/// return the listing's failure with the event log still in place.
+///
+/// Linux only, as the neighbouring non-UTF-8 test is: a mode bit is how an
+/// unlistable directory is built without privilege. A process that ignores
+/// mode bits, as root does, lists the directory anyway; the test checks for
+/// that before asking the proof and fails with a diagnostic, rather than
+/// passing having shown nothing. The permission is given back by a guard
+/// declared after the scratch tree, so it drops first, on a panic as on a
+/// normal return, and the tree can be reclaimed.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_public_directory_that_cannot_be_listed_is_retained() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Gives `path` back the permissions it had. A failed restore is left to
+    /// surface where it matters: the scratch tree's reclaim, which needs the
+    /// permission back, then fails and reports it.
+    struct Restore {
+        path: PathBuf,
+        permissions: fs::Permissions,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, self.permissions.clone());
+        }
+    }
+
+    let tree = scratch("unlistablehusk");
+    let public = public_dir(&tree.path().join("repo"), "01UNLISTABLEHUSK0000000000");
+    fs::create_dir_all(&public).expect("the public directory");
+    write(&public.join(EVENT_LOG), b"a committed run's event log");
+    assert!(!public.join(MARKER).exists(), "the husk has no marker");
+
+    let permissions = fs::metadata(&public)
+        .expect("the public directory's permissions")
+        .permissions();
+    let _restore = Restore {
+        path: public.clone(),
+        permissions: permissions.clone(),
+    };
+    fs::set_permissions(
+        &public,
+        fs::Permissions::from_mode(permissions.mode() & !0o444),
+    )
+    .expect("remove the public directory's read permission");
+    match fs::read_dir(&public) {
+        Err(refused) if refused.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(other) => panic!(
+            "listing {} failed, but not with a permission error: {other}",
+            public.display()
+        ),
+        Ok(_) => panic!(
+            "{} still lists with its read permission removed: this process ignores \
+             permission bits, as root does, so this test cannot show anything; run it as an \
+             unprivileged user",
+            public.display()
+        ),
+    }
+
+    match prove_private_half_ownership(
+        &public,
+        &RepoKey::v1(&tree.path().join("git-dir")),
+        &tree.path().join("private"),
+    ) {
+        PrivateHalfOwnership::Retained(reason) => assert_eq!(
+            reason.kind(),
+            "public-dir-unreadable",
+            "a listing refused for permission is retained as unreadable: {reason}"
+        ),
+        PrivateHalfOwnership::NothingBound(shape) => panic!(
+            "a public directory that could not be listed answered NothingBound({shape:?}); only \
+             a retained answer keeps the census from reclaiming it, events.jsonl and all"
+        ),
+        PrivateHalfOwnership::Proven(proof) => panic!(
+            "a public directory that could not be listed answered Proven({proof:?}); only a \
+             retained answer keeps the census from reclaiming it, events.jsonl and all"
+        ),
+    }
+
+    let error = remove_public_husk(&public, &mut NoHooks)
+        .expect_err("a removal that cannot list the directory reports it");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &public && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "the removal returns the listing's own failure, for the public path: {error}"
+    );
+    assert!(
+        public.join(EVENT_LOG).is_file(),
+        "and it removed nothing: the event log is still there"
+    );
+}
+
+/// An entry whose read fails after the directory opened fails the whole
+/// listing, never drops out of it (`SWEEP-CLASSIFY-009`).
+#[test]
+fn an_entry_that_fails_mid_listing_fails_the_whole_listing() {
+    const FAILURE: &str = "an entry read failed after the directory opened";
+    let entries = |fail: bool| {
+        [
+            Some(Ok(OsString::from("a"))),
+            fail.then(|| Err(std::io::Error::other(FAILURE))),
+            Some(Ok(OsString::from("events.jsonl"))),
+        ]
+        .into_iter()
+        .flatten()
+    };
+
+    let error = collect_entry_names(entries(true))
+        .expect_err("a listing with an entry that failed is an error, not a shorter list");
+    assert_eq!(
+        error.to_string(),
+        FAILURE,
+        "the listing returns the entry's own failure"
+    );
+    assert_eq!(
+        collect_entry_names(entries(false)).expect("the same entries without the failure"),
+        [OsString::from("a"), OsString::from("events.jsonl")],
+        "the same entries without the failure list, sorted"
+    );
+}
+
+/// A real directory whose listing fails **after it opened** is retained, and
+/// the retained answer's `detail` is the filesystem's own error, without the
+/// directory's path (`SWEEP-CLASSIFY-009`).
+///
+/// The finding's husk again: `events.jsonl` and no marker. The listing fault
+/// fails the read after the first entry, through the `read_dir_names` that
+/// both the proof and the removal list with. The test above hands
+/// `collect_entry_names` a built iterator, so it passes with the fault dropped
+/// at the real listing; this one does not. A `.flatten()` that drops the
+/// failed entry answers `Retained(MarkerlessWithContent)` here and lets the
+/// removal delete the event log; a failure folded into an empty list answers
+/// `NothingBound(Bare)`. And a `detail` taken from the crate error's text,
+/// `failed to read <path>: …`, names the directory twice in the report. The
+/// fault is disarmed by its guard, on a panic as on a normal return.
+#[test]
+fn a_listing_that_fails_after_it_opened_retains_the_public_directory() {
+    let tree = scratch("midlistinghusk");
+    let public = public_dir(&tree.path().join("repo"), "01MIDLISTINGHUSK0000000000");
+    fs::create_dir_all(&public).expect("the public directory");
+    write(&public.join(EVENT_LOG), b"a committed run's event log");
+    assert!(!public.join(MARKER).exists(), "the husk has no marker");
+    let _fault = listing_fault::ListingFault::arm(&public, std::io::ErrorKind::Other);
+
+    match prove_private_half_ownership(
+        &public,
+        &RepoKey::v1(&tree.path().join("git-dir")),
+        &tree.path().join("private"),
+    ) {
+        PrivateHalfOwnership::Retained(RetainReason::PublicDirUnreadable { detail }) => {
+            assert!(
+                !detail.contains(&*public.to_string_lossy()),
+                "the detail is the filesystem's own error, without the directory's path: {detail}"
+            );
+            assert_eq!(
+                detail,
+                listing_fault::FAILURE,
+                "the detail is the listing's own failure, as the filesystem gave it"
+            );
+        }
+        PrivateHalfOwnership::Retained(reason) => panic!(
+            "a public directory whose listing failed after it opened was retained as {}, not \
+             public-dir-unreadable: {reason}",
+            reason.kind()
+        ),
+        PrivateHalfOwnership::NothingBound(shape) => panic!(
+            "a public directory whose listing failed after it opened answered \
+             NothingBound({shape:?}); only a retained answer keeps the census from reclaiming \
+             it, events.jsonl and all"
+        ),
+        PrivateHalfOwnership::Proven(proof) => panic!(
+            "a public directory whose listing failed after it opened answered Proven({proof:?}); \
+             only a retained answer keeps the census from reclaiming it, events.jsonl and all"
+        ),
+    }
+
+    let error = remove_public_husk(&public, &mut NoHooks)
+        .expect_err("a removal whose listing fails after it opened reports it");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &public && source.kind() == std::io::ErrorKind::Other
+        ),
+        "the removal returns the listing's own failure, for the public path: {error}"
+    );
+    assert!(
+        public.join(EVENT_LOG).is_file(),
+        "and it removed nothing: the event log is still there"
     );
 }

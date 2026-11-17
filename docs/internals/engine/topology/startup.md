@@ -196,8 +196,15 @@ the private half is known.
 
 ## `pub enum FailedStep` › `PublicHalf,`
 
-`RunDir.RemovePublicHusk` on a directory with nothing private bound.
+`RunDir.RemovePublicHusk` on a directory with nothing private bound, which
+`rundir::remove_unbound_husk` removes by the shape the census planned.
 Nothing private existed by ordering, so nothing private is at risk.
+
+This is also the answer when a `Bare` or `StagedMarkerOnly` directory has
+gained an entry since the census planned its reclaim. The removal refuses
+it, and the entry stays (see `apply`). A `TargetAbsent` husk is the
+exception: it carries a marker and is still swept whole, on its marker's
+authority, so this error can come after some of its entries were removed.
 
 ## `pub enum FailedStep` › `PrivateHalf,`
 
@@ -686,12 +693,17 @@ the arm's whole content — see below.
 
 **The retaining answer, taken before any second observation.** The probe could
 not read this directory's `events.jsonl`; the lock probe, the marker read and
-the ownership proof are three more questions about the same directory, and each
-of them folds its own failures towards reclaiming — `read_dir_names` answers
-`[]` when `read_dir` fails, which is the shape `unbound_shape` reclaims
-(`SWEEP-CLASSIFY-009`). So the census stops here and retains, rather than
-asking them and hoping. Nothing is deleted and nothing is repaired, and the
-entry names why: `RetainReason::ClassificationIncomplete`.
+the ownership proof are three more questions about the same directory. The
+proof no longer folds a failed listing towards reclaiming: `read_dir_names`
+returns the error, and `unbound_shape` answers it with
+`RetainReason::PublicDirUnreadable` rather than the bare shape it reclaims
+(`SWEEP-CLASSIFY-009`'s repair). The reason to retain here has changed with
+it, and is now the probe's failure alone: those three questions are the ones
+a husk is asked, and this directory has not been shown to be one — its first
+line may be a `run_started` the probe could not finish reading. So the census
+stops here and retains, rather than asking them and hoping. Nothing is deleted
+and nothing is repaired, and the entry names why:
+`RetainReason::ClassificationIncomplete`.
 
 `locator: None` for the same reason. The marker would parse and would name a
 private half, but a locator is a claim about a private half this census has
@@ -753,6 +765,39 @@ Perform one plan. The only place in this module that has an effect.
 directory's residue cannot end the command that censused it. The retain arm
 keeps a second guarantee it had before: it reaches no funnel at all, which is
 now visible in the signature as well as in the body.
+
+## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `match rundir::remove_unbound_husk(public, shape, hooks) {`
+
+**The public half alone is removed by the shape the plan carries**, not by
+what the directory holds when `apply` runs. `scan` and `apply` look at the
+directory at two different times, and it can change in between. For `Bare`
+and `StagedMarkerOnly`, `rundir::remove_unbound_husk` does not list the
+directory again. It runs one `remove_dir`, and `remove_dir` refuses a
+directory that is not empty. For `StagedMarkerOnly` it first unlinks the
+staged marker, but only while that name is still a regular file, asked with
+`fs::symlink_metadata` and never followed. So an entry that arrived after the
+plan is an error, `FailedStep::PublicHalf`, and the entry and the directory
+stay for the next census to classify again. That includes a directory, a link
+or anything else that is not a regular file put in the staged marker's place
+under its name. A regular file put there is indistinguishable from the staged
+marker and is unlinked as it. Two limits remain. The type is asked and then
+the name is unlinked, two calls, so an entry that replaces the file between
+them is unlinked. On Windows a reparse point that is not a name surrogate and
+not a directory answers as a regular file and is unlinked as the staged marker
+(`PR369-WINDOWS-REPARSE-AS-STAGED`, deferred). A husk that carries a marker
+is still swept whole, on its marker's authority. `TargetAbsent` is decided by
+the marker's private target, not by what the public directory holds, so that
+shape still lists and empties the directory with the marker last, as
+`remove_public_husk` does for both halves under the proof (the next arm).
+
+This arm used to call `remove_public_husk`, which listed the directory again
+and removed everything it found. Take a committed run whose public directory
+is renamed aside while the census scans. Its path is empty, an absent
+directory lists empty, and so the census plans the `Bare` reclaim. If the
+directory is renamed back before `apply`, the second listing finds the run's
+`events.jsonl` and deletes it.
+`a_committed_run_put_back_after_a_bare_plan_keeps_its_event_log` replays that
+sequence.
 
 ## `fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {` › `if let Err(error) = rundir::remove_private_husk(proof, hooks) {`
 
