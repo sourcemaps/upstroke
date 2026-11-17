@@ -158,3 +158,40 @@ request #360's head. The job ran from 06:57:36Z to 07:30:45Z on 2026-11-11.
 
 **The cause is still not established.** The guard in this finding's frontmatter now applies: the
 next step is to establish the cause, not to repair.
+
+## Recurrence, 2026-11-15
+
+This section records another recurrence on native macOS CI. It establishes no cause and repairs
+nothing, and the frontmatter and the sections above are unchanged.
+
+**The run.** CI run 43714470619, job 132812896226 (`test (macos-latest)`), a `pull_request` run on
+pull request #382 at `807895fb`. The job ran from 12:33:43Z to 13:07:21Z on 2026-11-15. Its test
+step started at 12:34:07.
+
+**What is recorded.**
+
+- The test printed `agent::proc::tests::terminal_input_and_output_stops_cover_the_isolated_tree
+  ... FAILED` at 12:38:11.
+- As on 2026-11-11, the job was not cancelled, and libtest printed its failure block and its
+  summary: `3670 passed; 1 failed; 170 ignored`, finished in 1784.68 s. This test was the only
+  failure.
+- The test panicked at `src/agent/proc/tests.rs:3027:28` with
+  `signal 22 left the supervised tree stranded`. Signal 22 on macOS is `SIGTTOU`. The panic is at
+  the same line and column as on 2026-11-11, with the same message apart from the signal number.
+  In the tree this section was written in, line 3027 is still the `unwrap_or_else` on the
+  ten-second wait for the helper to exit after `finish` is written and `SIGCONT` is sent to the
+  group, and column 28 is its `panic!`. The tree at `807895fb` was not read line by line, so that
+  it is the same step, the one the failure sequence above numbers 5, is an inference from the
+  matching location and message. The step ran out in the `SIGTTOU` pass this time, as at the
+  original sighting at `ac1cdfbf`, and not in the `SIGTTIN` pass of 2026-11-11.
+- In the same run every other test, lint and minimum-version job passed, `test (winguest)`
+  included. `test (windows-latest)` was skipped.
+
+**What was done.** An empty commit was pushed to re-run CI past the failure, which the owner allows
+for an intermittent failure. No production code changed and no timeout was raised. A later pass is
+one more sample, and it closes nothing.
+
+The raw job log's SHA256 is `37dbcaa1801c8b1ac9ba7727f822116ac1c2df7ef3419c8a33a783df700628f1`.
+
+**The cause is still not established.** The guard in this finding's frontmatter still applies: the
+next step is to establish the cause, not to repair.
