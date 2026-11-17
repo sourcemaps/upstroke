@@ -4610,6 +4610,16 @@ hard-blocks; an answer staged and published into `answers/` while the
 engine is away is ingested by the next incarnation's first step, `via`
 `event-log`, before anything else is selected.
 
+R21, at the layer the loop calls: ingestion is a read, never a take. Once the answer is published
+the test takes the bytes of `answers/<qid>.json` (`interaction::answer_path`), and right after the
+first step — the one that ingests it — asserts that the file is still present and that `fs::read`
+of it equals those bytes. The ingestion reads through `EventLogAnswers`, whose three reads of a
+published answer (`poll`, `resolve`'s immediate read, `resolve`'s read inside its waiting loop) all
+go through `interaction::read_answer`; each of the three is witnessed on its own in
+`interaction.rs`'s tests. Measured on this head: `EventLogAnswers` removing the file after each of
+its reads fails this test on the presence assertion, and `read_answer` rewriting the file as the
+answer's compact JSON fails it on the byte assertion.
+
 ## `const ANSWER_INGEST_KILL_CHILD: &str =`
 
 The kill child of the two `Answer.Ingest` witnesses below.
