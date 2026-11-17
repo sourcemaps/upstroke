@@ -84,6 +84,13 @@ pub enum RetainReason {
     },
     /// A husk with no marker at all, carrying run-scoped content.
     MarkerlessWithContent,
+    /// A husk whose marker could not be read and whose public directory then
+    /// could not be listed: the filesystem answered something other than "not
+    /// found" (`EACCES`, `EMFILE`, `EIO`), so whether the directory carries
+    /// run-scoped content -- a committed run's `events.jsonl` included -- is
+    /// unknown, and a listing that failed is never read as a bare directory
+    /// (`SWEEP-CLASSIFY-009`). `detail` is the error as the filesystem gave it.
+    PublicDirUnreadable { detail: String },
     /// `committed.json` is present: the private half may have crossed P5b, so
     /// no census and no creating process ever deletes it.
     PossiblyCommitted,
@@ -115,6 +122,7 @@ impl RetainReason {
         "owner-record-unparseable",
         "owner-record-disagrees",
         "markerless-with-content",
+        "public-dir-unreadable",
         "possibly-committed",
         "classification-incomplete",
     ];
@@ -141,6 +149,7 @@ impl RetainReason {
         "owner-record-unparseable",
         "owner-record-disagrees",
         "markerless-with-content",
+        "public-dir-unreadable",
         "possibly-committed",
     ];
 
@@ -158,6 +167,7 @@ impl RetainReason {
             Self::OwnerRecordUnparseable => "owner-record-unparseable",
             Self::OwnerRecordDisagrees { .. } => "owner-record-disagrees",
             Self::MarkerlessWithContent => "markerless-with-content",
+            Self::PublicDirUnreadable { .. } => "public-dir-unreadable",
             Self::PossiblyCommitted => "possibly-committed",
             Self::ClassificationIncomplete => "classification-incomplete",
         }
@@ -255,6 +265,11 @@ impl std::fmt::Display for RetainReason {
             Self::MarkerlessWithContent => {
                 f.write_str("it carries run-scoped content but no marker to bind it")
             }
+            Self::PublicDirUnreadable { detail } => write!(
+                f,
+                "its directory cannot be listed ({detail}), so whether it carries run-scoped \
+                 content is unknown"
+            ),
             Self::PossiblyCommitted => {
                 f.write_str("its private half carries a commit record, so the run may have started")
             }

@@ -50,9 +50,9 @@
 )]
 
 use super::{
-    COMMIT_RECORD, CreatingMarker, MARKER, MARKER_STAGED, OWNER_RECORD, OwnerField, OwnerRecord,
-    Path, PathBuf, PrivateHalfOwnership, RepoKey, RetainReason, UnboundShape, fs, io,
-    read_dir_names, runner_policy_sha256,
+    COMMIT_RECORD, CreatingMarker, MARKER, MARKER_STAGED, OWNER_RECORD, OsStr, OwnerField,
+    OwnerRecord, Path, PathBuf, PrivateHalfOwnership, RepoKey, RetainReason, UnboundShape,
+    UpstrokeError, fs, io, read_dir_names, runner_policy_sha256, staged_marker_is_a_regular_file,
 };
 
 /// Proof that one private half belongs to one public husk of this
@@ -324,10 +324,45 @@ mod locator_fault {
 /// content". Read literally: anything other than the staging file is other
 /// content, the empty run skeleton included, because retention costs a
 /// report and reclamation cannot be undone.
+///
+/// **Both reclaiming answers need a listing that completed.** A listing that
+/// failed is retained as [`RetainReason::PublicDirUnreadable`], carrying the
+/// error as the filesystem gave it -- the I/O error's own text, not the crate
+/// error's, whose `failed to read <path>` would name the directory a second
+/// time in a report that names it already, as [`RetainReason::LocatorUnreadable`]
+/// carries the bare error too. A failed listing is no evidence that nothing is
+/// there, and the bare answer it used to stand in for let a transient `EMFILE`
+/// authorise deleting a committed run's `events.jsonl` (`SWEEP-CLASSIFY-009`).
+/// A directory that does not exist still lists as empty, and so still answers
+/// bare.
+///
+/// **The staging file is a regular file named `.creating.tmp`, not the name
+/// alone** (`PR369-STAGED-NAME-NOT-A-FILE`). [`super::remove_unbound_husk`]
+/// unlinks the staged-marker shape's one entry only while it is a regular file
+/// and then removes the directory with `remove_dir`, which refuses the
+/// directory while a directory of that name is still in it, on every census
+/// (the `remove_file` it called before refused that directory itself, `EISDIR`
+/// on Linux). So a husk answered by its name alone could never be reclaimed
+/// while `status` said the next write command would reclaim it. The question
+/// is [`super::staged_marker_is_a_regular_file`], the one the removal asks
+/// again: the name is asked of `fs::symlink_metadata`, never followed, and a
+/// directory, a link or anything else of that name, and a stat that fails, is
+/// content, retained as [`RetainReason::MarkerlessWithContent`] (on Windows,
+/// short of the reparse point that function's doc names).
 fn unbound_shape(public: &Path) -> PrivateHalfOwnership {
-    match read_dir_names(public).as_slice() {
+    let names = match read_dir_names(public) {
+        Ok(names) => names,
+        Err(unlisted) => {
+            let detail = match unlisted {
+                UpstrokeError::Io { source, .. } => source.to_string(),
+                other => other.to_string(),
+            };
+            return PrivateHalfOwnership::Retained(RetainReason::PublicDirUnreadable { detail });
+        }
+    };
+    match names.as_slice() {
         [] => PrivateHalfOwnership::NothingBound(UnboundShape::Bare),
-        [only] if only == MARKER_STAGED => {
+        [only] if only == OsStr::new(MARKER_STAGED) && staged_marker_is_a_regular_file(public) => {
             PrivateHalfOwnership::NothingBound(UnboundShape::StagedMarkerOnly)
         }
         _ => PrivateHalfOwnership::Retained(RetainReason::MarkerlessWithContent),

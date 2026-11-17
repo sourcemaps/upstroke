@@ -1188,6 +1188,13 @@ pub(crate) fn remove_dir(path: &Path) {
         .unwrap_or_else(|error| panic!("removing the directory {}: {error}", path.display()));
 }
 
+/// Rename `from` to `to`: an operator's file operation, standing for someone
+/// who moves a directory aside and later puts it back.
+pub(crate) fn rename(from: &Path, to: &Path) {
+    fs::rename(from, to)
+        .unwrap_or_else(|error| panic!("renaming {} to {}: {error}", from.display(), to.display()));
+}
+
 /// Run this test binary again, `--exact --ignored`, with `env` set, and
 /// return its exit status.
 ///

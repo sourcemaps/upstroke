@@ -8,7 +8,7 @@ A headless orchestration engine for AI coding agents. You and a frontier model d
 work; `upstroke` executes the plan unattended: it turns the plan into a dependency graph of typed
 tasks, dispatches each to an existing coding-agent CLI with a model chosen per task, verifies every
 result through objective gates and a strong-model review — cross-family where a second model
-family is available — and commits only what passes.
+family is available, unless `cross_family = false` opts out — and commits only what passes.
 
 It never edits a file, never runs an agentic loop, and never calls a model API. It is the
 conductor, not an instrument.
@@ -68,7 +68,7 @@ from the repo's shape (`Cargo.toml`, `go.mod`, `package.json`) when unconfigured
 ```toml
 [routing]
 fix = { chain = ["small", "mid", "frontier"], attempts_per = 2 }
-review = { tier = "frontier", timeout_secs = 5400 }   # per pass; or { enabled = false }
+review = { tier = "frontier", timeout_secs = 5400 }   # per pass; cross_family = false: no alternative reviewer, so the primary reviews the tasks its own model implemented (second_opinion overrides still run); or { enabled = false }
 
 [routing.effort]
 implementation = "xhigh"               # reasoning depth for every worker attempt
@@ -123,11 +123,15 @@ These are invariants, and they are what make it safe to leave running:
 - **Narrow permissions.** Unattended agents get file tools plus exactly the configured gate
   commands, never a skip-all-permissions flag. Reviewers are read-only.
 - **Independent review is preferred and its fallback is explicit.** Where a task runs on the exact
-  model that would review it, upstroke rebinds the review to another model family. If that
-  alternative cannot be probed, the run warns with the affected tasks and falls back to the
-  frozen same-model reviewer instead of claiming independence. A configured blast-radius
-  second opinion is stricter: another model family must be available, both reviewers judge the
-  same diff independently, and both must pass.
+  model that would review it, upstroke rebinds the review to an alternative from another model
+  family. If that alternative cannot be probed, the run warns with the affected tasks and
+  falls back to the frozen same-model reviewer instead of claiming independence.
+  `[routing] review = { cross_family = false }` opts out of that alternative and nothing else: no
+  rebind is made, the primary reviews the tasks its own model implemented, and where a task with no
+  second opinion can run on that model the run warns once, naming those tasks.
+  A configured blast-radius second opinion is stricter, and the switch leaves it in place: another
+  model family must be available, both reviewers judge the same diff independently, and both must
+  pass.
 - **An empty diff can never pass.** "Done" claims require changed code.
 - **Estimates are never optimistic.** An unmeasured pool reads as *unknown*, not full; a figure
   derived only from what upstroke spent is shown as a ceiling (`≤`); every estimate is discounted

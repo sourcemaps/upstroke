@@ -22,9 +22,9 @@ path, and the child `_exit(127)`s; the pipe carries no bytes; the reaper reads z
 **empty listing**, which is the loop's "everything this selector names is gone" exit -> the
 coordinator's labeled containers survive, and the reaper reports the same success it reports on a
 clean machine. An inspection that could not be performed is presented as the negative answer, the
-same class as `read_dir_names` folding a failed listing into `[]` (`SWEEP-CLASSIFY-009`) and the
-`.ok()` fold of `SWEEP-AMBIENT-010`; §7's stricter treatment is triggered here exactly because the
-inputs are filesystem state and the environment.
+same class as `read_dir_names` folding a failed listing into `[]`, as it did until
+`SWEEP-CLASSIFY-009`'s repair, and the `.ok()` fold of `SWEEP-AMBIENT-010`; §7's stricter treatment
+is triggered here exactly because the inputs are filesystem state and the environment.
 
 The inputs to arming are therefore wider than `PATH`: `find_program` joins a **relative** `PATH`
 entry to the name and returns the result unchanged, so the working directory at fork time decides
