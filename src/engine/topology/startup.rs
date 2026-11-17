@@ -520,10 +520,12 @@ fn scan_classified(
 
 fn apply(hooks: &mut dyn RunDirHooks, public: &Path, plan: Planned) -> RunDirOutcome {
     match plan {
-        Planned::ReclaimPublicOnly(shape) => match rundir::remove_public_husk(public, hooks) {
-            Ok(()) => RunDirOutcome::ReclaimedPublicOnly(shape),
-            Err(error) => unreclaimable(FailedStep::PublicHalf, &error),
-        },
+        Planned::ReclaimPublicOnly(shape) => {
+            match rundir::remove_unbound_husk(public, shape, hooks) {
+                Ok(()) => RunDirOutcome::ReclaimedPublicOnly(shape),
+                Err(error) => unreclaimable(FailedStep::PublicHalf, &error),
+            }
+        }
         Planned::ReclaimBothHalves(proof) => {
             if let Err(error) = rundir::remove_private_husk(proof, hooks) {
                 return unreclaimable(FailedStep::PrivateHalf, &error);

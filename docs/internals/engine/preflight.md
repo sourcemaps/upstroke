@@ -250,9 +250,12 @@ ledger stays honest either way. A loud warning beats a dead run.
 ## `let tier = analysis`
 
 Now say WHICH tasks. Resolution could not: a shipped binary
-always has the Copilot adapter, so the only way the rebind
-actually goes missing is right here, and naming the tasks is
-the difference between a note and something actionable.
+always has the Copilot adapter, so this is how an *enabled*
+alternative goes missing (its probe fails), and naming the
+tasks is the difference between a note and something
+actionable. `[routing] review = { cross_family = false }`
+removes the alternative earlier, at resolution, on purpose;
+that is a choice the config made, not this branch's case.
 
 ## `if !analysis.gates.is_empty() {`
 

@@ -154,6 +154,10 @@ so.
 Through `Answer.StageWrite` then `Answer.PublishRename` — the two sites the
 frozen inventory gives the answer command. Same two steps, same bytes.
 
+Atomic is not create-once: the rename replaces an answer file that already
+exists, and this writer never refuses to publish over one
+(`PR381-ANSWER-PUBLISH-RACE`).
+
 ## `pub fn read_answer_record(`
 
 Read the whole record if one has been left — the answer and the ruling.
@@ -408,9 +412,99 @@ a run with many open questions cannot multiply its own deadline.
 
 An answer that lands during the wait is picked up.
 
+## `mod tests` › `struct CountingSleeper(std::cell::Cell<usize>);`
+
+Counts the sleeps `resolve` takes, so a test can read how long it waited. The count is a `Cell`:
+each sleeper lives on its test's stack, `resolve` calls `sleep` synchronously through
+`&dyn Sleeper`, and the same test reads `count()`, so the state has one owner and no lock guards
+it. Nothing shares a count between two handles, so the sleeper is not `Clone`.
+
 ## `mod tests` › `struct ArrivingSleeper {`
 
 Stands in for an operator running `upstroke answer` mid-wait.
+Its countdown `after` is a `Cell`: the test's stack is its one owner and `resolve` calls `sleep`
+synchronously, so no lock guards it. `sleep` publishes when the count reaches zero (zero on entry
+means it already has) and `expect`s `write_answer`'s result, so a failed publication fails the
+test as that error rather than later as an `Unanswered` answer.
+
+The double publishes its `record` field, which each test names. A test can then publish the same
+record somewhere else and take the bytes `write_answer` writes for it, rather than spelling them
+out by hand, and a witness can run once per record shape.
+
+## `mod tests` › `fn both_shapes(answer: Answer) -> [AnswerRecord; 2] {`
+
+The two shapes a published answer file takes, both holding the same answer:
+`AnswerRecord::unattributed`, which serializes to exactly a bare `Answer`'s bytes, and
+`AnswerRecord::convicted` with `CITATION`, which carries `attribution` and `citation` beside the
+answer. A witness that only publishes the first cannot tell a reader that leaves the file alone
+from one that deserializes it as `Answer` and writes it back pretty, because both leave the same
+bytes (`PR381-ATTRIBUTED-ANSWER-REWRITE-UNGUARDED`). The attributed shape loses its ruling under
+that rewrite. The helper asserts that the attributed shape's pretty bytes differ from the bare
+answer's, so a witness run over both shapes cannot lose that power without a test failing.
+
+## `mod tests` › `fn assert_read_never_took(path: &Path, published: &[u8], read: &str) {`
+
+The rule is the run layout's design: `design/15`, "An answer file is read, never taken". Ingestion
+reads a published answer and never takes it, so an ingestion leaves the file exactly as it found
+it; publication, which can replace the file, is outside the rule. The answer file belongs to the run-scoped
+run-directory contents that the effects vocabulary's row R21 accounts for. After a read of a
+published answer, the file is still present and `fs::read` of it equals the bytes taken before the
+read; each assertion message names R21's read-never-take rule and the read under test.
+
+`EventLogAnswers` reads a published answer in exactly three places, and all three go through
+`read_answer`: `poll`; `resolve`'s immediate read, before it waits; and `resolve`'s read inside its
+waiting loop, after each sleep. The three tests below witness one read each, and each runs once
+per shape from `both_shapes`, unattributed and then convicted. A fourth witness covers the two
+readers directly:
+`an_attributed_answer_file_is_read_back_with_its_ruling` asserts that a convicted file is
+byte-identical after `read_answer_record` and again after `read_answer`. The witnesses are:
+
+- `polling_a_published_answer_reads_it_and_leaves_the_file_byte_identical`: `poll`, both shapes;
+- `resolving_a_published_answer_reads_it_at_once_and_leaves_the_file_byte_identical`: `resolve`'s
+  immediate read, both shapes;
+- `an_answer_published_during_the_wait_is_read_by_the_loop_and_left_byte_identical`: `resolve`'s
+  waiting read, both shapes;
+- `an_attributed_answer_file_is_read_back_with_its_ruling`: `read_answer_record` and `read_answer`
+  on a convicted record.
+
+`poll` already had a
+witness: since `af6cb53a`,
+`an_answer_left_on_disk_under_a_budget_stop_is_ingested_once_by_the_resume_in_its_epoch_and_never_again`
+in `src/engine/topology/recover/tests.rs` ingests through `poll` and then asserts the file is
+retained byte for byte. The finding these tests close measured at `7e0110a1`, before that test
+existed, that a reader removing the file passed every committed test; that a rewriting reader
+would pass too was reasoned there, not measured. `resolve`'s two reads had no witness at all;
+the tests below add the first for each of them, plus one for `poll` at this layer.
+
+Measured when the three tests were added: removing the file after each of the three reads (in
+`poll`, in `resolve`'s immediate branch, in its waiting branch) fails each read's own test on the
+presence assertion, and `read_answer` rewriting the file as the answer's compact JSON fails all
+three on the byte assertion.
+
+Measured when the attributed shape was added: `read_answer` deserializing the file as `Answer`,
+writing it back with `util::write_json` (the writer's own pretty serializer), and returning it
+passes every witness on the unattributed shape. It fails all four witnesses on the byte assertion,
+because the rewritten file has lost `attribution` and `citation`.
+
+## `fn polling_a_published_answer_reads_it_and_leaves_the_file_byte_identical() {`
+
+The first of `EventLogAnswers`' three reads: for each shape, `poll` returns the published answer
+and leaves the file present and byte-identical (R21).
+
+## `fn resolving_a_published_answer_reads_it_at_once_and_leaves_the_file_byte_identical() {`
+
+The second: `resolve`'s immediate read, for each shape. The budget is not zero and the sleeper
+counts, so a count of zero proves the immediate read returned the answer and the waiting loop
+never ran; the file is then present and byte-identical (R21).
+
+## `fn an_answer_published_during_the_wait_is_read_by_the_loop_and_left_byte_identical() {`
+
+The third: the read inside `resolve`'s waiting loop, for each shape. Nothing is published when
+`resolve` starts, so its immediate read finds nothing. `ArrivingSleeper` publishes the shape's
+record at the first sleep, and the loop's read after that sleep returns it. The file under test
+appears only inside `resolve`, so the published bytes are taken from `write_answer` itself: the
+test publishes the same record into a second scratch directory and reads that file. After the
+read, the file is present and equal to those bytes (R21).
 
 ## `fn unattended_parks_rather_than_declining()` › `let answer = UnattendedAnswers.resolve(&question()).expect("resolve");`
 

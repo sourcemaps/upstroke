@@ -4731,7 +4731,7 @@ fn write_shim(path: &Path, script: &str) {
 }
 
 #[cfg(target_os = "linux")]
-mod inherited_writer {
+pub(crate) mod inherited_writer {
     use std::io::Read;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
@@ -4884,7 +4884,7 @@ mod inherited_writer {
         )
     }
 
-    fn shim_script(marker: &str) -> String {
+    pub(crate) fn shim_script(marker: &str) -> String {
         format!("#!/bin/sh\necho \"{marker}:$1\"\n")
     }
 
@@ -4984,7 +4984,7 @@ mod inherited_writer {
         );
     }
 
-    fn writes_leave_no_writer_in_another_threads_fork(
+    pub(crate) fn writes_leave_no_writer_in_another_threads_fork(
         fifo: &Path,
         write: impl FnOnce(&Path, &str) + Send,
     ) {

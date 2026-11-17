@@ -24,6 +24,16 @@ The durable run artifacts are **split in two**, by who is allowed to read each h
 upstroke.toml                       # repo-root config, checked in
 ```
 
+**An answer file is read, never taken.** Ingesting `answers/<question-id>.json`
+reads it, and no reader of answers removes or rewrites it, so an ingestion
+leaves the file exactly as it found it. Publication is outside this rule:
+nothing here says a published answer file is never replaced, and `upstroke
+answer` can replace one, which is the finding `PR381-ANSWER-PUBLISH-RACE`. The
+answer file is part of the run-scoped run-directory contents that the effects
+vocabulary's resource row R21 accounts for. This paragraph was added on 2026-11-13 to record
+what the answer readers already do, so that their tests have a design sentence
+to be held to.
+
 A fresh sequential run reserves the global private root and its repository's
 public root with exclusive directory creation before creating skeleton files,
 opening the event log or entering early-error cleanup. An occupied root refuses
@@ -33,6 +43,19 @@ removes only its newly reserved empty private root and reports a failed removal.
 Skeleton creation failures retain partial directories for inspection. Resume
 keeps its idempotent skeleton creation; schema-4 creation keeps its separate
 marker and reciprocal-owner protocol.
+
+**A marker-less run directory is reclaimed only on a complete listing.** At
+startup the census may reclaim a public run directory that has no marker only
+when listing it completed and showed it bare or holding only the staged
+`.creating.tmp`. An entry of that name that is not a regular file is contents,
+and the directory is retained. A listing that fails retains the directory and
+reports it unreadable, with the error, because a failed listing is no evidence
+that nothing is there. Reclamation removes the directory by the shape that
+listing showed, never by a fresh one, so a directory that gained contents since
+is kept. Removal looks at the staged `.creating.tmp` again and removes only a
+regular file, whatever wrote it; anything else of that name is contents and
+keeps the directory. A change between that look and the removal is not seen.
+This paragraph was added on 2026-11-14 to record what the census does.
 
 New ULIDs retain the 48-bit timestamp and 80-bit suffix layout. The suffix is
 the first ten SHA-256 bytes over `upstroke.ulid.v2` followed by a zero byte and
