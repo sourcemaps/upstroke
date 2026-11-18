@@ -3088,6 +3088,8 @@ check_added_findings() {
     # findings and PROCESS.md is the working process; both sit directly under findings/, and
     # a move of the whole directory adds or renames both. Exact path, exact case: a lower-case
     # readme, another extension, or the same name one directory down is still refused.
+    # finding_file_count in scripts/pr-ready-audit.sh skips these same four paths when it counts
+    # the files filing an id, and the two lists must agree.
     case "$path" in
       findings/README.md|findings/PROCESS.md) continue ;;
       reviews/findings/README.md|reviews/findings/PROCESS.md) continue ;;
