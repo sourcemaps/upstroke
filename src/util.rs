@@ -534,13 +534,16 @@ pub mod duration_millis {
 }
 
 pub fn rfc3339_utc_now() -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    rfc3339_utc(seconds)
+    rfc3339_utc(unix_seconds_now())
 }
 
-fn rfc3339_utc(unix_seconds: u64) -> String {
+pub(crate) fn unix_seconds_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+pub(crate) fn rfc3339_utc(unix_seconds: u64) -> String {
     let days = i64::try_from(unix_seconds / 86_400).unwrap_or(0);
     let second_of_day = unix_seconds % 86_400;
     let (year, month, day) = civil_from_days(days);
@@ -552,7 +555,7 @@ fn rfc3339_utc(unix_seconds: u64) -> String {
     )
 }
 
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let shifted = days + 719_468;
     let era = if shifted >= 0 {
         shifted
@@ -572,6 +575,16 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
         shifted_month - 9
     };
     (year + i64::from(month <= 2), month, day)
+}
+
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 #[cfg(test)]
@@ -653,6 +666,73 @@ mod tests {
             ]
         );
         assert_eq!(rfc3339_utc_now().len(), "1970-01-01T00:00:00Z".len());
+    }
+
+    #[test]
+    fn days_from_civil_gives_known_day_counts() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(days_from_civil(2000, 1, 1), 10_957);
+        assert_eq!(days_from_civil(2000, 2, 29), 11_016);
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782);
+        assert_eq!(days_from_civil(2026, 1, 1), 20_454);
+        assert_eq!(days_from_civil(2026, 11, 11), 20_768);
+        assert_eq!(days_from_civil(1900, 1, 1), -25_567);
+        assert_eq!(days_from_civil(1900, 2, 28), -25_509);
+        assert_eq!(days_from_civil(1900, 3, 1), -25_508);
+        assert_eq!(days_from_civil(2100, 1, 1), 47_482);
+        assert_eq!(days_from_civil(2100, 3, 1), 47_541);
+    }
+
+    #[test]
+    fn days_from_civil_inverts_civil_from_days_across_leap_years_and_centuries() {
+        for days in -100_000..=100_000 {
+            let (year, month, day) = civil_from_days(days);
+            assert_eq!(
+                days_from_civil(year, month, day),
+                days,
+                "{year}-{month}-{day}"
+            );
+        }
+        for (year, month, day) in [
+            (1600, 2, 29),
+            (1700, 2, 28),
+            (1700, 3, 1),
+            (1900, 2, 28),
+            (1900, 3, 1),
+            (1999, 12, 31),
+            (2000, 2, 29),
+            (2000, 12, 31),
+            (2024, 2, 29),
+            (2100, 2, 28),
+            (2100, 3, 1),
+            (2400, 2, 29),
+        ] {
+            assert_eq!(
+                civil_from_days(days_from_civil(year, month, day)),
+                (year, month, day)
+            );
+        }
+    }
+
+    #[test]
+    fn a_day_the_month_does_not_have_fails_the_round_trip() {
+        for (year, month, day, lands_on) in [
+            (1900, 2, 29, (1900, 3, 1)),
+            (2100, 2, 29, (2100, 3, 1)),
+            (2027, 2, 29, (2027, 3, 1)),
+            (2026, 11, 31, (2026, 12, 1)),
+            (2026, 4, 31, (2026, 5, 1)),
+            (2026, 11, 0, (2026, 10, 31)),
+        ] {
+            assert_eq!(
+                civil_from_days(days_from_civil(year, month, day)),
+                lands_on,
+                "{year}-{month}-{day}"
+            );
+        }
     }
 
     /// A scratch tree for one test, guarded by the token that authorises its

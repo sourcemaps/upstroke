@@ -393,21 +393,33 @@ in this process, not something true about the run. A question nobody
 could answer at 2am is exactly the one the operator answers when they
 come back, so a resume has to be free to ask it again.
 
-## `pub(super) struct Run<'a>` › `pub(super) exhausted_pools: std::collections::BTreeSet<String>,`
+## `pub(super) struct Run<'a>` › `pub(super) exhausted_pools: BTreeMap<String, Option<String>>,`
 
-Pools this run has already recorded a rate-limit signal for.
+Pools this run has already recorded a rate-limit signal for, each with
+the reset its latest `pool_exhausted` carried (`None` where it named
+none).
 
 Only the *transition* is worth an event. One outage produces a failed
 attempt per deferral (up to `max_defers`), and emitting on each wrote N
 identical records of a single fact — inflating any later count of
 outages by the deferral factor and repeating the same line N times in
-`status --follow`. Retired when an attempt proves the pool is serving
-again, mirroring [`capacity::observe`]'s rule so the log the engine
-writes and the fold a reader performs agree about when a pool came back.
+`status --follow`. Retired, with its reset, when an attempt proves the
+pool is serving again, successes included, by
+`capacity::retire_served_pools`, the function [`capacity::observe`]
+folds with. One function means the log the engine writes and the fold
+a reader performs agree about when a pool came back.
+
+The reset is kept because a pool can be refused for a second reason
+before the first clears. A Claude subscription has several caps: at
+05:29:30 the five-hour limit names a 05:30 reset, and the deferral that
+runs after it reports the weekly limit, resetting days later. That is a
+new fact about the pool, and with only the pool's name remembered it was
+swallowed, so the estimate went on reporting a 05:30 already past.
 
 Process-local rather than folded state, like `unanswerable`: seeded on
-resume from the log's own signals, so a resumed run neither re-announces
-an outage the previous process recorded nor misses a fresh one.
+resume from the log's own fold, resets included, so a resumed run
+neither re-announces an outage the previous process recorded nor misses
+a fresh one, or a fresh reset.
 
 ## `fn legacy_append_hooks(opts: &RunOptions) -> Box<dyn crate::events::log::EventHooks> {`
 
@@ -532,6 +544,26 @@ this loop is what guarantees that.
 
 Returns whether the task ended deferred.
 
+It reads the plan's task, its resolved chain and its row of the run's progress
+by position, every one through `get` (`progress_of` for the progress row). The
+scheduler handing it a position one of them does not hold is an engine defect,
+and it is refused with `UpstrokeError::Refused` naming the position, which
+table lacks it and how many rows that table has (`unscheduled_position`). That
+is the variant the schema-4 scheduler uses for a task its fold or registry does
+not hold. It used to index all three and panic instead
+(`PR380-STEP-TASK-PANICKING-INDEX`). A function-local
+`#[deny(clippy::indexing_slicing)]` keeps indexing out of the body. Every
+progress field the attempt and its ladder decision read comes from the one row
+borrowed after `attempt_started` is appended. The borrow checker holds that
+borrow until `attempt_finished`, so nothing can change the row in between,
+and no new error path opens after the worker has run.
+Once a task's attempt numbers are exhausted (its counter is at `u32::MAX`, so
+`checked_add` has no next number), the step refuses with
+`UpstrokeError::Refused` naming the task (`attempts_exhausted`) before it
+emits anything for the attempt, `attempt_started` included, so no two
+attempts share a number (`PR380-STEP-TASK-ATTEMPT-OVERFLOW`,
+`PR380-SATURATED-ATTEMPT-REUSES-IDENTITY`).
+
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `let analysis = self.analysis;`
 
 Copied out of `self` so they carry the run's lifetime rather than
@@ -592,7 +624,7 @@ engine cannot write a record of its own death afterwards.
 Scoped so every borrow the attempt takes on `self` is released
 before the ladder updates this task's progress below.
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `feedback: self.state.progress[index].feedback.clone(),`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `feedback: progress.feedback.clone(),`
 
 Owned: the ladder appends to this task's feedback the
 moment the attempt returns, and one clone per attempt
@@ -604,7 +636,7 @@ The legacy engine's own scope for an invocation
 identity: this task's position in the plan. See
 `AttemptCx::invocation`.
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `decisions: self.state.progress[index]`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `decisions: progress`
 
 The same entries the worker prompt quotes as operator
 instruction, routed to the judge as well (§12).
@@ -680,6 +712,24 @@ or publishes it if the complete settlement is readable.
 Deleting it here would turn an ambiguous sync error into a
 schema-3 settlement whose exact object is no longer durable.
 
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `capacity::retire_served_pools(&mut self.exhausted_pools, &record);`
+
+An attempt that reached a model and got an answer, whatever the
+verdict on its code, proves every pool it drew on is serving
+again, so they leave `exhausted_pools` with their remembered
+resets. This is the function `capacity::observe` folds with,
+applied to the record just made durable. It sits before the
+success/failure split because a success retires a pool too.
+
+It used to be a copy of the rule on the failure branch alone, and
+a success left its pool in the map. A later task refused on that
+pool, naming the same reset, then looked already recorded and
+wrote nothing. Replay, which had retired the pool on the success,
+re-marked it from the refusal with no reset, so the estimate said
+"unknown" where the log had named the time.
+`a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again`
+in `engine::tests` holds it.
+
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if let Err(cleanup) = self.workspace.discard_uncommitted() {`
 
 The durable settlement is authoritative and already carries
@@ -693,7 +743,7 @@ Scrub gate side-effects (build artifacts, lockfile churn) so
 they cannot leak into the next task's captured diff; the
 commit recorded exactly the verified staged set.
 
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if failure.kind != FailureKind::Interrupted`
+## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if failure.kind == FailureKind::RateLimited {`
 
 §13 source 1: a rate-limit signal is ground truth about a pool,
 and the only thing in v0.1 that can call one empty rather than
@@ -701,15 +751,6 @@ unmeasured. Recorded separately from the deferral that follows
 because they are facts with different lifetimes — the deferral is
 about this task's next move, this is about a subscription, and a
 later run's estimator reads it back out of the log.
-
-## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `self.exhausted_pools.remove(&profile.pool);`
-
-This attempt reached a model and got an answer, whatever the
-verdict on its code, so any pool it drew on is serving again.
-Same rule as `capacity::observe`'s, applied to the engine's
-own view so the two cannot disagree about when a pool
-recovered — without it, the *next* outage on the same pool
-would go unrecorded because the set still held it.
 
 ## `fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {` › `if !matches!(next, Next::RetrySameRung { resume: true }) {`
 
@@ -816,17 +857,119 @@ No pool named for that agent means no subscription to mark. The
 signal is still in the log on the attempt record; inventing a pool id
 to hang it on would put a fact about nothing into the estimator.
 
-## `impl Run<'_>` › `if !self.exhausted_pools.insert(pool.clone()) {`
+## `impl Run<'_>` › `let reset_at = if agent == claude::ADAPTER_ID {`
 
-Only the transition (see `exhausted_pools`).
+The reset time the limit message gave, where it gave one.
+`agent::reset_at_from_limit_message` reads one of the failure's texts, its
+`limit_message` or its reason (below), for the reset a recognised limit in
+it gives, Claude Code's `You've hit your 5-hour limit · resets 5:30am (UTC)`
+or `· resets Nov 14, 9am (UTC)`, completes the missing date or year against
+now, and returns the time as RFC 3339 UTC. It returns `None` for a text
+whose limit gives no reset in exactly that form, including one in a zone
+other than UTC, and for a reset no limit gives, however well it parses. Now
+is `util::unix_seconds_now`, the same clock read the same way as the event's
+own `ts`.
 
-## `impl Run<'_>` › `reset_at: None,`
+Only Claude Code's text is read. The agent is the one that failed — the
+implementer's for a worker's refusal, the last reviewer's for a reviewer's —
+compared with `claude::ADAPTER_ID`, the adapter's own id, so a renamed
+adapter cannot leave a second spelling behind. Every other agent's
+`reset_at` is `None` without a parse. The parser only knows Claude Code's
+shape, but that shape is loose enough to match words another vendor might
+print: a Copilot refusal reading `premium request allowance exhausted;
+you've hit your weekly limit · resets Dec 1, 12am (UTC)` parses, and nothing
+says Copilot means a UTC midnight on that date by it. Recording that would put a guess into the log
+as the subscription's own reset; `another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted`
+in `engine::tests` holds it out.
 
-§13 wants a retry-at-reset timer here. Neither CLI reports a
-machine-readable reset time today, and parsing one out of
-prose would be a guess dressed as a timestamp — so it stays
-`None`, `DEFAULT_MAX_DEFERS` stays the bound, and the estimate
-says the reset is unknown.
+It is recorded, not acted on. §13 wants a retry-at-reset timer here, and
+there is none: the ladder still defers a rate-limited attempt and
+`DEFAULT_MAX_DEFERS` is still the bound, whatever the reset says. What the
+time changes is what the estimate reports, a reset time instead of
+"unknown". A reset from Codex or Copilot, in whatever shape, or in a
+wording Claude Code has not been seen to print, stays `None`, as every reset
+was before.
+
+## `impl Run<'_>` › `.chain(std::iter::once(failure.reason.as_str()))`
+
+The limit's own text first, then the reason; which of them is read is the
+`.find` below. Claude Code can exit 1 with a JSON result that has nothing to do
+with the limit, such as `request failed`, and print `You've hit your 5-hour
+limit · resets 5:30am (UTC)` on stderr. `claude::parse_output` reads the
+limit from stderr and classifies the attempt `RateLimited`, but the detail
+it keeps is the JSON result, so the reason is `pool rate-limited: request
+failed`. Parsing only the reason recorded that outage with no reset
+(`PR380-RESET-SIGNAL-CHANNEL-DROPPED`), so `evaluate_outcome` hands the
+stderr over as the failure's `limit_message`.
+
+That stderr was first read only when the reason named no reset, and the
+reason can name one that is not the limit's
+(`PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`). A JSON result `MCP cache
+resets 9am (UTC)` beside the five-hour limit on stderr made the reason
+`pool rate-limited: MCP cache resets 9am (UTC)`; it has no `hit your … limit`
+line, so the parser fell back to the reason's only `resets` and recorded
+09:00 for a pool that came back at 05:30. The stderr is carried only when it
+is what signalled the limit, so it is read first. The parser no longer
+reads a reset no limit gives at all, so that reason now gives `None` even
+read alone. The event's `detail` is still the reason; the stderr is not
+stored anywhere new.
+
+A reviewer's failure carries the same `limit_message`
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`): `run_review` keeps a rate-limited
+reviewer's stderr on `ReviewResult::Unavailable` when that stderr signalled
+the limit, and `review_failure` hands it to the failure as
+`evaluate_outcome` does for a worker. Before, the reviewer's result held only
+its status and parsed detail, so a reviewer whose limit was only on stderr
+recorded `None`. The two cases are
+`a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted`
+and
+`a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted`
+in `engine::tests`. When the stderr does not signal the limit and the
+reviewer's result does, `run_review` keeps the whole result instead, since a
+reviewer's reason holds only its first 400 bytes and a limit after them was
+cut off before this read it;
+`a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_pool_exhausted`
+holds that case.
+
+## `impl Run<'_>` › `.find(|text| names_a_quota_limit(text))`
+
+The first text that holds a recognised limit decides, and it alone is
+parsed. `agent::names_a_quota_limit` says whether a text holds a limit the
+parser reads resets from, whatever that limit's reset is. So when the stderr
+holds one, the reason is never read: if the stderr's limit gives no reset,
+or one that cannot be read, `reset_at` is `None`, and no reset in the reason
+stands in for it. The reason is read only when there is no carried stderr or
+the stderr holds no such limit, as when it signalled with one of the fixed
+phrases (`usage limit`) instead.
+
+This was a `find_map` over the parser, the first text that gave a reset
+winning, and the regression review found it passing over an unreadable
+limit reset. Stderr `You've hit your 5-hour limit - resets 5:30am
+(Europe/London)` was rightly read as `None`, since the zone is not UTC, and
+the `find_map` went on to the JSON result `MCP cache resets 9am (UTC)` and
+recorded `2026-11-15T09:00:00Z`. The parser no longer reads that result's
+reset, which no limit gives, but a result with a limit of its own (`You've
+hit your weekly limit - resets 9am (UTC)`) would still have stood in, so the
+choice of text is made here, before parsing.
+`an_unreadable_reset_on_stderr_is_not_replaced_by_the_results_on_pool_exhausted`
+in `engine::tests` runs both results.
+
+## `impl Run<'_>` › `.is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);`
+
+Only the transition (see `exhausted_pools`), and a changed reset counts as
+one. A pool not yet exhausted always gets its `pool_exhausted`, and
+that includes one an attempt has since retired: a success forgets the
+pool's reset along with the pool, so the next refusal writes one again
+even if it names the same reset. A pool
+already exhausted gets one more only when this refusal names a reset and
+it differs from the one recorded: the five-hour limit at 05:29:30, then
+the weekly limit on the deferral after 05:30, writes two, the second
+carrying the weekly reset, and the fold lets the latest signal's reset
+stand. The same reset again, or a text that names none, writes nothing —
+a reset-free deferral says nothing new, and must not blank out the time
+the signal before it recorded. The new reset is remembered before the
+append, as the bare insert was, so a third refusal repeating it is
+silent.
 
 ## `impl Run<'_>` › `let halts_run = self.on_task_failure == OnTaskFailure::Halt;`
 

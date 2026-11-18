@@ -430,6 +430,7 @@ pub enum ReviewResult {
     Unavailable {
         status: OutcomeStatus,
         detail: String,
+        limit_message: Option<String>,
     },
 }
 
@@ -477,6 +478,7 @@ fn unavailable_after_error(
         result: ReviewResult::Unavailable {
             status: OutcomeStatus::AgentError,
             detail: format!("{stage}: {error}"),
+            limit_message: None,
         },
         cost_usd,
         invocations,
@@ -552,6 +554,7 @@ pub fn run_review(
                         "review pass exhausted its {}s wall-clock budget before invocation {invocation}",
                         cx.timeout.as_secs()
                     ),
+                    limit_message: None,
                 },
                 cost_usd: cost,
                 invocations: invocation - 1,
@@ -635,6 +638,17 @@ pub fn run_review(
             });
         }
         if outcome.status != OutcomeStatus::Completed {
+            let limit_message = (outcome.status == OutcomeStatus::RateLimited)
+                .then(|| {
+                    let texts = [Some(&output.stderr), outcome.detail.as_ref()];
+                    let first = |accepts: fn(&str) -> bool| {
+                        texts.into_iter().flatten().find(|text| accepts(text))
+                    };
+                    first(crate::agent::names_a_quota_limit)
+                        .or_else(|| first(crate::agent::looks_rate_limited))
+                        .cloned()
+                })
+                .flatten();
             return Ok(ReviewOutcome {
                 result: ReviewResult::Unavailable {
                     status: outcome.status,
@@ -642,6 +656,7 @@ pub fn run_review(
                         .detail
                         .filter(|d| !d.trim().is_empty())
                         .unwrap_or_else(|| "no diagnostic output".to_owned()),
+                    limit_message,
                 },
                 cost_usd: cost,
                 invocations: invocation,
@@ -1166,6 +1181,7 @@ mod tests {
                 ReviewResult::Unavailable {
                     status: OutcomeStatus::AgentError,
                     detail,
+                    limit_message: None,
                 } => assert!(detail.contains(expected), "{detail}"),
                 other => panic!("unexpected review result for {stage:?}: {other:?}"),
             }
@@ -1236,6 +1252,7 @@ mod tests {
                 ReviewResult::Unavailable {
                     status: OutcomeStatus::AgentError,
                     detail,
+                    limit_message: None,
                 } => assert!(
                     detail.contains("review process failed") && detail.contains(fate.describe()),
                     "{fate:?}: {detail}"

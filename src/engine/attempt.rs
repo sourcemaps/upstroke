@@ -321,7 +321,11 @@ pub(super) fn review_failure(
     never_started: bool,
 ) -> Option<AttemptFailure> {
     let verdict = match result {
-        review::ReviewResult::Unavailable { status, detail } => {
+        review::ReviewResult::Unavailable {
+            status,
+            detail,
+            limit_message,
+        } => {
             let kind = match status {
                 OutcomeStatus::RateLimited => FailureKind::RateLimited,
                 OutcomeStatus::Timeout => FailureKind::Timeout,
@@ -332,6 +336,10 @@ pub(super) fn review_failure(
                 format!("reviewer unavailable: {}", util::head(&detail, 400)),
             )
             .from_reviewer();
+            let failure = match limit_message {
+                Some(text) => failure.with_limit_message(text),
+                None => failure,
+            };
             return Some(if never_started {
                 failure.from_a_process_that_never_started()
             } else {
@@ -474,10 +482,17 @@ pub(super) fn evaluate_outcome(
                 util::tail(&outcome.detail.clone().unwrap_or_default(), 2000)
             )),
         ),
-        OutcomeStatus::RateLimited => Some(AttemptFailure::new(
-            FailureKind::RateLimited,
-            format!("pool rate-limited: {}", detail()),
-        )),
+        OutcomeStatus::RateLimited => {
+            let failure = AttemptFailure::new(
+                FailureKind::RateLimited,
+                format!("pool rate-limited: {}", detail()),
+            );
+            Some(if crate::agent::looks_rate_limited(&output.stderr) {
+                failure.with_limit_message(output.stderr.clone())
+            } else {
+                failure
+            })
+        }
     }
 }
 

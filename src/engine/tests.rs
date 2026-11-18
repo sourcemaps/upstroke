@@ -91,9 +91,30 @@ struct FakeAdapter {
     probe_error: Option<&'static str>,
 
     reports_cost: bool,
+
+    worker_rate_limit: &'static str,
+
+    worker_rate_limits: Vec<&'static str>,
+
+    worker_limit_on_stderr: Option<&'static str>,
+
+    worker_limit_result: &'static str,
+
+    review_limit_on_stderr: Option<&'static str>,
+
+    review_limit_result: &'static str,
     calls: Mutex<Calls>,
     role_probe: Option<RoleProbe>,
 }
+
+const FIVE_HOUR_LIMIT_REACHED: &str = "5-hour limit reached";
+
+const CLAUDE_REQUEST_FAILED: &str =
+    r#"{"type":"result","is_error":true,"result":"request failed","session_id":"s-limit"}"#;
+
+const CLAUDE_UNRELATED_RESET: &str = r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC)","session_id":"s-limit"}"#;
+
+const CLAUDE_REVIEW_REQUEST_FAILED: &str = r#"{"type":"result","is_error":true,"result":"request failed","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#;
 
 #[derive(Default)]
 struct Calls {
@@ -121,6 +142,12 @@ impl FakeAdapter {
             reviews,
             probe_error: None,
             reports_cost: true,
+            worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
+            worker_rate_limits: Vec::new(),
+            worker_limit_on_stderr: None,
+            worker_limit_result: CLAUDE_REQUEST_FAILED,
+            review_limit_on_stderr: None,
+            review_limit_result: CLAUDE_REVIEW_REQUEST_FAILED,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -133,6 +160,12 @@ impl FakeAdapter {
             reviews,
             probe_error: None,
             reports_cost: true,
+            worker_rate_limit: FIVE_HOUR_LIMIT_REACHED,
+            worker_rate_limits: Vec::new(),
+            worker_limit_on_stderr: None,
+            worker_limit_result: CLAUDE_REQUEST_FAILED,
+            review_limit_on_stderr: None,
+            review_limit_result: CLAUDE_REVIEW_REQUEST_FAILED,
             calls: Mutex::new(Calls::default()),
             role_probe: None,
         }
@@ -329,6 +362,11 @@ impl AgentAdapter for FakeAdapter {
             if let Some(probe) = &self.role_probe {
                 return Ok(probe.reviewer.clone());
             }
+            if let (ReviewBehavior::RateLimited, Some(limit)) =
+                (behavior, self.review_limit_on_stderr)
+            {
+                return Ok(limit_on_stderr_spec(self.review_limit_result, limit));
+            }
             return Ok(shell_spec(&format!("echo {REVIEW_MARKER}")));
         }
         let index = {
@@ -414,6 +452,12 @@ impl AgentAdapter for FakeAdapter {
             probe.read_as_the_operator_does(&run.workspace);
             return Ok(probe.worker.clone());
         }
+        if let (Effect::RateLimited, Some(limit)) = (
+            scripted(&self.effects, index, Effect::EditFile),
+            self.worker_limit_on_stderr,
+        ) {
+            return Ok(limit_on_stderr_spec(self.worker_limit_result, limit));
+        }
         Ok(shell_spec("exit 0"))
     }
 
@@ -439,6 +483,9 @@ impl AgentAdapter for FakeAdapter {
                 index
             };
             let behavior = scripted(&self.reviews, index, ReviewBehavior::Pass);
+            if behavior == ReviewBehavior::RateLimited && self.review_limit_on_stderr.is_some() {
+                return crate::agent::claude::ClaudeCodeAdapter.parse(out);
+            }
             if behavior == ReviewBehavior::RateLimited {
                 return Ok(fake_outcome(
                     OutcomeStatus::RateLimited,
@@ -481,6 +528,9 @@ impl AgentAdapter for FakeAdapter {
             .map(|c| c.worker.saturating_sub(1))
             .unwrap_or(0);
         let effect = scripted(&self.effects, index, Effect::EditFile);
+        if effect == Effect::RateLimited && self.worker_limit_on_stderr.is_some() {
+            return crate::agent::claude::ClaudeCodeAdapter.parse(out);
+        }
         let status = match effect {
             Effect::Error => OutcomeStatus::AgentError,
             Effect::RateLimited => OutcomeStatus::RateLimited,
@@ -500,7 +550,9 @@ impl AgentAdapter for FakeAdapter {
         };
         let detail = match effect {
             Effect::Error => Some("fake adapter error detail".to_owned()),
-            Effect::RateLimited => Some("5-hour limit reached".to_owned()),
+            Effect::RateLimited => {
+                Some(scripted(&self.worker_rate_limits, index, self.worker_rate_limit).to_owned())
+            }
             Effect::AskQuestion => Some(
                 "I made a start but stopped.\nUPSTROKE-QUESTION: should cursors be opaque or \
                      signed?"
@@ -616,6 +668,49 @@ impl RecordingSleeper {
 
 fn shell_spec(script: &str) -> CommandSpec {
     crate::gates::ShellKind::native().spec(script)
+}
+
+fn limit_on_stderr_spec(result: &str, limit: &str) -> CommandSpec {
+    // The JSON result on stdout, the limit on stderr, then a failing
+    // exit, spelled with what both shells `shell_spec` picks share:
+    // `echo`, `>&2` and `&&`. The `printf '…'; …` spelling this
+    // replaces was `sh`'s alone, and under `cmd /C` the missing
+    // `printf` made the attempt an agent error that parked the task.
+    // There is no blank before `>&2` or `&&`, so `cmd` writes no
+    // trailing one; its CRLF line ends change neither the JSON nor
+    // the reset the parser reads. `echo_operand` says why each text
+    // is still quoted per shell.
+    shell_spec(&format!(
+        "echo {}&& echo {}>&2&& exit 1",
+        echo_operand(result),
+        echo_operand(limit)
+    ))
+}
+
+/// `text` as one operand of `echo` in the shell `shell_spec` picks, so that
+/// `cmd /C` and `sh -c` print the same line. `cmd`'s `echo` prints every
+/// character it is given, quotes included, and reads none of `sh`'s escapes,
+/// so `cmd` gets the text bare. `sh` reads a bare `"` as quoting, `(` and `)`
+/// as syntax and `{a,b}` as a brace expansion, so it gets the text in double
+/// quotes with each `"` escaped. A JSON result needs its quotes and a limit
+/// message its ` (UTC)`, so no one spelling serves both. The refused
+/// characters are the ones that would still differ: `cmd` reads `^ & | < > %`
+/// even in a bare `echo`, `sh` expands `$` and `` ` `` inside double quotes,
+/// its `echo` may read `\` as an escape, and `cmd` writes in the console's
+/// code page rather than UTF-8.
+fn echo_operand(text: &str) -> String {
+    assert!(
+        text.is_ascii() && !text.contains(['^', '&', '|', '<', '>', '%', '$', '`', '\\']),
+        "{text:?} holds a character `cmd` and `sh` would not echo alike"
+    );
+    if matches!(
+        crate::gates::ShellKind::native(),
+        crate::gates::ShellKind::Cmd
+    ) {
+        text.to_owned()
+    } else {
+        format!("\"{}\"", text.replace('"', "\\\""))
+    }
 }
 
 fn git_in(repo: &Path, args: &[&str]) -> String {
@@ -3062,10 +3157,12 @@ fn a_contradictory_pass_fails_closed() {
 
 #[test]
 fn an_unavailable_reviewer_is_not_a_rejection() {
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)\n";
     let failure = review_failure(
         review::ReviewResult::Unavailable {
             status: OutcomeStatus::RateLimited,
             detail: "5-hour limit reached".to_owned(),
+            limit_message: None,
         },
         false,
     )
@@ -3074,11 +3171,31 @@ fn an_unavailable_reviewer_is_not_a_rejection() {
     assert_eq!(failure.origin, FailureOrigin::Reviewer);
     assert!(failure.is_outage(), "defers instead of blaming the worker");
     assert!(failure.reason.contains("reviewer unavailable"));
+    assert_eq!(failure.limit_message(), None);
+
+    let failure = review_failure(
+        review::ReviewResult::Unavailable {
+            status: OutcomeStatus::RateLimited,
+            detail: "request failed".to_owned(),
+            limit_message: Some(LIMIT.to_owned()),
+        },
+        false,
+    )
+    .expect("still fails the attempt");
+    assert_eq!(failure.kind, FailureKind::RateLimited);
+    assert_eq!(failure.origin, FailureOrigin::Reviewer);
+    assert_eq!(failure.reason, "reviewer unavailable: request failed");
+    assert_eq!(
+        failure.limit_message(),
+        Some(LIMIT),
+        "the reviewer's stderr limit rides on its failure as a worker's does"
+    );
 
     let failure = review_failure(
         review::ReviewResult::Unavailable {
             status: OutcomeStatus::Timeout,
             detail: String::new(),
+            limit_message: None,
         },
         false,
     )
@@ -3090,6 +3207,7 @@ fn an_unavailable_reviewer_is_not_a_rejection() {
         review::ReviewResult::Unavailable {
             status: OutcomeStatus::AgentError,
             detail: "spawn failed".to_owned(),
+            limit_message: None,
         },
         false,
     )
@@ -4534,6 +4652,46 @@ fn an_outage_is_never_reclassified_as_a_question() {
     assert_eq!(
         evaluate_outcome(&asked, &output).expect("parks").kind,
         FailureKind::NeedsHuman
+    );
+}
+
+#[test]
+fn a_rate_limited_failure_carries_a_limit_from_stderr_without_changing_its_reason() {
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)\n";
+    let output = |stderr: &str| crate::agent::ProcessOutput {
+        stdout: CLAUDE_REQUEST_FAILED.to_owned(),
+        stderr: stderr.to_owned(),
+        code: Some(1),
+        timed_out: false,
+        output_limited: false,
+        duration: Duration::ZERO,
+    };
+
+    let limited = output(LIMIT);
+    let outcome = crate::agent::claude::ClaudeCodeAdapter
+        .parse(&limited)
+        .expect("parses");
+    assert_eq!(outcome.status, OutcomeStatus::RateLimited);
+    let failure = evaluate_outcome(&outcome, &limited).expect("a rate limit is a failure");
+    assert_eq!(failure.kind, FailureKind::RateLimited);
+    assert_eq!(failure.reason, "pool rate-limited: request failed");
+    assert_eq!(failure.feedback, None);
+    assert_eq!(failure.limit_message(), Some(LIMIT));
+
+    let quiet = output("warning: telemetry disabled\n");
+    let outcome = fake_outcome(
+        OutcomeStatus::RateLimited,
+        Some("5-hour limit reached".to_owned()),
+        "s0",
+        None,
+        Duration::ZERO,
+    );
+    let failure = evaluate_outcome(&outcome, &quiet).expect("a rate limit is a failure");
+    assert_eq!(failure.reason, "pool rate-limited: 5-hour limit reached");
+    assert_eq!(
+        failure.limit_message(),
+        None,
+        "stderr that did not signal the limit is not carried"
     );
 }
 
@@ -8016,6 +8174,7 @@ fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
     assert_eq!(signals.len(), 1, "{signals:?}");
     assert_eq!(signals[0].pool, "claude-max");
     assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(signals[0].reset_at, None, "{signals:?}");
 
     let signal_at = events
         .iter()
@@ -8034,6 +8193,889 @@ fn a_rate_limit_marks_its_pool_exhausted_and_a_recovery_retires_the_signal() {
         capacity::Remaining::Exhausted,
         "{}",
         settled[0].describe()
+    );
+}
+
+#[test]
+fn a_rate_limit_that_names_its_reset_records_it_on_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_rate_limit = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    let before = crate::util::unix_seconds_now();
+    let report = run_with(&opts, &source).expect("run");
+    let after = crate::util::unix_seconds_now();
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert!(
+        signals[0].detail.contains("resets 5:30am (UTC)"),
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the failure text named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+    assert!(
+        crate::util::rfc3339_utc(before.saturating_sub(43_200)).as_str() <= reset_at
+            && reset_at <= crate::util::rfc3339_utc(after + 43_200).as_str(),
+        "{reset_at} is the 05:30 UTC nearest the signal, which fell between \
+         {before} and {after}"
+    );
+
+    let signal_at = events
+        .iter()
+        .position(|e| matches!(e.body, EventBody::PoolExhausted { .. }))
+        .expect("the signal is in the log");
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let at_the_signal = capacity::estimate(&cfg.pools, &capacity::observe(&events[..=signal_at]));
+    assert_eq!(at_the_signal[0].remaining, capacity::Remaining::Exhausted);
+    assert_eq!(
+        at_the_signal[0].reset_at.as_deref(),
+        Some(reset_at),
+        "{}",
+        at_the_signal[0].describe()
+    );
+}
+
+#[test]
+fn a_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedstderrreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    // The fake worker echoes this through the native shell (see
+    // `echo_operand`), so `-` stands in for the real message's `·`, which
+    // `cmd` would write in the console's code page. The parser reads any
+    // non-alphanumeric run between the limit and `resets`, and needs the
+    // ` (UTC)` that `echo_operand` keeps.
+    source.adapter.worker_limit_on_stderr =
+        Some("You've hit your 5-hour limit - resets 5:30am (UTC)");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .filter(|f| f.kind == FailureKind::RateLimited)
+                .map(|f| f.reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        ["pool rate-limited: request failed"],
+        "stderr classified the attempt and the JSON result is still its reason"
+    );
+
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail, "pool rate-limited: request failed",
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the limit on stderr named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn a_limit_on_stderr_outranks_an_unrelated_reset_in_the_result_on_pool_exhausted() {
+    const REASON: &str = "pool rate-limited: MCP cache resets 9am (UTC)";
+    assert_eq!(
+        crate::agent::reset_at_from_limit_message(REASON, crate::util::unix_seconds_now()),
+        None,
+        "the reason's reset follows no limit, so it is not read even alone"
+    );
+
+    let (_tree, repo) = temp_engine_repo("poolexhaustedstderroutranksreason");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_limit_result = CLAUDE_UNRELATED_RESET;
+    source.adapter.worker_limit_on_stderr =
+        Some("You've hit your 5-hour limit - resets 5:30am (UTC)");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let reasons: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .filter(|f| f.kind == FailureKind::RateLimited)
+                .map(|f| f.reason.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [REASON],
+        "stderr classified the attempt and the JSON result is still its reason"
+    );
+
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].detail, REASON, "{signals:?}");
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the limit on stderr named its reset");
+    assert!(
+        reset_at.ends_with("T05:30:00Z"),
+        "the limit's own reset, not the reason's 09:00: {reset_at}"
+    );
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn an_unreadable_reset_on_stderr_is_not_replaced_by_the_results_on_pool_exhausted() {
+    const LIMITED_RESULT: &str = r#"{"type":"result","is_error":true,"result":"You've hit your weekly limit - resets 9am (UTC)","session_id":"s-limit"}"#;
+    for (name, result, reason) in [
+        (
+            "poolexhaustedstderrunreadable",
+            CLAUDE_UNRELATED_RESET,
+            "pool rate-limited: MCP cache resets 9am (UTC)",
+        ),
+        (
+            "poolexhaustedstderrunreadablelimited",
+            LIMITED_RESULT,
+            "pool rate-limited: You've hit your weekly limit - resets 9am (UTC)",
+        ),
+    ] {
+        let (_tree, repo) = temp_engine_repo(name);
+        seed(
+            &repo,
+            "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+            Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+        );
+        let mut opts = options(&repo);
+        opts.config_path = Some(repo.join("upstroke.toml"));
+        opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+        let mut source = source(
+            vec![Effect::RateLimited, Effect::EditFile],
+            vec![ReviewBehavior::Pass],
+        );
+        source.adapter.worker_limit_result = result;
+        // `-` for the real message's `·`, as in the tests above.
+        source.adapter.worker_limit_on_stderr =
+            Some("You've hit your 5-hour limit - resets 5:30am (Europe/London)");
+        let report = run_with(&opts, &source).expect("run");
+        assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+        let events = events_of(&repo, &report.run_id);
+        let reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match &e.body {
+                EventBody::AttemptFinished { data, .. } => data
+                    .failure
+                    .as_ref()
+                    .filter(|f| f.kind == FailureKind::RateLimited)
+                    .map(|f| f.reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasons,
+            [reason],
+            "stderr classified the attempt and the JSON result is still its reason"
+        );
+
+        let signals: Vec<&events::PoolExhausted> = events
+            .iter()
+            .filter_map(|e| match &e.body {
+                EventBody::PoolExhausted { data, .. } => Some(data),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(signals.len(), 1, "{signals:?}");
+        assert_eq!(signals[0].pool, "claude-max");
+        assert_eq!(signals[0].detail, reason, "{signals:?}");
+        assert_eq!(
+            signals[0].reset_at, None,
+            "the limit on stderr gave a reset in another zone, and no reset in the \
+             result stands in for it: {signals:?}"
+        );
+    }
+}
+
+#[test]
+fn a_reviewers_limit_on_stderr_beside_an_unrelated_result_records_its_reset_on_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreviewerstderr");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::RateLimited, ReviewBehavior::Pass],
+    );
+    // `-` for the real message's `·`, as in the worker's test above.
+    source.adapter.review_limit_on_stderr =
+        Some("You've hit your 5-hour limit - resets 5:30am (UTC)");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let t1 = task(&report, "t1");
+    assert_eq!(t1.attempts.len(), 2, "{report:?}");
+    let refused = t1.attempts[0]
+        .failure
+        .as_ref()
+        .expect("the first attempt's reviewer was refused");
+    assert_eq!(refused.kind, FailureKind::RateLimited);
+    assert_eq!(refused.origin, FailureOrigin::Reviewer);
+    assert_eq!(
+        refused.reason, "reviewer unavailable: request failed",
+        "stderr classified the review and the JSON result is still its reason"
+    );
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail, "reviewer unavailable: request failed",
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the reviewer's limit on stderr named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+// `-` for the real message's `·`, as in the tests above.
+const LIMIT_PAST_THE_HEAD: &str = concat!(
+    r#"{"type":"result","is_error":true,"result":"MCP cache resets 9am (UTC). "#,
+    "mcp server docs: tool list refreshed in 812ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 815ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 818ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 821ms, 14 tools registered, 2 skipped as duplicates. ",
+    "mcp server docs: tool list refreshed in 824ms, 14 tools registered, 2 skipped as duplicates. ",
+    r#"You've hit your 5-hour limit - resets 5:30am (UTC)","session_id":"fake-review-session","fake":"UPSTROKE-FAKE-REVIEW"}"#,
+);
+
+#[test]
+fn a_reviewers_limit_in_the_result_past_the_reasons_head_records_its_reset_on_pool_exhausted() {
+    let payload: serde_json::Value =
+        serde_json::from_str(LIMIT_PAST_THE_HEAD).expect("the reviewer's result is JSON");
+    let result = payload["result"]
+        .as_str()
+        .expect("the payload has a result");
+    let limit = result
+        .find("You've hit your 5-hour limit")
+        .expect("the result holds the limit");
+    assert!(
+        limit > 400,
+        "the limit starts past the reason's head: {limit}"
+    );
+    let reason = format!("reviewer unavailable: {}", crate::util::head(result, 400));
+    assert_eq!(
+        crate::agent::reset_at_from_limit_message(&reason, crate::util::unix_seconds_now()),
+        None,
+        "the head holds only the unrelated reset, so the reason alone gives none"
+    );
+
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreviewerresult");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::RateLimited, ReviewBehavior::Pass],
+    );
+    source.adapter.review_limit_result = LIMIT_PAST_THE_HEAD;
+    source.adapter.review_limit_on_stderr = Some("request failed");
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let t1 = task(&report, "t1");
+    assert_eq!(t1.attempts.len(), 2, "{report:?}");
+    let refused = t1.attempts[0]
+        .failure
+        .as_ref()
+        .expect("the first attempt's reviewer was refused");
+    assert_eq!(refused.kind, FailureKind::RateLimited);
+    assert_eq!(refused.origin, FailureOrigin::Reviewer);
+    assert_eq!(
+        refused.reason, reason,
+        "the displayed reason is still the result's 400-byte head"
+    );
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail,
+        crate::util::head(&reason, 400),
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the reviewer's limit in its result named its reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+#[test]
+fn a_reviewers_quota_limit_in_the_result_outranks_a_generic_limit_on_stderr_on_pool_exhausted() {
+    const GENERIC_LIMIT: &str = "HTTP 429: rate limit";
+    assert!(
+        crate::agent::looks_rate_limited(GENERIC_LIMIT),
+        "the stderr signals a limit"
+    );
+    assert!(
+        !crate::agent::names_a_quota_limit(GENERIC_LIMIT),
+        "the stderr names no quota limit"
+    );
+    let payload: serde_json::Value =
+        serde_json::from_str(LIMIT_PAST_THE_HEAD).expect("the reviewer's result is JSON");
+    let result = payload["result"]
+        .as_str()
+        .expect("the payload has a result");
+    let limit = result
+        .find("You've hit your 5-hour limit")
+        .expect("the result holds the limit");
+    assert!(
+        limit > 400,
+        "the limit starts past the reason's head: {limit}"
+    );
+    let reason = format!("reviewer unavailable: {}", crate::util::head(result, 400));
+    assert!(
+        !crate::agent::names_a_quota_limit(&reason),
+        "the reason's head names no quota limit, so only the whole result can give the reset"
+    );
+
+    let (_tree, repo) = temp_engine_repo("poolexhaustedreviewergeneric");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(&repo, CLAUDE_POOL));
+    let mut source = source(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::RateLimited, ReviewBehavior::Pass],
+    );
+    source.adapter.review_limit_result = LIMIT_PAST_THE_HEAD;
+    source.adapter.review_limit_on_stderr = Some(GENERIC_LIMIT);
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let t1 = task(&report, "t1");
+    assert_eq!(t1.attempts.len(), 2, "{report:?}");
+    let refused = t1.attempts[0]
+        .failure
+        .as_ref()
+        .expect("the first attempt's reviewer was refused");
+    assert_eq!(refused.kind, FailureKind::RateLimited);
+    assert_eq!(refused.origin, FailureOrigin::Reviewer);
+    assert_eq!(
+        refused.reason, reason,
+        "the displayed reason is still the result's 400-byte head"
+    );
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "claude-max");
+    assert_eq!(signals[0].agent, "claude-code");
+    assert_eq!(
+        signals[0].detail,
+        crate::util::head(&reason, 400),
+        "{signals:?}"
+    );
+    let reset_at = signals[0]
+        .reset_at
+        .as_deref()
+        .expect("the quota limit in the result, not the generic stderr, named the reset");
+    assert!(reset_at.ends_with("T05:30:00Z"), "{reset_at}");
+    assert_eq!(reset_at.len(), "1970-01-01T05:30:00Z".len(), "{reset_at}");
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn deferral_rate_limit(now: u64) -> (String, String) {
+    let reset = (now + 3 * 3_600) / 60 * 60;
+    let (_, month, day) = crate::util::civil_from_days(
+        i64::try_from(reset / 86_400).expect("the reset's day fits an i64"),
+    );
+    let month = MONTH_NAMES[usize::try_from(month - 1).expect("a month runs from 1 to 12")];
+    let minute_of_day = reset % 86_400 / 60;
+    let (hour, minute) = (minute_of_day / 60, minute_of_day % 60);
+    let minutes = if minute == 0 {
+        String::new()
+    } else {
+        format!(":{minute:02}")
+    };
+    let text = format!(
+        "You've hit your weekly limit · resets {month} {day}, {}{minutes}{} (UTC)",
+        (hour + 11) % 12 + 1,
+        if hour < 12 { "am" } else { "pm" },
+    );
+    (text, crate::util::rfc3339_utc(reset))
+}
+
+#[test]
+fn the_deferral_rate_limit_text_names_one_reset_at_any_time_of_day() {
+    let at = |year, month, day, second_of_day: i64| {
+        u64::try_from(crate::util::days_from_civil(year, month, day) * 86_400 + second_of_day)
+            .expect("an instant after 1970")
+    };
+    assert_eq!(
+        deferral_rate_limit(at(2026, 11, 14, 14 * 3_600)),
+        (
+            "You've hit your weekly limit · resets Nov 14, 5pm (UTC)".to_owned(),
+            "2026-11-14T17:00:00Z".to_owned()
+        ),
+        "built three hours before it, the text the deferral tests used to carry"
+    );
+    for built in [
+        at(2026, 11, 11, 0),
+        at(2027, 5, 16, 5 * 3_600 - 1),
+        at(2027, 5, 16, 5 * 3_600),
+        at(2026, 12, 31, 21 * 3_600 + 30 * 60),
+        at(2028, 2, 29, 9 * 3_600),
+    ] {
+        let (text, reset) = deferral_rate_limit(built);
+        for second in 0..86_400 {
+            assert_eq!(
+                crate::agent::reset_at_from_limit_message(&text, built + second).as_deref(),
+                Some(reset.as_str()),
+                "{text}, built at {built}, read {second}s later"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_deferral_rate_limit_keeps_the_reset_pool_exhausted_recorded() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedkeepsreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    let (limit, _) = deferral_rate_limit(crate::util::unix_seconds_now());
+    source.adapter.worker_rate_limit = limit.leak();
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "one outage, one signal: {signals:?}");
+    let reset_at = signals[0]
+        .reset_at
+        .clone()
+        .expect("the failure text named its reset");
+
+    let rate_limited: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::RateLimited),
+            _ => false,
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(rate_limited.len(), 2, "two rate-limited attempts");
+    let signal_at = events
+        .iter()
+        .position(|e| matches!(e.body, EventBody::PoolExhausted { .. }))
+        .expect("the signal is in the log");
+    assert!(
+        rate_limited[0] < signal_at && signal_at < rate_limited[1],
+        "the second rate limit falls after the signal it must not erase"
+    );
+
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let after_the_deferral =
+        capacity::estimate(&cfg.pools, &capacity::observe(&events[..=rate_limited[1]]));
+    assert_eq!(
+        after_the_deferral[0].remaining,
+        capacity::Remaining::Exhausted
+    );
+    assert_eq!(
+        after_the_deferral[0].reset_at.as_deref(),
+        Some(reset_at.as_str()),
+        "{}",
+        after_the_deferral[0].describe()
+    );
+
+    let settled = capacity::estimate(&cfg.pools, &capacity::observe(&events));
+    assert_ne!(
+        settled[0].remaining,
+        capacity::Remaining::Exhausted,
+        "{}",
+        settled[0].describe()
+    );
+}
+
+#[test]
+fn a_different_later_reset_writes_one_more_pool_exhausted() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedlaterreset");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![Effect::RateLimited, Effect::RateLimited, Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+    );
+    source.adapter.worker_rate_limits = vec![
+        "You've hit your 5-hour limit · resets 5:30am (UTC)",
+        "You've hit your weekly limit · resets Nov 14, 5pm (UTC)",
+    ];
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<(usize, &events::PoolExhausted)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some((at, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signals.len(),
+        2,
+        "a later refusal naming a different reset is one more fact: {signals:?}"
+    );
+    assert!(
+        signals
+            .iter()
+            .all(|(_, signal)| signal.pool == "claude-max"),
+        "{signals:?}"
+    );
+    let five_hour = signals[0]
+        .1
+        .reset_at
+        .clone()
+        .expect("the five-hour text named its reset");
+    assert!(five_hour.ends_with("T05:30:00Z"), "{five_hour}");
+    let weekly = signals[1]
+        .1
+        .reset_at
+        .clone()
+        .expect("the weekly text named its reset");
+    assert!(weekly.ends_with("-11-14T17:00:00Z"), "{weekly}");
+    assert!(signals[1].1.detail.contains("weekly limit"), "{signals:?}");
+
+    let rate_limited: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| match &e.body {
+            EventBody::AttemptFinished { data, .. } => data
+                .failure
+                .as_ref()
+                .is_some_and(|f| f.kind == FailureKind::RateLimited),
+            _ => false,
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(rate_limited.len(), 2, "two rate-limited attempts");
+    assert!(
+        rate_limited[0] < signals[0].0
+            && signals[0].0 < rate_limited[1]
+            && rate_limited[1] < signals[1].0,
+        "each signal follows the refusal it was read from"
+    );
+
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let through_both = capacity::estimate(&cfg.pools, &capacity::observe(&events[..=signals[1].0]));
+    assert_eq!(through_both[0].remaining, capacity::Remaining::Exhausted);
+    assert_eq!(
+        through_both[0].reset_at.as_deref(),
+        Some(weekly.as_str()),
+        "the latest signal's reset, not the five-hour one it replaced: {}",
+        through_both[0].describe()
+    );
+}
+
+#[test]
+fn a_rate_limit_after_a_success_retired_its_pool_writes_pool_exhausted_again() {
+    let (_tree, repo) = temp_engine_repo("poolexhaustedafterretire");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n\n\
+             ## Two\n<!-- upstroke: id=t2 kind=implement depends=t1 -->\n",
+        Some("[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let pools = pools_file(&repo, CLAUDE_POOL);
+    opts.pools_path = Some(pools.clone());
+    let mut source = source(
+        vec![
+            Effect::RateLimited,
+            Effect::EditFile,
+            Effect::RateLimited,
+            Effect::EditFile,
+        ],
+        vec![ReviewBehavior::Pass],
+    );
+    let (limit, reset) = deferral_rate_limit(crate::util::unix_seconds_now());
+    source.adapter.worker_rate_limit = limit.leak();
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<(usize, &events::PoolExhausted)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some((at, data)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signals.len(),
+        2,
+        "the success between the outages retired the first, so the second is news: {signals:?}"
+    );
+    let first = signals[0]
+        .1
+        .reset_at
+        .clone()
+        .expect("the weekly text named its reset");
+    assert_eq!(first, reset, "{first}");
+    assert_eq!(
+        signals[1].1.reset_at.as_deref(),
+        Some(first.as_str()),
+        "the same reset as before, which the remembered one used to swallow: {signals:?}"
+    );
+    assert_eq!(signals[0].1.pool, "claude-max");
+    assert_eq!(signals[1].1.pool, "claude-max");
+
+    let finished: Vec<(usize, &str, bool)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, e)| match &e.body {
+            EventBody::AttemptFinished { task, data, .. } => Some((
+                at,
+                task.as_str(),
+                data.failure
+                    .as_ref()
+                    .is_some_and(|f| f.kind == FailureKind::RateLimited),
+            )),
+            _ => None,
+        })
+        .collect();
+    let shape: Vec<(&str, bool)> = finished
+        .iter()
+        .map(|(_, task, limited)| (*task, *limited))
+        .collect();
+    assert_eq!(
+        shape,
+        [("t1", true), ("t1", false), ("t2", true), ("t2", false)],
+        "t1 is refused then served, and t2 is refused on the same pool after"
+    );
+    let retired_at = finished[1].0;
+    assert!(
+        signals[0].0 < retired_at && retired_at < finished[2].0 && finished[2].0 < signals[1].0,
+        "the second signal follows t2's refusal, after t1's success retired the first"
+    );
+
+    let mut warnings = Vec::new();
+    let cfg = config::load(None, &repo, Some(&pools), &mut warnings).expect("pools");
+    let after_success = capacity::estimate(&cfg.pools, &capacity::observe(&events[..=retired_at]));
+    assert_ne!(
+        after_success[0].remaining,
+        capacity::Remaining::Exhausted,
+        "{}",
+        after_success[0].describe()
+    );
+    let through_second =
+        capacity::estimate(&cfg.pools, &capacity::observe(&events[..=signals[1].0]));
+    assert_eq!(through_second[0].remaining, capacity::Remaining::Exhausted);
+    assert_eq!(
+        through_second[0].reset_at.as_deref(),
+        Some(first.as_str()),
+        "the fold reports the reset again, not \"unknown\": {}",
+        through_second[0].describe()
+    );
+}
+
+#[test]
+fn another_agents_rate_limit_naming_a_reset_records_none_on_pool_exhausted() {
+    const COPILOT_RESET: &str = "premium request allowance exhausted; you've hit your weekly limit · resets Dec 1, 12am (UTC)";
+    assert!(
+        crate::agent::reset_at_from_limit_message(COPILOT_RESET, crate::util::unix_seconds_now())
+            .is_some(),
+        "the text alone parses, so only the agent can be what keeps its reset out"
+    );
+    let (_tree, repo) = temp_engine_repo("poolexhaustedotheragent");
+    seed(
+        &repo,
+        "## One\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(
+            "[routing]\nimplement = { chain = [\"small\"], attempts_per = 1 }\n\n\
+             [[pins]]\ntier = \"small\"\nagent = \"copilot\"\nmodel = \"gpt-5-mini\"\n",
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    opts.pools_path = Some(pools_file(
+        &repo,
+        "[pools.copilot-window]\nkind = \"subscription-window\"\nagent = \"copilot\"\n\
+         sources = [\"signals\"]\n",
+    ));
+    let mut source = cross_vendor(
+        vec![Effect::EditFile],
+        vec![ReviewBehavior::Pass],
+        vec![ReviewBehavior::Pass],
+    );
+    let copilot = source.copilot.as_mut().expect("this source has a copilot");
+    copilot.effects = vec![Effect::RateLimited, Effect::EditFile];
+    copilot.worker_rate_limit = COPILOT_RESET;
+    let report = run_with(&opts, &source).expect("run");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+
+    let events = events_of(&repo, &report.run_id);
+    let signals: Vec<&events::PoolExhausted> = events
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::PoolExhausted { data, .. } => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(signals.len(), 1, "{signals:?}");
+    assert_eq!(signals[0].pool, "copilot-window");
+    assert_eq!(signals[0].agent, "copilot");
+    assert!(
+        signals[0].detail.contains("resets Dec 1, 12am (UTC)"),
+        "{signals:?}"
+    );
+    assert_eq!(
+        signals[0].reset_at, None,
+        "only Claude Code's wording is read for a reset: {signals:?}"
     );
 }
 

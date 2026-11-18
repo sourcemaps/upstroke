@@ -1404,6 +1404,7 @@ impl super::attempt::ReviewPasses for ScaffoldReviews {
                 result: crate::review::ReviewResult::Unavailable {
                     status: crate::ir::OutcomeStatus::AgentError,
                     detail: format!("review process failed: {error}"),
+                    limit_message: None,
                 },
                 cost_usd: None,
                 invocations: 0,
@@ -1433,6 +1434,7 @@ impl super::attempt::ReviewPasses for ScaffoldReviews {
             VerifyReview::Unavailable(status) => crate::review::ReviewResult::Unavailable {
                 status: *status,
                 detail: "the integration reviewer was unavailable".to_owned(),
+                limit_message: None,
             },
         };
         Ok(crate::review::ReviewOutcome {

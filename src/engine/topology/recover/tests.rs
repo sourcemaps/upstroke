@@ -8753,6 +8753,7 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
                 result: crate::review::ReviewResult::Unavailable {
                     status: crate::ir::OutcomeStatus::AgentError,
                     detail: format!("review process failed: {error}"),
+                    limit_message: None,
                 },
                 cost_usd: None,
                 invocations: 0,
