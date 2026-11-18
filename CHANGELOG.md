@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `upstroke answer` now refuses a second answer to a question that already has one published,
+  however the two are timed. Two answers started together, or, on a run an older binary created
+  (schema 1–3), a second answer to a parked question while no engine drove it, used to both report
+  success while only one took effect (`PR381-ANSWER-PUBLISH-RACE`).
 - The startup census reclaims a marker-less run directory only on a complete listing, and removes
   it as listed. A listing that fails now retains the directory, and `upstroke status <run-id>`
   says it cannot be listed, with the error; it used to read as empty, so a transient failure could

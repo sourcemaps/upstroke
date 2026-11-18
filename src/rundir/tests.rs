@@ -4992,8 +4992,12 @@ fn every_site_this_module_owns_is_reached_through_a_funnel_in_both_phases() {
         .expect("question payload");
     let answers = public.join("answers");
     fs::create_dir_all(&answers).expect("answers");
-    stage_answer(&answers, "q-1", &serde_json::json!({}), &mut hooks).expect("stage answer");
-    publish_answer(&answers, "q-1", &mut hooks).expect("publish answer");
+    let staged =
+        stage_answer(&answers, "q-1", &serde_json::json!({}), &mut hooks).expect("stage answer");
+    assert_eq!(
+        publish_answer(staged, &mut hooks).expect("publish answer"),
+        crate::interaction::AnswerPublication::Published
+    );
     ingest_answer(&answers, "q-1", &mut hooks).expect("ingest answer");
 
     // The commit record goes to a private half of its own, so publishing
@@ -12875,6 +12879,105 @@ fn the_commit_records_digest_is_over_the_exact_line_bytes() {
     );
 }
 
+/// The file-size limit the child of
+/// [`a_failed_staging_write_removes_its_staged_file`] stages under, below the
+/// staged answer's size, so every staging write fails part-way.
+#[cfg(unix)]
+const STAGING_WRITE_LIMIT: libc::rlim_t = 16;
+
+/// The child of [`a_failed_staging_write_removes_its_staged_file`]: ignores
+/// `SIGXFSZ`, lowers `RLIMIT_FSIZE` below the staged answer's size, and stages
+/// one answer three times into the answers directory the parent names. Each
+/// staging write fails with `EFBIG`, and each call must say so as an I/O error.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned as a subprocess by a_failed_staging_write_removes_its_staged_file"]
+fn failed_staging_write_child() {
+    let answers =
+        PathBuf::from(std::env::var_os("UPSTROKE_TEST_ANSWERS_DIR").expect("answers dir"));
+    let answer = serde_json::json!({"text": "an answer longer than the file-size limit"});
+    let size = serde_json::to_string_pretty(&answer)
+        .expect("serializable")
+        .len()
+        + 1;
+    assert!(
+        libc::rlim_t::try_from(size).expect("a size") > STAGING_WRITE_LIMIT,
+        "the staged answer ({size} bytes) must exceed the limit"
+    );
+
+    // SAFETY: `signal` takes a signal number and a disposition by value;
+    // `SIG_IGN` installs no handler, so nothing runs on the signal.
+    let ignored = unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+    assert_ne!(
+        ignored,
+        libc::SIG_ERR,
+        "ignoring SIGXFSZ: {}",
+        std::io::Error::last_os_error()
+    );
+    let lowered = libc::rlimit {
+        rlim_cur: STAGING_WRITE_LIMIT,
+        rlim_max: STAGING_WRITE_LIMIT,
+    };
+    // SAFETY: `setrlimit` reads one `rlimit` through the pointer and
+    // `lowered` is live for the call.
+    let narrowed = unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &lowered) };
+    assert_eq!(
+        narrowed,
+        0,
+        "narrowing RLIMIT_FSIZE to {STAGING_WRITE_LIMIT}: {}",
+        std::io::Error::last_os_error()
+    );
+
+    for attempt in 1..=3 {
+        match stage_answer(&answers, "q-1", &answer, &mut NoHooks) {
+            Err(UpstrokeError::Io { .. }) => {}
+            other => panic!("attempt {attempt}: the staging write must fail as I/O: {other:?}"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_staging_write_removes_its_staged_file() {
+    let tree = scratch("failed-staging-write");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "rundir::tests::failed_staging_write_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("UPSTROKE_TEST_ANSWERS_DIR", &answers)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("spawn the staging child");
+    assert!(
+        output.status.success(),
+        "the child's three staging calls each returned an I/O error: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let partials: Vec<String> = fs::read_dir(&answers)
+        .expect("list answers")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".partial"))
+        .collect();
+    assert!(
+        partials.is_empty(),
+        "a failed staging write removes the staged file it created: {partials:?}"
+    );
+}
+
 /// A `.partial` is writer-owned staging residue that **no reader ingests**
 /// and no ingestion consumes (`PR5-RUNDIR-060`, `PR5-RUNDIR-061`).
 ///
@@ -12896,14 +12999,14 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     create_dir(&answers).expect("answers");
 
     // (a) A valid partial, and nothing published.
-    stage_answer(
+    let staged = stage_answer(
         &answers,
         "q-1",
         &serde_json::json!({"text": "staged"}),
         &mut NoHooks,
     )
     .expect("stage");
-    let partial = answers.join("q-1.json.partial");
+    let partial = staged.path().to_path_buf();
     let staged_bytes = fs::read(&partial).expect("the partial exists");
     assert!(
         serde_json::from_slice::<serde_json::Value>(&staged_bytes).is_ok(),
@@ -12926,7 +13029,10 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
     );
 
     // (b) Published, ingested — and still there afterwards.
-    publish_answer(&answers, "q-1", &mut NoHooks).expect("publish");
+    assert_eq!(
+        publish_answer(staged, &mut NoHooks).expect("publish"),
+        crate::interaction::AnswerPublication::Published
+    );
     let published = answers.join("q-1.json");
     let published_bytes = fs::read(&published).expect("the published answer");
     let first = ingest_answer(&answers, "q-1", &mut NoHooks).expect("ingest");
@@ -12947,6 +13053,306 @@ fn a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion(
         ingest_answer(&answers, "q-1", &mut NoHooks).expect("ingest again"),
         first,
         "so a second reader gets the same answer as the first"
+    );
+}
+
+/// Two publishers of one answer publish exactly one
+/// (`PR381-ANSWER-PUBLISH-RACE`).
+///
+/// The race, interleaved deterministically through the two funnels: A
+/// stages, B stages, A publishes, B publishes. Each publisher stages a file
+/// of its own, so B's staging cannot overwrite A's; publication is
+/// create-once, so B's cannot replace A's. Exactly one is told `Published`,
+/// the other `AlreadyAnswered`, the retained `<qid>.json` holds the bytes of
+/// the one told it published, and no staged file is left behind. A shared
+/// staging name fails at the second stage or leaves the wrong bytes; a
+/// replacing publication tells both they published and keeps B's bytes. The
+/// same race between two threads is `two_concurrent_answers_publish_exactly_one`
+/// in `src/interaction.rs`.
+#[test]
+fn two_publishers_of_one_answer_publish_exactly_one() {
+    use crate::interaction::AnswerPublication;
+
+    let tree = scratch("answer-publish-race");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+
+    let a = stage_answer(
+        &answers,
+        "q-1",
+        &serde_json::json!({"text": "from publisher A"}),
+        &mut NoHooks,
+    )
+    .expect("A stages");
+    let b = stage_answer(
+        &answers,
+        "q-1",
+        &serde_json::json!({"text": "from publisher B"}),
+        &mut NoHooks,
+    )
+    .expect("B stages");
+    assert_ne!(
+        a.path(),
+        b.path(),
+        "each publisher stages a file of its own"
+    );
+    let a_bytes = fs::read(a.path()).expect("A's staged answer");
+    let b_bytes = fs::read(b.path()).expect("B's staged answer");
+    assert_ne!(
+        a_bytes, b_bytes,
+        "the two answers must be told apart by their bytes"
+    );
+
+    let a_outcome = publish_answer(a, &mut NoHooks).expect("A publishes");
+    let b_outcome = publish_answer(b, &mut NoHooks).expect("B publishes");
+    let outcomes = [(a_outcome, &a_bytes), (b_outcome, &b_bytes)];
+    let published: Vec<&Vec<u8>> = outcomes
+        .iter()
+        .filter(|(outcome, _)| *outcome == AnswerPublication::Published)
+        .map(|(_, bytes)| *bytes)
+        .collect();
+    assert_eq!(
+        published.len(),
+        1,
+        "exactly one is told it published: {a_outcome:?}, {b_outcome:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|(outcome, _)| *outcome == AnswerPublication::AlreadyAnswered)
+            .count(),
+        1,
+        "and the other is told already answered: {a_outcome:?}, {b_outcome:?}"
+    );
+    assert_eq!(
+        (a_outcome, b_outcome),
+        (
+            AnswerPublication::Published,
+            AnswerPublication::AlreadyAnswered
+        ),
+        "create-once: the first to publish is the one published"
+    );
+    assert_eq!(
+        &fs::read(answers.join("q-1.json")).expect("the retained answer"),
+        published[0],
+        "the retained answer holds the bytes of the one told it published"
+    );
+    assert_eq!(
+        read_dir_names(&answers).expect("the answers directory lists"),
+        vec![OsString::from("q-1.json")],
+        "no staged file is left behind"
+    );
+}
+
+/// Restores a sealed directory's permissions when dropped, so the scratch tree
+/// can be reclaimed whether the test passes or an assertion fails. Bound after
+/// the tree, so it drops first.
+#[cfg(unix)]
+struct UnsealOnDrop {
+    dir: PathBuf,
+    permissions: fs::Permissions,
+}
+
+#[cfg(unix)]
+impl Drop for UnsealOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.dir, self.permissions.clone());
+    }
+}
+
+/// Stage `answer` in `root/staging`, a directory of its own, to be published
+/// as `answers/<qid>.json`, then seal `root/staging` read-only so its entries
+/// cannot be removed. Returns the staged answer, its bytes, and the guard that
+/// unseals the directory; `None` when this process removes entries of a
+/// read-only directory anyway (root, or `CAP_DAC_OVERRIDE`), which a scratch
+/// probe in the sealed directory finds out before any assertion is made.
+#[cfg(unix)]
+fn stage_where_the_staged_name_cannot_be_removed(
+    root: &Path,
+    answers: &Path,
+    answer: &serde_json::Value,
+) -> Option<(StagedAnswer, Vec<u8>, UnsealOnDrop)> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let staging = root.join("staging");
+    create_dir(&staging).expect("the staging directory");
+    let StagedAnswer { staged, .. } =
+        stage_answer(&staging, "q-1", answer, &mut NoHooks).expect("stage");
+    let staged_bytes = fs::read(&staged).expect("the staged answer");
+    let probe = staging.join("probe");
+    fs::write(&probe, b"probe\n").expect("the removal probe");
+
+    let permissions = fs::metadata(&staging)
+        .expect("the staging directory's metadata")
+        .permissions();
+    let unseal = UnsealOnDrop {
+        dir: staging.clone(),
+        permissions: permissions.clone(),
+    };
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o555))
+        .expect("seal the staging directory");
+    match fs::remove_file(&probe) {
+        Err(refused) if refused.kind() == io::ErrorKind::PermissionDenied => {}
+        Err(other) => panic!(
+            "removing {} failed, but not with a permission error: {other}",
+            probe.display()
+        ),
+        // This process ignores permission bits, as root does: no removal in
+        // the sealed directory is refused, so the shape under test cannot be
+        // built here. The guard unseals as it drops.
+        Ok(()) => return None,
+    }
+    Some((
+        StagedAnswer {
+            staged,
+            published: answers.join("q-1.json"),
+        },
+        staged_bytes,
+        unseal,
+    ))
+}
+
+/// A published answer stays published when its staged name cannot be removed
+/// (`PR385-CLEANUP-MASKS-PUBLICATION`).
+///
+/// The link to `<qid>.json` succeeds, so the answer takes effect; only the
+/// removal of the staged name afterwards fails, because the staging directory
+/// is read-only. That removal is cleanup, not publication: `publish_answer`
+/// must still say `Published`, and the staged name stays as `.partial`
+/// residue. Reporting the removal failure as the outcome told the caller the
+/// answer failed (the CLI exited 1) while the engine was reading it.
+#[cfg(unix)]
+#[test]
+fn a_published_answer_stays_published_when_its_staged_name_cannot_be_removed() {
+    use crate::interaction::AnswerPublication;
+
+    let tree = scratch("answer-publish-sealed-stage");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+    // Unsealed on drop, before the tree is reclaimed.
+    let Some((staged, staged_bytes, _unseal)) = stage_where_the_staged_name_cannot_be_removed(
+        tree.path(),
+        &answers,
+        &serde_json::json!({"text": "published"}),
+    ) else {
+        return;
+    };
+    let residue = staged.path().to_path_buf();
+
+    let outcome = publish_answer(staged, &mut NoHooks);
+    assert!(
+        matches!(outcome, Ok(AnswerPublication::Published)),
+        "the link succeeded, so the answer is published whatever the cleanup did: {outcome:?}"
+    );
+    assert_eq!(
+        fs::read(answers.join("q-1.json")).expect("the published answer"),
+        staged_bytes,
+        "<qid>.json holds the staged bytes"
+    );
+    assert!(
+        residue.is_file(),
+        "the staged name that could not be removed stays as `.partial` residue"
+    );
+}
+
+/// A refused answer is still refused when its staged name cannot be removed
+/// (`PR385-CLEANUP-MASKS-PUBLICATION`).
+///
+/// `<qid>.json` already exists, so the link fails with `AlreadyExists` and the
+/// outcome is decided: `AlreadyAnswered`, with `<qid>.json` untouched. The
+/// removal of the staged name fails afterwards, and must not turn the refusal
+/// into an I/O error.
+#[cfg(unix)]
+#[test]
+fn a_refused_answer_is_still_refused_when_its_staged_name_cannot_be_removed() {
+    use crate::interaction::AnswerPublication;
+
+    let tree = scratch("answer-refuse-sealed-stage");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+    let kept = b"{\n  \"text\": \"answered first\"\n}\n";
+    fs::write(answers.join("q-1.json"), kept).expect("the answer published first");
+    // Unsealed on drop, before the tree is reclaimed.
+    let Some((staged, staged_bytes, _unseal)) = stage_where_the_staged_name_cannot_be_removed(
+        tree.path(),
+        &answers,
+        &serde_json::json!({"text": "refused"}),
+    ) else {
+        return;
+    };
+    assert_ne!(
+        staged_bytes,
+        kept.to_vec(),
+        "the two answers must be told apart by their bytes"
+    );
+    let residue = staged.path().to_path_buf();
+
+    let outcome = publish_answer(staged, &mut NoHooks);
+    assert!(
+        matches!(outcome, Ok(AnswerPublication::AlreadyAnswered)),
+        "the link was refused, so the answer is already answered whatever the cleanup did: \
+         {outcome:?}"
+    );
+    assert_eq!(
+        fs::read(answers.join("q-1.json")).expect("the kept answer"),
+        kept.to_vec(),
+        "<qid>.json keeps the bytes published first"
+    );
+    assert!(
+        residue.is_file(),
+        "the staged name that could not be removed stays as `.partial` residue"
+    );
+}
+
+/// A link that fails for any reason but `AlreadyExists` removes its staged
+/// file (`PR385-LINK-ERROR-LEAKS-STAGING`).
+///
+/// The staged file is this publisher's alone and no coordinator prunes it, so
+/// a publisher that returned on a failed link without removing it left one
+/// more `.partial` per failed retry. Here `<qid>.json` lies in a directory
+/// that does not exist, so the link fails with `NotFound`: the error is the
+/// link's, naming `<qid>.json`, and the staged file is gone.
+#[test]
+fn a_failed_link_removes_its_staged_file() {
+    let tree = scratch("answer-link-fails");
+    let answers = tree.path().join("answers");
+    create_dir(&answers).expect("answers");
+    let StagedAnswer { staged, .. } = stage_answer(
+        &answers,
+        "q-1",
+        &serde_json::json!({"text": "unpublishable"}),
+        &mut NoHooks,
+    )
+    .expect("stage");
+    let unpublishable = tree.path().join("missing").join("q-1.json");
+
+    let outcome = publish_answer(
+        StagedAnswer {
+            staged: staged.clone(),
+            published: unpublishable.clone(),
+        },
+        &mut NoHooks,
+    );
+    match outcome {
+        Err(UpstrokeError::Io { path, source }) => {
+            assert_eq!(path, unpublishable, "the error is the link's");
+            assert_ne!(
+                source.kind(),
+                io::ErrorKind::AlreadyExists,
+                "the link failed for a reason other than an existing answer"
+            );
+        }
+        other => panic!("a failed link is an I/O error: {other:?}"),
+    }
+    assert!(
+        !staged.exists(),
+        "the staged file is removed when the link fails: {}",
+        staged.display()
+    );
+    assert_eq!(
+        read_dir_names(&answers).expect("the answers directory lists"),
+        Vec::<OsString>::new(),
+        "no `.partial` is left behind"
     );
 }
 

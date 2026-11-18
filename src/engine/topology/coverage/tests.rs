@@ -866,14 +866,19 @@ fn the_question_and_answer_funnels_execute_both_phases_under_the_production_adap
         &mut hooks,
     )
     .expect("the question payload is written");
-    crate::rundir::stage_answer(
+    let staged = crate::rundir::stage_answer(
         &answers,
         "q-st07",
         &serde_json::json!({ "answer": "the exact one" }),
         &mut hooks,
     )
     .expect("the answer is staged");
-    crate::rundir::publish_answer(&answers, "q-st07", &mut hooks).expect("the answer is published");
+    let staged_path = staged.path().to_path_buf();
+    assert_eq!(
+        crate::rundir::publish_answer(staged, &mut hooks).expect("the answer is published"),
+        crate::interaction::AnswerPublication::Published,
+        "nothing was published before, so this answer is"
+    );
     let text = crate::rundir::ingest_answer(&answers, "q-st07", &mut hooks)
         .expect("the answer is read")
         .expect("the published answer is present");
@@ -882,10 +887,7 @@ fn the_question_and_answer_funnels_execute_both_phases_under_the_production_adap
         questions.join("q-st07.json").is_file() && answers.join("q-st07.json").is_file(),
         "both files exist after the four funnels"
     );
-    assert!(
-        !answers.join("q-st07.json.partial").exists(),
-        "the rename consumed the staged file"
-    );
+    assert!(!staged_path.exists(), "publication removed the staged file");
 
     for site in [
         EffectSiteId::RunDir(RunDirSite::WriteQuestionPayload),

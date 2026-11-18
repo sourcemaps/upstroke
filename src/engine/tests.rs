@@ -7422,8 +7422,14 @@ fn resume_makes_a_stale_question_payload_agree_with_the_log() {
         serde_json::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
     record.answer = None;
     interaction::write_question(&questions, &record).expect("rewrite");
-    crate::answer::answer(&repo, &first, crate::answer::Reply::Decline)
-        .expect("a stale payload is exactly what makes a second answer look acceptable");
+    let refused = crate::answer::answer(&repo, &first, crate::answer::Reply::Decline).expect_err(
+        "a stale payload makes a second answer look acceptable, and create-once \
+             publication refuses it all the same",
+    );
+    assert!(
+        refused.to_string().contains("already answered"),
+        "got: {refused}"
+    );
 
     let source = fake(Effect::EditFile);
     resume_with(&resume_options(&repo, &run_id), &source).expect("second resume");

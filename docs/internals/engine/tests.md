@@ -1880,9 +1880,11 @@ No override, so the resume has to read the location off the record.
 
 The engine emits `question_answered` and then rewrites the payload
 beside it. A crash in between leaves a file that still reads as
-open — and `upstroke answer` will accept a second answer against it,
-one no engine can ever ingest, because the log has already closed
-the question.
+open, though the log has already closed the question. `upstroke
+answer` still refuses a second answer against it as already answered,
+because the first answer's published file is still there and
+publication is create-once; the test asserts that refusal before the
+resume makes the payload agree with the log.
 
 ## `let retry = source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]);`
 
