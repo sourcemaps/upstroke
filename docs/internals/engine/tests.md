@@ -3778,10 +3778,11 @@ With these rules each kind of damage is detectable:
 ## `fn host_acceptance_record() {`
 
 G7's native HOST acceptance record (root direction `087fea89`), the host half of R21's per-platform
-run ids. CI selects it by its exact name, after the full suite, in the `test` (Linux, macOS) job
+run ids. CI selects it by its exact name, after the suite, in the `test` job (Linux, after the full
+suite, and macOS, where each of the three shards runs the capture after its own share of the suite)
 and in whichever Windows suite job the run's `pick-windows-home` chose: `test-windows` (the guest)
-or `test-windows-hosted` (its twin on `windows-latest`, the same steps on the guest image's
-compiler):
+or `test-windows-hosted` (its twin on `windows-latest`, on the guest image's compiler, where each
+of the five shards runs the capture after its own share of the suite):
 
 ```text
 cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture

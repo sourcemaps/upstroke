@@ -2124,6 +2124,18 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
+Every platform, and now every leg: the job's matrix is four legs, the Linux
+suite whole and the macOS suite as three shards, and the oracle holds the
+matrix to the legs it derives from `TEST_LEGS`
+(`test_leg_matrix_complaints` in the workflow notes).
+
+One relation the oracle's pins do not state, each being against its own
+constant: `TEST_SHARD_COMMAND`, the suite step every leg runs, is
+`TEST_COMMAND` followed by ` -- ${{ matrix.tests }}` and nothing else. So a
+leg runs the command the guest's Windows job runs whole, over the selection
+its matrix entry hands it, and the two constants cannot drift apart with
+both pins holding.
+
 ## `fn the_windows_leg_runs_these_fixtures_on_the_runner_each_lane_pins() {`
 
 The guest's Windows suite job runs these fixtures on the curated guest for a
@@ -2214,8 +2226,11 @@ this check read and how each was shown a spelling it missed.
 
 The leg whose tests leave GitHub's runners reports that they ran, and
 refuses to run them on any compiler but
-the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is both Windows suite
-jobs' suite step, the guest's and its hosted twin's, so this holds both --
+the one [`GOLDEN_IMAGE_TOOLCHAIN`] names. The script is the guest's suite
+step; the hosted twin's legs run `WINDOWS_SHARD_WITNESS`, which
+[`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`]
+holds to this one line by line, so what this test reads of the compiler
+questions is read of both --
 asking Cargo which compiler it
 will run, the step's PATH which `rustc` it names, and the step's PATH
 which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a
@@ -2250,11 +2265,16 @@ diff, and this is the leg saying it ran what it says it ran.
 ## `fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {`
 
 The job that decides where the Windows suite runs matches the contract, and
-three facts inside its pinned script agree with the model. It reads the
+four facts inside its pinned script agree with the model. It reads the
 guest's queue in exactly one place -- the function is defined once and called
 once -- after the check that `WINGUEST_QUEUE_LIMIT` is a whole number
 from 1 to 999999, so routing on the queue is opt-in on every platform this test runs
-on, not only where the script is executed. And it reads other runs' jobs by
+on, not only where the script is executed. It tests the event and
+`WINGUEST_PR_HOSTED` in one `elif`, which stands after the `WINGUEST_BUSY`
+test and before the limit check, and it expands `GITHUB_EVENT_NAME` and
+`WINGUEST_PR_HOSTED` once each, there: so routing pull requests to the hosted
+shards is opt-in, no other line of the script can send another event there,
+and a busy guest is said first. And it reads other runs' jobs by
 the two names the oracle holds their `name:` to: `TEST_WINDOWS_NAME`, the
 guest's job, and `PICK_WINDOWS_HOME_NAME`, another run's picker, whose state
 is what tells a run still choosing its home from one that has chosen. The
@@ -2322,6 +2342,45 @@ not picking here -- a guest job held, or an earlier run still choosing. It is
 stated by the fixture, not derived from the script's output, so the two
 checks in [`together`] do not copy the rule they test.
 
+## `struct Lane {`
+
+What a run is, to the pull-request rule: the event the runner reports as
+`GITHUB_EVENT_NAME`, and what `WINGUEST_PR_HOSTED` holds. `name` says both,
+in the failure a picker run as this lane prints and in the names of the
+files that run writes.
+
+## `const UNMOVED: [Lane; 2] = [`
+
+The two lanes every case of [`cases`] and every burst of [`bursts`] is
+answered as: a pull request with the variable empty, and a merge-queue entry
+with the variable `1`. Neither is moved by the rule, so both must give the
+answer, the printed lines and the requests the fixture gave before the rule
+existed. The first is every pull request while the owner has not opted in;
+the second is the event the rule must never move, with the variable set.
+
+## `fn twin_legs() -> Vec<String> {`
+
+The hosted twin's five legs as GitHub lists them in a run's jobs:
+`test (windows-latest, 1 of 5)` to `test (windows-latest, 5 of 5)`. The twin
+is a matrix, its `name:` is an expression, and the API lists each leg under
+the name with its shard in place. The names are made here the same way,
+`TEST_WINDOWS_HOSTED_NAME` with each of `windows_shard_labels`' labels in
+place of `${{ matrix.shard }}`, so a renamed job or a sixth shard moves the
+fixtures with it. Until the twin was a matrix a job list here named one
+hosted job, `test (windows-latest)`, twice from the constant and once as a
+literal.
+
+## `fn beside_the_twin<'a>(`
+
+A run's job list with the twin's legs in it: the jobs given, then every leg
+of [`twin_legs`] in one status. A run sent to the twin lists all five, so a
+canned list that names a hosted job names five.
+
+The script reads none of them. It selects jobs by two names, the guest's
+and the picker's, and a leg's is neither; that is what the three lists that
+use this are there to show, and why no answer moved when one hosted job
+became five.
+
 ## `fn cases() -> Vec<Case> {`
 
 Every answer the plan names, the three the earlier attempt's reviews found
@@ -2349,7 +2408,8 @@ one are [`other_runs_still_choosing`].
 
 The rest: `WINGUEST_BUSY` is `1` exactly and then nothing is asked, and
 `true` is not `1`; an unreadable API; one job below a limit of 2 and two at
-it; this run left out; completed guest jobs and other jobs not counted;
+it; this run left out; completed guest jobs and other jobs not counted, the
+twin's five legs queued among them ([`beside_the_twin`]);
 limits of 3 and 1; and five values that are not whole numbers from 1 to 999999 --
 `0`, `-1`, `2.5`, `two`, ` 3` -- each leaving routing on the queue off, so
 nothing is asked and the answer is `guest`, over the deep queue below.
@@ -2381,7 +2441,8 @@ later.
   under which the API lists a job waiting on its `needs` as `queued`.
 - Not counted: an earlier run whose guest job is `completed` beside a
   finished picker, sent to the twin or done; and an earlier run with jobs
-  listed and neither a picker nor a guest job among them.
+  listed and neither a picker nor a guest job among them. Both list the
+  twin's five legs in progress ([`beside_the_twin`]).
 - Runs 99 and 1000 against this run's 900: ids are compared as numbers. As
   strings `99` sorts after `900` and `1000` before it, and each row would
   answer the other way.
@@ -2414,6 +2475,27 @@ run already queued for the guest counts for both; an earlier third run still
 picking takes a place before either; and of three runs at a limit of 2 the
 first two take the guest.
 
+## `fn pull_request_routing() -> Vec<(Lane, Case)> {`
+
+The pull-request rule's own cases, each with the one lane it is answered as.
+
+A pull request with `WINGUEST_PR_HOSTED` at `1` goes to the hosted shards,
+prints the rule's line and asks the API nothing: with no limit set, over the
+deep queue below; under a limit of 2 and an empty queue, which without the
+variable answers `guest` after two requests; and under a limit with no page
+canned, where the fake `gh` fails every request and the script would
+otherwise say the API could not be read. With `WINGUEST_BUSY` at `1` as well
+the answer is `hosted` and the line printed is the busy one alone, since
+that test comes first.
+
+Then five lanes the rule must leave alone: a push with the variable `1`, and
+a pull request with the variable `true`, `0`, `01` and ` 1`. The variable
+routes only as the exact string `1`, as `WINGUEST_BUSY` does. Each lane is
+answered twice as it would be without the variable: `guest` with routing on
+the queue off and nothing asked, over the deep queue; and `guest` under a
+limit of 2 with one job waiting, the two listings and that run's jobs asked
+for once each.
+
 ## `fn deep_queue() -> Vec<(String, Vec<Page>)> {`
 
 Three waiting guest jobs in two other runs. Every limit a literal reading of
@@ -2426,21 +2508,28 @@ One snapshot in a directory of its own: the fake `gh`, its canned pages, the
 script, and a PATH with the fake first. Every picker run against it reads
 the same files, which is what makes several pickers' snapshot one.
 
-## `fn pick(snapshot: &Snapshot, run: u64, busy: &str, limit: &str) -> Picked {`
+## `fn pick(snapshot: &Snapshot, run: u64, lane: &Lane, busy: &str, limit: &str) -> Picked {`
 
-The script run once, as `run`: a cleared environment holding only what the
-job's step would hold, a `GITHUB_OUTPUT` and a request log of its own, and
-what it exited with, printed, wrote and asked for.
+The script run once, as `run` in `lane`: a cleared environment holding only
+what the job's step would hold, the lane's `GITHUB_EVENT_NAME` and
+`WINGUEST_PR_HOSTED` among it, a `GITHUB_OUTPUT` and a request log of its
+own, and what it exited with, printed, wrote and asked for. The two files
+are named by the run and the lane, so one snapshot is read by a run in
+several lanes and each keeps its own.
 
-## `fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {`
+## `fn answer(case: &Case, lanes: &[Lane], script: &str, root: &Path) -> Vec<String> {`
 
-One case: staged, picked as run 900, and every way its answer, its output,
-its printed lines or its requests differ from the case. The script must exit
-0 on every answer, since the aggregate requires the picker to succeed.
+One case: staged once, picked as run 900 in each lane, and for each lane
+every way its answer, its output, its printed lines or its requests differ
+from the case. The printed lines are the case's and the answer's, and no
+other: a line the case does not name is a fault too, so a lane that printed
+the pull-request rule's line beside today's would not pass. The script must
+exit 0 on every answer, since the aggregate requires the picker to succeed.
 
-## `fn together(burst: &Burst, script: &str, root: &Path) -> Result<(), String> {`
+## `fn together(burst: &Burst, lanes: &[Lane], script: &str, root: &Path) -> Vec<String> {`
 
-One burst: the snapshot staged once and each picker run against it in turn,
+One burst: the snapshot staged once and, in each lane, each picker run
+against it in turn,
 which against pages that do not change is the same as at once. Each picker
 must answer its stated home, and ask for both listings and every other
 listed run's jobs once, never its own. Then two checks that read only the
@@ -2459,8 +2548,9 @@ answer is the same on a runner and off one.
 
 ## `fn picker_fixtures(jq: &str) {`
 
-Every case and every burst, reported together, so a broken script names
-every answer it gets wrong. It asks PATH for `jq` first, under the name it
+Every case and every burst, each answered in both lanes of [`UNMOVED`], and
+then the cases of [`pull_request_routing`], reported together, so a broken
+script names every answer it gets wrong. It asks PATH for `jq` first, under the name it
 is handed, and fails with the guard's reason when that does not answer: a
 machine without `jq` is then never read as the script's own `guest` fallback
 passing, and never as a pass at all. The parameter is the name the guard
@@ -2502,6 +2592,13 @@ two rows for that reading. The two bursts that fail under neither of the
 first two are the one with room for both runs and the one with room for
 none, where every rule agrees.
 
+Measured on 2026-11-17 for the pull-request rule, each a mutation of the
+workflow's script, then restored. With the event test dropped, so that the
+variable alone routes, this test failed in the merge-queue lane of
+[`UNMOVED`], a case that answers `guest` there answering `hosted` and asking
+nothing. With the rule tested before `WINGUEST_BUSY`, this test failed. Both
+also failed the picker's pin.
+
 ## `fn the_windows_home_picker_answers_from_canned_api_pages() {`
 
 [`picker_fixtures`], asking PATH for [`JQ`].
@@ -2518,22 +2615,120 @@ failed saying the fixtures had passed and run none. Restored.
 
 ## `fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {`
 
-The hosted twin matches the contract, and two relations hold between it and
-the guest's job that the oracle's pins, each against its own constant, do
-not state. The toolchain the twin's one install selects, read from the
-workflow, is the version the guest's suite step -- which the twin runs too
--- asserts for Cargo's compiler, so the two homes run the suite on one
-compiler. And the two conditions are one comparison of the picker's
-answer, with `guest` and `hosted` its two values, so the two jobs cannot
-both run, or both be skipped, on a run whose picker succeeded. Measured by
-setting the twin's install back to `stable` in the workflow and restoring
-it: this test and the oracle's clean-workflow check both failed, each with
-the twin's toolchain complaint.
+The hosted twin matches the contract, and three relations hold between it
+and the guest's job that the oracle's pins, each against its own constant,
+do not state.
+
+The toolchain the twin's one install selects, read from the workflow, is
+the version its suite step asserts for Cargo's compiler, so the two homes
+run the suite on one compiler. The question is read from
+`WINDOWS_SHARD_WITNESS`, the script the twin's legs run.
+
+The two conditions are one comparison of the picker's answer, with `guest`
+and `hosted` its two values, so the two jobs cannot both run, or both be
+skipped, on a run whose picker succeeded.
+
+And the legs' suite step is the guest's but for the shard. The oracle pins
+`WINDOWS_TEST_WITNESS` and `WINDOWS_SHARD_WITNESS` each as a whole text, and
+two whole texts can drift apart with both pins holding. So, by line:
+
+- lines 1, 2, 4 and 5 of the shards' script are the guest's lines 1, 2, 4
+  and 5: the compiler questions, their refusal, the suite's exit and the
+  count;
+- the guest's line 3 is `TEST_COMMAND` and ` | Tee-Object -Variable log`,
+  and the shards' line 3 is the same with ` -- ${{ matrix.tests }}` between
+  them and nothing else, so a leg runs the guest's command over its
+  selection;
+- the shards' line 6 opens `if ($passed -lt ${{ matrix.floor }}) { throw `,
+  so the floor a leg refuses below is the one the matrix hands it, which
+  the oracle holds to `WINDOWS_SHARD_FLOORS`.
+
+The shards' seventh line, which prints the count, is held by the oracle's
+pin alone.
+
+Measured by setting the twin's install back to `stable` in the workflow and
+restoring it: this test and the oracle's clean-workflow check both failed,
+each with the twin's toolchain complaint. That was before the shards. On
+2026-11-17, with a leg's arguments changed in the workflow and with a leg
+removed, each restored, this test failed at its first assertion with the
+matrix complaint (`windows_shard_matrix_complaints` in the workflow notes).
+And with line 6 testing `$passed -lt 0` in the workflow and in
+`WINDOWS_SHARD_WITNESS` together, then restored, the oracle's clean-workflow
+check passed, as an equality whose two sides moved together must, and this
+test failed at its line 6 assertion. The assertions on lines 1 to 5 were not
+mutated.
+
+## `fn the_shard_tables_run_every_test_in_exactly_one_shard() {`
+
+The two shard tables of the CI model, `WINDOWS_SHARD_FILTERS` and
+`MACOS_SHARD_FILTERS`, each divide the suite: every test runs in exactly one
+shard. The test reads no workflow. It was the proof that came before any
+line of `ci.yml` was derived from a table. Both matrices now are:
+`windows_shard_matrix_complaints` in the workflow notes is what holds the
+hosted twin's to the Windows table, and `test_leg_matrix_complaints` what
+holds the `test` job's three macOS legs to the macOS one.
+
+Five claims.
+
+1. The Windows table's five selections, as [`shard_selections`] derives
+   them, are the five strings written out here. Literals, not a second
+   derivation: the rule is then stated twice in two forms, and a reader sees
+   the arguments a shard is handed.
+2. The macOS table's three are likewise written out, and a table with no
+   filter gives one empty string -- one shard, no arguments, the whole suite.
+3. Each of eight names is run by exactly one selection of each table under
+   [`libtest_runs`], and by the one named beside it; under the empty table's
+   one selection every name runs. The names are the boundaries of the rule,
+   in Windows shard order:
+   - a coordinator test named `a...` (shard 1), one that is not (2), and one
+     named `a...` in a child module of the coordinator's tests (2), which
+     the first filter does not reach because it is a substring that ends at
+     `tests::a`;
+   - a topology test outside the coordinator (3) and an engine test outside
+     topology (4);
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (4),
+     a name outside the engine that contains `engine::`. libtest's filter is
+     a substring, so the engine's shard runs it, and the last shard skips it:
+     once, as for any other name;
+   - a library test that contains no filter (5), and a name with no module
+     before `tests::`, which is how a harness lists a test at its crate's
+     root, the bin harness's among them (5).
+
+   On macOS the same eight fall in shards 1, 1, 1, 1, 2, 2, 3 and 3.
+4. In both lists no filter is empty, contains whitespace or starts with `-`,
+   and none repeats. Each filter is one word of a command line: an empty one
+   is no word, so its own shard has no filter and a later shard's `--skip`
+   takes the next word as its string; one with whitespace is two words; one
+   that starts with `-` is an option. A repeated filter gives a second shard
+   that skips its own filter and selects nothing.
+5. `WINDOWS_SHARD_FLOORS` has one entry for each Windows shard, each above
+   zero, and they sum to [`WINDOWS_TEST_FLOOR`]: the hosted shards together
+   must not accept fewer passing tests than the guest's one job does.
+
+Eight names are examples, not a census of the suite, and the test does not
+ask whether a test of each name exists. That the rule divides every set of
+names is the argument in the workflow notes, under `shard_selections`; these
+are the cases that argument turns on, executed.
+
+Measured by making [`libtest_runs`] read a skip string as a prefix of the
+name rather than a substring, and restoring it: this test failed on
+`workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
+Windows shards 4 and 5.
 
 ## `mod merge_gate_answers {`
 
 The aggregate's script, executed. Linux only, for the reason
 `pick_windows_home_answers` is: the script runs on `ubuntu-latest`.
+
+The test tries five results for each gate: `success`, `failure`, `cancelled`,
+`skipped` and `abandoned`. The fifth is the result GitHub gave a job it
+cancelled with no runner, before any step: in runs 44114671287 (`msrv`, a
+matrix), 44149091955 (`test`, a matrix), 44145399741 and 44154430793 such a
+job reached `upstroke-ci` as `abandoned`, and `upstroke-ci` failed. The
+aggregate accepts `success` alone, so it failed on `abandoned` before the
+test tried it; the test tries it because a script that refused `failure`,
+`cancelled` and `skipped` by name would pass the other four and accept this
+one.
 
 ## `fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {`
 
@@ -2541,13 +2736,13 @@ The workflow's own aggregate script, run under `bash --noprofile --norc -eo
 pipefail` with the results it would read. The gates are the `_RESULT` names
 of the step's own `env:`, so a gate added to the workflow is exercised
 without an edit here. Every pair of Windows results among `success`,
-`failure`, `cancelled` and `skipped`, every other gate succeeding: exactly
-`success` beside `skipped`, either way round, passes. Then each other gate
-failed, cancelled or skipped, beside either passing Windows pair: the
-aggregate fails. Measured by mutating the workflow's script, each mutation
-then restored: accepting both Windows jobs skipped failed this test on that
-pair, and requiring both to succeed, as the script did before the twin,
-failed it on both passing pairs.
+`failure`, `cancelled`, `skipped` and `abandoned`, every other gate
+succeeding: exactly `success` beside `skipped`, either way round, passes.
+Then each other gate failed, cancelled, skipped or abandoned, beside either
+passing Windows pair: the aggregate fails. Measured by mutating the
+workflow's script, each mutation then restored: accepting both Windows jobs
+skipped failed this test on that pair, and requiring both to succeed, as the
+script did before the twin, failed it on both passing pairs.
 
 ## `fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {`
 
