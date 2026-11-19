@@ -235,6 +235,43 @@ estimate must report, not the five-hour reset already past. A rate-limited
 settlement, unlike a signal, never replaces a known reset (see
 `retire_signals`).
 
+## `pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {`
+
+The same memory as `observe(..).exhausted`, read from a schema-4 log. A
+resumed `TopologyRun` starts from it, as the legacy resume starts its
+`exhausted_pools` from `observe`. Without it the resumed run forgets every
+signal its log holds, and the next refusal naming the same reset writes a
+second `pool_exhausted`. `observe` reads `Event`, not `TopologyEvent`, so
+this is a sibling rather than a change to it.
+
+The rules are `observe`'s. A `pool_exhausted` sets its pool's reset. A
+settled attempt's record retires the pools it proves serving and marks a
+rate-limited pool with no reset if none is recorded (`retire_signals`). An
+accepted attempt settles as `candidate_prepared`, not `attempt_finished`,
+and its record retires the same way, as the live run's `record_promoted`
+does. `attempt_interrupted` carries no record and changes nothing.
+
+**The order differs from the legacy log's.** The sequential engine writes
+`pool_exhausted` after its attempt's `attempt_finished`. The schema-4 run
+writes it before (`settle_failure`), so a log cut between the two still
+names the subscription that refused. But in memory, the live run retires
+that attempt's served pools first and records the signal after. Applied in
+log order, a reviewer refused on the pool its worker had just served would
+lose the reset: the worker's success would retire the signal written just
+before it. So a `pool_exhausted` is held until the event after it. If that
+event is `attempt_finished`, the record retires first and the signal is
+recorded after. If it is anything else, or the log ends there, the signal
+is recorded at once. That is the stop this ordering leaves: the signal is
+durable, the settlement is not, and the resume holds the pool at that
+reset.
+
+It is effect-free in `effects/wrappers.toml`.
+
+## `fn record_signals<'a>(`
+
+Record each held `pool_exhausted`: its pool, at its reset. A later one for
+the same pool replaces the earlier, as in `observe`.
+
 ## `fn retire_signals`
 
 Withdraw the exhausted mark from any pool this attempt proves is serving
@@ -254,9 +291,16 @@ which is right: the pool went down again. The retiring half is
 
 ## `fn retire_signals` › `if let Some(failure) = &record.failure {`
 
-The attempt settlement itself is the durable source of a rate-limit
-signal. `pool_exhausted` remains useful detail, but a crash between the
-two appends must not make replay forget which subscription refused work.
+In a legacy log the attempt settlement itself is the durable source of a
+rate-limit signal. The legacy writer, which runs only when a run of
+schemas 1–3 resumes, appends `pool_exhausted` after the attempt's
+`attempt_finished` (`record_pool_exhausted`). `pool_exhausted` remains
+useful detail, but a crash between the two appends must not make replay
+forget which subscription refused work. The schema-4 engine appends the
+signal first (`settle_failure`), so a crash between the two there leaves
+the signal durable and the settlement not, and `exhausted_pools_of` holds
+the pool at the signal's reset. In either log a rate-limited settlement
+that no signal accompanies still marks its pool here.
 
 ## `fn retire_signals` › `exhausted.entry(pool.clone()).or_insert(None);`
 
@@ -302,6 +346,38 @@ given, and reaches no primitive and no path.
 
 A review pass that reached a verdict proves its own pool served, which on
 a cross-vendor second opinion is a different subscription entirely.
+
+## `pub(crate) fn pool_exhausted_to_record(`
+
+Which `pool_exhausted` a settled failure writes, if any. It applies the
+rules of the legacy coordinator's `record_pool_exhausted`, with the parts
+that touch the world taken out: the clock comes in as `now_unix`, the
+pools already recorded come in as a map, and the answer goes back to the
+caller to emit. So every rule can be tested on plain values.
+
+- Only a rate-limited failure writes one.
+- A worker failure names the attempt's own pool and the agent it was given.
+  A reviewer failure names the last review's pool and *that review's*
+  agent. A cross-vendor second opinion drains a different subscription
+  than the worker, so the reset is read in the reviewer's dialect.
+- No pool means no signal. An unattributed refusal belongs to no
+  subscription.
+- A reset is read only from Claude Code's limit message: the captured
+  limit text first, then the reason. Any other agent answers
+  `reset_at: None`.
+- A pool already recorded answers nothing, unless this refusal names a
+  different reset from the one recorded. That is the five-hour limit
+  clearing into the weekly one, and `observe` then reports the later
+  reset. A refusal that names no reset never replaces a known one.
+
+The legacy coordinator keeps its own copy for now. Its code is left as
+it is. The schema-4 run calls this one from `settle_failure`, and appends
+the answer before the attempt's `attempt_finished`. The map it is given
+outlives the process: a resumed run rebuilds it from its log with
+`exhausted_pools_of`.
+
+It is effect-free in `effects/wrappers.toml`. The census gate asks for a
+row for every externally reachable function of this module.
 
 ## `pub fn drain_of<'a>(`
 
@@ -627,6 +703,23 @@ the fold reports B. A settlement keeps a known reset, but a signal is a
 newer statement of when the pool comes back, so it replaces one. A
 further rate limit after B keeps B, and the log cut before B still
 reports A — the replacement is the signal's doing, not the settlement's.
+
+## `fn a_topology_log_ending_in_pool_exhausted_holds_that_pool_at_that_reset() {`
+
+The stop the schema-4 ordering leaves: `pool_exhausted` is durable and its
+attempt's `attempt_finished` is not. The log may end there, or a resume
+may have written `attempt_interrupted` after it. Either way the pool is
+held at the signal's reset, because nothing after it settled a record.
+
+## `fn a_pool_exhausted_is_recorded_after_its_own_attempt_retires_the_pools_it_served() {`
+
+The case the held signal exists for. The worker served on `claude-max`,
+and the reviewer, on the same pool, was then refused. The log holds the
+signal and then the attempt's `attempt_finished`. In log order, the
+worker's success would retire the signal written just before it, and only
+the settlement's mark, with no reset, would be left. The live run retired
+first and recorded the signal after, so the replay does the same and
+keeps the reset.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

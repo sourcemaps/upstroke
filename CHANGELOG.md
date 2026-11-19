@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A schema-4 run now records `pool_exhausted` when a usage limit stops an attempt, with the reset
+  Claude Code reported, as a resumed older run already did; nothing schedules on it yet. A schema-4
+  run appends it before the attempt's settlement, so a known reset is not lost when the run stops
+  between the two.
 - `upstroke answer` now refuses a second answer to a question that already has one published,
   however the two are timed. Two answers started together, or, on a run an older binary created
   (schema 1–3), a second answer to a parked question while no engine drove it, used to both report

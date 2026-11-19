@@ -1355,6 +1355,666 @@ fn the_brief_takes_an_answers_words_from_the_log_live_and_on_replay() {
     assert_eq!(replayed.decisions(TaskKey(0)), [words]);
 }
 
+#[test]
+fn a_rate_limited_worker_naming_a_reset_writes_one_pool_exhausted_before_its_attempt_finished() {
+    use std::sync::Arc;
+
+    use crate::engine::topology::scaffold::{
+        RecordingRunner, ScaffoldAdapters, Wide, WidePlans, WideTask, exited,
+    };
+    use crate::runner::InvocationId;
+    use crate::runner::invocation::AttemptRole;
+
+    struct At(&'static str);
+
+    impl TimeSource for At {
+        fn now_rfc3339(&self) -> String {
+            self.0.to_owned()
+        }
+    }
+
+    const LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+    let runner = RecordingRunner::new().answering(Box::new(|request| {
+        Ok(match &request.invocation {
+            InvocationId::Attempt {
+                role: AttemptRole::Worker,
+                ..
+            } => crate::agent::ProcessOutput {
+                stderr: LIMIT.to_owned(),
+                ..exited(1, String::new())
+            },
+            _ => exited(0, String::new()),
+        })
+    }));
+    let mut wide = Wide::started_with(
+        "pool-exhausted-before-settlement",
+        &[WideTask::independent("alpha")],
+        1,
+        WidePlans {
+            pool: Some("claude-max".to_owned()),
+            ..WidePlans::default()
+        },
+        runner,
+    );
+    wide.env.adapters = Arc::new(ScaffoldAdapters::rate_limiting());
+    let clock = At("2026-11-11T03:00:00Z");
+    let seams = RunSeams {
+        clock: &clock,
+        ..wide.env.seams()
+    };
+    let mut hooks = wide.env.hooks();
+    let progress = wide
+        .run
+        .step(&seams, &mut hooks)
+        .expect("the rate-limited attempt settles");
+    assert!(
+        matches!(
+            progress,
+            Progress::Settled {
+                accepted: false,
+                ..
+            }
+        ),
+        "{progress:?}"
+    );
+
+    let events = wide.env.durable_events();
+    let signals: Vec<(usize, &crate::events::PoolExhausted)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(at, event)| match &event.body {
+            TopologyEventBody::PoolExhausted { data } => Some((at, data)),
+            _ => None,
+        })
+        .collect();
+    let [(signalled, signal)] = signals.as_slice() else {
+        panic!("exactly one `pool_exhausted`: {signals:?}");
+    };
+    assert_eq!(signal.pool, "claude-max");
+    assert_eq!(signal.agent, crate::agent::claude::ADAPTER_ID);
+    assert_eq!(
+        signal.reset_at.as_deref(),
+        Some("2026-11-11T05:30:00Z"),
+        "the reset the limit message names, read against the run's clock: {signal:?}"
+    );
+    let finished = events
+        .iter()
+        .position(|event| {
+            matches!(
+                &event.body,
+                TopologyEventBody::AttemptFinished { data }
+                    if data.key == TaskKey(0) && data.attempt == AttemptNumber(1)
+            )
+        })
+        .expect("the attempt settled with `attempt_finished`");
+    assert!(
+        *signalled < finished,
+        "`pool_exhausted` at {signalled} must come before the attempt's `attempt_finished` at \
+         {finished}: {:?}",
+        events
+            .iter()
+            .map(|event| event.body.kind())
+            .collect::<Vec<_>>()
+    );
+}
+
+const FIVE_HOUR_LIMIT: &str = "You've hit your 5-hour limit · resets 5:30am (UTC)";
+const WEEKLY_LIMIT: &str = "You've hit your weekly limit · resets Nov 14, 5pm (UTC)";
+
+struct RunClock;
+
+impl TimeSource for RunClock {
+    fn now_rfc3339(&self) -> String {
+        "2026-11-11T03:00:00Z".to_owned()
+    }
+}
+
+fn on_claude_max(
+    tag: &str,
+    tasks: &[crate::engine::topology::scaffold::WideTask],
+    limited: &[(TaskKey, GenerationId, &'static str)],
+    failing_gates: &[(u32, u32)],
+) -> crate::engine::topology::scaffold::Wide {
+    use crate::engine::topology::scaffold::{Wide, WidePlans};
+
+    Wide::started_with(
+        tag,
+        tasks,
+        1,
+        WidePlans {
+            pool: Some("claude-max".to_owned()),
+            ..WidePlans::default()
+        },
+        limited_runner(tasks, limited, failing_gates),
+    )
+}
+
+fn limited_runner(
+    tasks: &[crate::engine::topology::scaffold::WideTask],
+    limited: &[(TaskKey, GenerationId, &'static str)],
+    failing_gates: &[(u32, u32)],
+) -> crate::engine::topology::scaffold::RecordingRunner {
+    use crate::engine::topology::scaffold::{RecordingRunner, exited, wide_responder};
+    use crate::runner::InvocationId;
+    use crate::runner::invocation::AttemptRole;
+
+    let otherwise = wide_responder(tasks, failing_gates);
+    let limited = limited.to_vec();
+    RecordingRunner::new().answering(Box::new(move |request| {
+        if let InvocationId::Attempt {
+            key,
+            generation,
+            role: AttemptRole::Worker,
+            ..
+        } = &request.invocation
+        {
+            let limit = limited
+                .iter()
+                .find(|(on, of, _)| on == key && of == generation);
+            if let Some((_, _, limit)) = limit {
+                return Ok(crate::agent::ProcessOutput {
+                    stderr: (*limit).to_owned(),
+                    ..exited(1, String::new())
+                });
+            }
+        }
+        otherwise(request)
+    }))
+}
+
+fn step_answered_by(
+    wide: &mut crate::engine::topology::scaffold::Wide,
+    adapters: crate::engine::topology::scaffold::ScaffoldAdapters,
+    hooks: &mut dyn TopologyHooks,
+) -> Progress {
+    wide.env.adapters = std::sync::Arc::new(adapters);
+    let seams = RunSeams {
+        clock: &RunClock,
+        ..wide.env.seams()
+    };
+    wide.run.step(&seams, hooks).expect("a step")
+}
+
+fn pools_exhausted(
+    wide: &crate::engine::topology::scaffold::Wide,
+) -> Vec<(String, Option<String>)> {
+    wide.env
+        .durable_events()
+        .into_iter()
+        .filter_map(|event| match event.body {
+            TopologyEventBody::PoolExhausted { data } => Some((data.pool, data.reset_at)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn failures_of(
+    wide: &crate::engine::topology::scaffold::Wide,
+    key: TaskKey,
+) -> Vec<Option<crate::ladder::FailureKind>> {
+    wide.env
+        .durable_events()
+        .into_iter()
+        .filter_map(|event| match event.body {
+            TopologyEventBody::AttemptFinished { data } if data.key == key => {
+                Some(data.record.failure.map(|failure| failure.kind))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn signal(reset_at: &str) -> (String, Option<String>) {
+    ("claude-max".to_owned(), Some(reset_at.to_owned()))
+}
+
+#[test]
+fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+    use crate::ladder::FailureKind;
+
+    let mut wide = on_claude_max(
+        "pool-exhausted-same-reset",
+        &[WideTask::independent("alpha")],
+        &[
+            (TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT),
+            (TaskKey(0), GenerationId(1), FIVE_HOUR_LIMIT),
+        ],
+        &[],
+    );
+    let mut hooks = wide.env.hooks();
+    let progress: Vec<Progress> = (0..3)
+        .map(|_| step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks))
+        .collect();
+    assert!(
+        matches!(
+            progress.as_slice(),
+            [
+                Progress::Settled {
+                    accepted: false,
+                    ..
+                },
+                Progress::Waited { .. },
+                Progress::Settled {
+                    accepted: false,
+                    ..
+                },
+            ]
+        ),
+        "deferred, woken, and redispatched into a second limit: {progress:?}"
+    );
+    assert_eq!(
+        failures_of(&wide, TaskKey(0)),
+        [
+            Some(FailureKind::RateLimited),
+            Some(FailureKind::RateLimited)
+        ]
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [signal("2026-11-11T05:30:00Z")],
+        "the second limit names the reset the first one recorded"
+    );
+}
+
+#[test]
+fn a_second_rate_limit_naming_a_different_reset_writes_one_more_pool_exhausted() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+    use crate::ladder::FailureKind;
+
+    let mut wide = on_claude_max(
+        "pool-exhausted-new-reset",
+        &[WideTask::independent("alpha")],
+        &[
+            (TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT),
+            (TaskKey(0), GenerationId(1), WEEKLY_LIMIT),
+        ],
+        &[],
+    );
+    let mut hooks = wide.env.hooks();
+    let progress: Vec<Progress> = (0..3)
+        .map(|_| step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks))
+        .collect();
+    assert!(
+        matches!(
+            progress.as_slice(),
+            [
+                Progress::Settled {
+                    accepted: false,
+                    ..
+                },
+                Progress::Waited { .. },
+                Progress::Settled {
+                    accepted: false,
+                    ..
+                },
+            ]
+        ),
+        "deferred, woken, and redispatched into a second limit: {progress:?}"
+    );
+    assert_eq!(
+        failures_of(&wide, TaskKey(0)),
+        [
+            Some(FailureKind::RateLimited),
+            Some(FailureKind::RateLimited)
+        ]
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [
+            signal("2026-11-11T05:30:00Z"),
+            signal("2026-11-14T17:00:00Z")
+        ],
+        "the weekly limit moves the pool's reset, so it is recorded"
+    );
+}
+
+#[test]
+fn a_rate_limit_after_an_attempt_the_pool_served_writes_pool_exhausted_again() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let mut wide = on_claude_max(
+        "pool-exhausted-after-serving",
+        &[
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ],
+        &[
+            (TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT),
+            (TaskKey(0), GenerationId(1), FIVE_HOUR_LIMIT),
+        ],
+        &[],
+    );
+    let mut hooks = wide.env.hooks();
+    let progress: Vec<Progress> = [
+        ScaffoldAdapters::rate_limiting(),
+        ScaffoldAdapters::new(),
+        ScaffoldAdapters::new(),
+        ScaffoldAdapters::new(),
+        ScaffoldAdapters::rate_limiting(),
+    ]
+    .into_iter()
+    .map(|adapters| step_answered_by(&mut wide, adapters, &mut hooks))
+    .collect();
+    assert!(
+        matches!(
+            progress.as_slice(),
+            [
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                },
+                Progress::Settled {
+                    key: TaskKey(1),
+                    accepted: true,
+                    ..
+                },
+                Progress::Integrated {
+                    key: TaskKey(1),
+                    ..
+                },
+                Progress::Waited { .. },
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                },
+            ]
+        ),
+        "alpha is limited, beta is served and merged on the same pool, and alpha is limited \
+         again: {progress:?}"
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [
+            signal("2026-11-11T05:30:00Z"),
+            signal("2026-11-11T05:30:00Z")
+        ],
+        "beta's accepted attempt proved the pool serving, so the same reset is recorded again"
+    );
+}
+
+#[test]
+fn a_failure_that_is_not_rate_limited_writes_no_pool_exhausted() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+    use crate::ladder::FailureKind;
+
+    for (tag, adapters, limited, failing_gates, kind) in [
+        (
+            "pool-exhausted-agent-error",
+            ScaffoldAdapters::erroring(),
+            &[(TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT)][..],
+            &[][..],
+            FailureKind::AgentError,
+        ),
+        (
+            "pool-exhausted-gate-failed",
+            ScaffoldAdapters::new(),
+            &[][..],
+            &[(0, 1)][..],
+            FailureKind::GateFailed,
+        ),
+    ] {
+        let mut wide = on_claude_max(
+            tag,
+            &[WideTask::independent("alpha")],
+            limited,
+            failing_gates,
+        );
+        let mut hooks = wide.env.hooks();
+        let progress = step_answered_by(&mut wide, adapters, &mut hooks);
+        assert!(
+            matches!(
+                progress,
+                Progress::Settled {
+                    accepted: false,
+                    ..
+                }
+            ),
+            "{tag}: {progress:?}"
+        );
+        assert_eq!(failures_of(&wide, TaskKey(0)), [Some(kind)], "{tag}");
+        assert_eq!(pools_exhausted(&wide), [], "{tag}");
+    }
+}
+
+fn durable_on_claude_max(
+    tag: &str,
+    tasks: &[crate::engine::topology::scaffold::WideTask],
+    limited: &[(TaskKey, GenerationId, &'static str)],
+) -> crate::engine::topology::scaffold::Wide {
+    use crate::engine::topology::scaffold::{Wide, WidePlans};
+
+    Wide::durable(
+        tag,
+        tasks,
+        1,
+        WidePlans {
+            pool: Some("claude-max".to_owned()),
+            ..WidePlans::default()
+        },
+        limited_runner(tasks, limited, &[]),
+    )
+}
+
+fn resumed_limiting(
+    wide: crate::engine::topology::scaffold::Wide,
+    tasks: &[crate::engine::topology::scaffold::WideTask],
+    limited: &[(TaskKey, GenerationId, &'static str)],
+) -> crate::engine::topology::scaffold::Wide {
+    let (_, resumed) = wide
+        .resume(
+            "inc-2",
+            limited_runner(tasks, limited, &[]),
+            Ceiling::unlimited(),
+        )
+        .expect("the next process resumes the run");
+    resumed
+}
+
+#[test]
+fn a_resumed_run_writes_pool_exhausted_again_only_when_the_limit_names_another_reset() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+    use crate::ladder::FailureKind;
+
+    let tasks = [WideTask::independent("alpha")];
+    for (tag, next_limit, expected) in [
+        (
+            "resumed-pool-exhausted-same-reset",
+            FIVE_HOUR_LIMIT,
+            vec![signal("2026-11-11T05:30:00Z")],
+        ),
+        (
+            "resumed-pool-exhausted-new-reset",
+            WEEKLY_LIMIT,
+            vec![
+                signal("2026-11-11T05:30:00Z"),
+                signal("2026-11-14T17:00:00Z"),
+            ],
+        ),
+    ] {
+        let mut wide = durable_on_claude_max(
+            tag,
+            &tasks,
+            &[(TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT)],
+        );
+        let mut hooks = wide.env.hooks();
+        let first = step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+        assert!(
+            matches!(
+                first,
+                Progress::Settled {
+                    accepted: false,
+                    ..
+                }
+            ),
+            "{tag}: {first:?}"
+        );
+        assert_eq!(
+            pools_exhausted(&wide),
+            [signal("2026-11-11T05:30:00Z")],
+            "{tag}: the first process recorded the five-hour reset"
+        );
+
+        let mut resumed =
+            resumed_limiting(wide, &tasks, &[(TaskKey(0), GenerationId(1), next_limit)]);
+        let mut hooks = resumed.env.hooks();
+        let progress =
+            step_answered_by(&mut resumed, ScaffoldAdapters::rate_limiting(), &mut hooks);
+        assert!(
+            matches!(
+                progress,
+                Progress::Settled {
+                    key: TaskKey(0),
+                    accepted: false,
+                    ..
+                }
+            ),
+            "{tag}: the resume wakes the deferred task, and its next generation is limited \
+             again: {progress:?}"
+        );
+        assert_eq!(
+            failures_of(&resumed, TaskKey(0)),
+            [
+                Some(FailureKind::RateLimited),
+                Some(FailureKind::RateLimited)
+            ],
+            "{tag}"
+        );
+        assert_eq!(
+            pools_exhausted(&resumed),
+            expected,
+            "{tag}: the resumed run remembers the reset its log recorded"
+        );
+    }
+}
+
+struct CutAfterPoolExhausted {
+    inner: crate::engine::topology::seams::HarnessTopologyHooks,
+    harness: std::sync::Arc<std::sync::Mutex<crate::topology::effects::HookHarness>>,
+}
+
+impl TopologyHooks for CutAfterPoolExhausted {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self.inner.effects()
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.inner.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
+
+    fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+        self.inner.folded(fold, events);
+        if matches!(
+            events.last().map(|event| &event.body),
+            Some(TopologyEventBody::PoolExhausted { .. })
+        ) {
+            self.harness
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .arm(
+                    crate::topology::effects::EffectSiteId::Event(
+                        crate::topology::effects::EventSite::Append,
+                    ),
+                    crate::topology::effects::SubEffectPoint::Written,
+                    crate::topology::effects::InjectionMode::ErrorReturn,
+                )
+                .expect("the Event append supports an error return while it writes");
+        }
+    }
+}
+
+#[test]
+fn a_run_whose_log_ends_with_pool_exhausted_resumes_with_that_pool_exhausted_at_that_reset() {
+    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+
+    let tasks = [WideTask::independent("alpha")];
+    let mut wide = durable_on_claude_max(
+        "resumed-pool-exhausted-cut",
+        &tasks,
+        &[(TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT)],
+    );
+    wide.env.adapters = std::sync::Arc::new(ScaffoldAdapters::rate_limiting());
+    let mut hooks = CutAfterPoolExhausted {
+        inner: wide.env.hooks(),
+        harness: std::sync::Arc::clone(&wide.env.harness),
+    };
+    let seams = RunSeams {
+        clock: &RunClock,
+        ..wide.env.seams()
+    };
+    let error = wide
+        .run
+        .step(&seams, &mut hooks)
+        .expect_err("the settlement's append fails after the signal's");
+    let kinds: Vec<&str> = wide
+        .env
+        .durable_events()
+        .iter()
+        .map(|event| event.body.kind())
+        .collect();
+    assert_eq!(
+        kinds.last(),
+        Some(&"pool_exhausted"),
+        "the log ends with the signal and no settlement after it: {kinds:?} ({error})"
+    );
+    assert!(!kinds.contains(&"attempt_finished"), "{kinds:?}");
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T05:30:00Z")]);
+
+    let mut resumed = resumed_limiting(
+        wide,
+        &tasks,
+        &[
+            (TaskKey(0), GenerationId(0), FIVE_HOUR_LIMIT),
+            (TaskKey(0), GenerationId(1), FIVE_HOUR_LIMIT),
+        ],
+    );
+    let mut hooks = resumed.env.hooks();
+    let mut progress = Vec::new();
+    while !matches!(progress.last(), Some(Progress::Settled { .. })) && progress.len() < 4 {
+        progress.push(step_answered_by(
+            &mut resumed,
+            ScaffoldAdapters::rate_limiting(),
+            &mut hooks,
+        ));
+    }
+    assert!(
+        matches!(
+            progress.last(),
+            Some(Progress::Settled {
+                key: TaskKey(0),
+                accepted: false,
+                ..
+            })
+        ),
+        "the resumed run runs alpha again into the same limit: {progress:?}"
+    );
+    assert_eq!(
+        failures_of(&resumed, TaskKey(0)),
+        [Some(crate::ladder::FailureKind::RateLimited)],
+        "{progress:?}"
+    );
+    assert_eq!(
+        pools_exhausted(&resumed),
+        [signal("2026-11-11T05:30:00Z")],
+        "the resumed run holds the pool exhausted at the reset the cut log recorded, so the same \
+         limit writes no second signal: {progress:?}"
+    );
+}
+
 fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {
     use crate::engine::topology::settle::tests::{
         ALEPH, apply, attempt_started, dispatch, ev, finished, settle_into, started,

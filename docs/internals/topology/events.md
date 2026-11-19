@@ -1607,7 +1607,11 @@ Informational: §14's pre-flight capacity snapshot. Nothing folds on it.
 
 ## `pub enum TopologyEventBody` › `PoolExhausted {`
 
-Informational: a pool reported itself empty.
+Informational: a pool reported itself empty. The schema-4 engine now
+emits it, before a rate-limited `attempt_finished`: `settle_failure`
+appends it when `capacity::pool_exhausted_to_record` answers one, and the
+attempt's settlement next, so a known reset is durable before the
+settlement is.
 
 ## `pub enum TopologyEventBody` › `DesignDefect {`
 
