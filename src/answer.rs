@@ -45,14 +45,7 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
     })?;
 
     if let Some(existing) = &record.answer {
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "question {} was already answered ({}). Answers are applied once; if the task \
-                 needs different guidance it will raise a new question.",
-                found.question_id,
-                describe(existing)
-            ),
-        });
+        return Err(already_answered(&found.question_id, Some(existing)));
     }
 
     let answer = reply_answer(&record.question, reply)?;
@@ -63,7 +56,7 @@ pub fn answer(repo_root: &Path, wanted: &str, reply: Reply) -> Result<Answered, 
         source,
     })?;
     let record = interaction::AnswerRecord::unattributed(answer);
-    interaction::write_answer(&answers, &id, &record)?;
+    publish(&answers, &id, &record)?;
 
     let run_is_live = rundir::is_running(&found.public);
     Ok(Answered {
@@ -321,14 +314,7 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
     let question = &open.asked.question;
     let answers = open.paths.answers();
     if let Some(existing) = interaction::read_answer(&answers, &question.id)? {
-        return Err(UpstrokeError::Refused {
-            message: format!(
-                "question {} was already answered ({}). Answers are applied once; if the task \
-                 needs different guidance it will raise a new question.",
-                question.id,
-                describe(&existing)
-            ),
-        });
+        return Err(already_answered(question.id.as_str(), Some(&existing)));
     }
     let answer = reply_answer(question, reply)?;
     observe::check_reply(&open.asked, &answer)?;
@@ -337,7 +323,7 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
         source,
     })?;
     let record = interaction::AnswerRecord::unattributed(answer);
-    interaction::write_answer(&answers, &question.id, &record)?;
+    publish(&answers, &question.id, &record)?;
     let run_is_live = rundir::is_running(&open.paths.public);
     Ok(Answered {
         run_id: open.run_id.clone(),
@@ -345,6 +331,31 @@ fn answer_open(open: FoundOpen, reply: Reply) -> Result<Answered, UpstrokeError>
         answer: record.answer,
         run_is_live,
     })
+}
+
+/// Publish `record`, refusing as already answered if another was published first.
+fn publish(
+    answers: &Path,
+    id: &QuestionId,
+    record: &interaction::AnswerRecord,
+) -> Result<(), UpstrokeError> {
+    match interaction::write_answer(answers, id, record)? {
+        interaction::AnswerPublication::Published => Ok(()),
+        interaction::AnswerPublication::AlreadyAnswered => {
+            let existing = interaction::read_answer(answers, id)?;
+            Err(already_answered(id.as_str(), existing.as_ref()))
+        }
+    }
+}
+
+fn already_answered(id: &str, existing: Option<&Answer>) -> UpstrokeError {
+    let existing = existing.map_or_else(String::new, |answer| format!(" ({})", describe(answer)));
+    UpstrokeError::Refused {
+        message: format!(
+            "question {id} was already answered{existing}. Answers are applied once; if the task \
+             needs different guidance it will raise a new question."
+        ),
+    }
 }
 
 fn describe(answer: &Answer) -> String {
@@ -499,6 +510,41 @@ mod tests {
         assert!(
             err.to_string().contains("already handled"),
             "says what: {err}"
+        );
+    }
+
+    #[test]
+    fn a_second_answer_to_a_parked_legacy_question_is_refused_and_keeps_the_first() {
+        let tree = scratch("second");
+        let repo = tree.path().join("repo");
+        seed(&repo, "01RUN", "q-1");
+
+        let first = "retry with the fixture regenerated";
+        answer(&repo, "q-1", Reply::Text(first.to_owned())).expect("the first answer lands");
+        let path = rundir::public_dir(&repo, "01RUN")
+            .join("answers")
+            .join("q-1.json");
+        let kept = std::fs::read(&path).expect("the first answer is on disk");
+
+        let err = answer(
+            &repo,
+            "q-1",
+            Reply::Text("skip the fixture entirely".to_owned()),
+        )
+        .expect_err("a second answer is refused");
+        assert!(
+            matches!(err, UpstrokeError::Refused { .. }),
+            "a refusal: {err:?}"
+        );
+        assert!(err.to_string().contains("already answered"), "got: {err}");
+        assert!(
+            err.to_string().contains(first),
+            "names the kept answer: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still on disk"),
+            kept,
+            "the first answer's bytes are untouched"
         );
     }
 

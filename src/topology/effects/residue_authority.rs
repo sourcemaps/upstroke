@@ -909,12 +909,15 @@ impl AnswerSite {
     ///
     /// Nothing: `T-ANSWER`'s boundary is "answer staged as
     /// `answers/<qid>.json.partial`, **or** published as `answers/<qid>.json`",
-    /// two artifacts and one site each, and `Ingest` performs no effect.
+    /// two artifacts and one site each, and `Ingest` performs no effect. The
+    /// staged artifact is now a file of the publisher's own,
+    /// `answers/<qid>.json.<pid>-<ulid>.partial`, created exclusively.
     pub const fn before_state(self) -> BeforeState {
         match self {
             // `effect_phases_covered`: "answer staging (.partial) **and**
-            // publication by the answer command". The rename publishes the
-            // `.partial` the stage wrote, and R21 holds it either way.
+            // publication by the answer command". The create-once hard link
+            // publishes the `.partial` this publisher's stage wrote, then
+            // removes the staged name, and R21 holds it either way.
             Self::PublishRename => BeforeState::PrecursorDurable,
             Self::StageWrite | Self::Ingest => BeforeState::Absent,
         }

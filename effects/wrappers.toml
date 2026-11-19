@@ -627,6 +627,9 @@ effect_free = [
     "ledger",
     "lock_file",
     "new",
+    # `StagedAnswer::path`: the staged answer file's path, for a caller that
+    # inspects the residue. A path; nothing is opened.
+    "path",
     "permits_deletion",
     "plan_json",
     "public_dir",
@@ -2129,6 +2132,11 @@ not_an_effect = [
     "P_PID",
     "P_PIDFD",
     "RLIMIT_CORE",
+    # The file-size limit the rundir tests' staging child lowers below an
+    # answer's size, so that its staging write fails part-way
+    # (`a_failed_staging_write_removes_its_staged_file`); the effect is
+    # `setrlimit`.
+    "RLIMIT_FSIZE",
     "RLIMIT_NOFILE",
     "SA_RESTART",
     "SA_SIGINFO",
@@ -2157,6 +2165,9 @@ not_an_effect = [
     "SIGTTIN",
     "SIGTTOU",
     "SIGUSR1",
+    # Ignored by the same staging child, so that a write past its file-size
+    # limit answers `EFBIG` rather than ending it; the effect is `signal`.
+    "SIGXFSZ",
     "SIG_BLOCK",
     "SIG_DFL",
     "SIG_ERR",
@@ -2244,6 +2255,7 @@ not_an_effect = [
     "proc_listpids",
     "proc_pidinfo",
     "read",
+    "rlim_t",
     "rlimit",
     "sigaddset",
     "sigemptyset",

@@ -433,9 +433,12 @@ transition to schema 3 before applying their old partial-review contract.
 ## `for record in &run.state.questions {`
 
 A crash between `question_answered` and the payload rewrite leaves a
-file that still reads as open, which `upstroke answer` would accept a
-second answer against — one no engine can ever ingest, because the
-question is already closed in the log. The log is what is authoritative;
+file that still reads as open. Where the earlier answer left no
+published answer file (a terminal answer, for example), `upstroke
+answer` would accept a second answer against it — one no engine can
+ever ingest, because the question is already closed in the log;
+otherwise the published file makes it refuse the second answer as
+already answered. The log is what is authoritative;
 make the payloads agree with it again.
 
 ## `let interrupted = run.state.interrupted_attempts();`

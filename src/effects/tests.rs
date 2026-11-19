@@ -5379,18 +5379,20 @@ mod ci_model;
 mod workflow;
 
 use ci_model::{
-    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES,
-    PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY, TEST_COMMAND,
-    TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION, TEST_WINDOWS_HOSTED_JOB,
-    TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM, WINDOWS_TEST_FLOOR,
+    CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, MACOS_SHARD_FILTERS, MSRV_COMMAND, MSRV_JOB,
+    OVERRIDING_REPO_FILES, PICK_WINDOWS_HOME_NAME, PICK_WINDOWS_HOME_SCRIPT, RUSTFLAGS_KEY,
+    TEST_COMMAND, TEST_SHARD_COMMAND, TEST_WINDOWS_CONDITION, TEST_WINDOWS_HOSTED_CONDITION,
+    TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_LABELS, TEST_WINDOWS_NAME, TEST_WINDOWS_PLATFORM,
+    WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
     WINDOWS_TEST_WITNESS,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_pick_windows_home_complaints,
     ci_test_job_complaints, ci_test_windows_hosted_job_complaints, ci_test_windows_job_complaints,
     ci_windows_build_witness_complaints, ci_workflow_text, complaint_codes,
-    declared_msrv_toolchain, declared_rust_version, field, field_names, mutate_workflow,
-    parse_workflow, rustflags_complaints, scalar, steps_of, three_component, workflow_complaints,
+    declared_msrv_toolchain, declared_rust_version, field, field_names, libtest_runs,
+    mutate_workflow, parse_workflow, rustflags_complaints, scalar, shard_selections, steps_of,
+    three_component, workflow_complaints,
 };
 
 #[test]
@@ -5481,6 +5483,13 @@ fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {
         complaints.is_empty(),
         "the `test` job does not run these fixtures the way they need:\n{}",
         complaints.join("\n")
+    );
+    assert_eq!(
+        TEST_SHARD_COMMAND,
+        format!("{TEST_COMMAND} -- ${{{{ matrix.tests }}}}"),
+        "the `test` job's suite step is not `{TEST_COMMAND}` with the leg's `matrix.tests` \
+         handed to libtest and nothing else, so what a leg runs over its selection is not the \
+         command the Windows suite jobs run"
     );
 }
 
@@ -5611,6 +5620,29 @@ fn the_windows_home_is_picked_by_the_one_job_the_contract_pins() {
         "the picker's script does not count the guest's queue exactly once, behind the check \
          that `WINGUEST_QUEUE_LIMIT` is set, so routing on the queue is not opt-in"
     );
+    let busy_check = "if [[ \"${WINGUEST_BUSY:-}\" == \"1\" ]]; then";
+    let pull_request_check = "elif [[ \"${GITHUB_EVENT_NAME:-}\" == \"pull_request\" && \
+                              \"${WINGUEST_PR_HOSTED:-}\" == \"1\" ]]; then";
+    let reads = |name: &str| {
+        PICK_WINDOWS_HOME_SCRIPT
+            .matches(&format!("${name}"))
+            .count()
+            + PICK_WINDOWS_HOME_SCRIPT
+                .matches(&format!("${{{name}"))
+                .count()
+    };
+    let at = |text: &str| PICK_WINDOWS_HOME_SCRIPT.find(text);
+    assert!(
+        PICK_WINDOWS_HOME_SCRIPT.matches(pull_request_check).count() == 1
+            && reads("GITHUB_EVENT_NAME") == 1
+            && reads("WINGUEST_PR_HOSTED") == 1
+            && at(busy_check).is_some_and(|busy| at(pull_request_check) > Some(busy))
+            && at(pull_request_check).is_some_and(|routed| at(limit_check) > Some(routed)),
+        "the picker's script does not test the event and `WINGUEST_PR_HOSTED` in one `elif`, \
+         each exactly once, after the `WINGUEST_BUSY` test and before the check that \
+         `WINGUEST_QUEUE_LIMIT` is set, so routing pull requests to the hosted shards is not \
+         opt-in, or a merge-queue entry or a push can take it"
+    );
     for (read_as, name) in [
         ("the guest's job", TEST_WINDOWS_NAME),
         ("another run's picker", PICK_WINDOWS_HOME_NAME),
@@ -5637,7 +5669,9 @@ mod pick_windows_home_answers {
         TEST_WINDOWS_NAME,
     };
     use super::scratch_dir;
-    use super::workflow::{ci_workflow_text, field, parse_workflow, scalar, steps_of};
+    use super::workflow::{
+        ci_workflow_text, field, parse_workflow, scalar, steps_of, windows_shard_labels,
+    };
 
     const REPOSITORY: &str = "upstroke/fixture";
     const THIS_RUN: u64 = 900;
@@ -5676,6 +5710,9 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                              rather than pass without having run";
 
     const BUSY: &str = "WINGUEST_BUSY is 1, so the queue for the guest was not counted.";
+    const PR_HOSTED: &str = "This run is a pull request's and WINGUEST_PR_HOSTED is 1, so its \
+                             Windows suite runs on the hosted shards and the queue for the guest \
+                             was not counted.";
     const ROUTING_OFF: &str = "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a \
                                whole number from 1 to 999999, so routing on the queue is off \
                                and the queue for the guest was not counted.";
@@ -5704,6 +5741,26 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         listed: Vec<(u64, Vec<(&'static str, &'static str)>)>,
         pickers: Vec<(u64, &'static str)>,
     }
+
+    #[derive(Clone, Copy)]
+    struct Lane {
+        name: &'static str,
+        event: &'static str,
+        pr_hosted: &'static str,
+    }
+
+    const UNMOVED: [Lane; 2] = [
+        Lane {
+            name: "a-pull-request-with-the-variable-empty",
+            event: "pull_request",
+            pr_hosted: "",
+        },
+        Lane {
+            name: "a-merge-queue-entry-with-the-variable-1",
+            event: "merge_group",
+            pr_hosted: "1",
+        },
+    ];
 
     struct Snapshot {
         dir: PathBuf,
@@ -5784,8 +5841,28 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             .collect()
     }
 
+    fn twin_legs() -> Vec<String> {
+        windows_shard_labels()
+            .iter()
+            .map(|shard| TEST_WINDOWS_HOSTED_NAME.replace("${{ matrix.shard }}", shard))
+            .collect()
+    }
+
+    fn beside_the_twin<'a>(
+        others: &[(&'a str, &'a str)],
+        legs: &'a [String],
+        status: &'a str,
+    ) -> Vec<(&'a str, &'a str)> {
+        others
+            .iter()
+            .copied()
+            .chain(legs.iter().map(|leg| (leg.as_str(), status)))
+            .collect()
+    }
+
     fn cases() -> Vec<Case> {
         let guest = TEST_WINDOWS_NAME;
+        let twin = twin_legs();
         let empty = || vec![run_page(&[])];
         let mut out = vec![
             Case {
@@ -5953,11 +6030,14 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
                     (runs("in_progress"), vec![run_page(&[102])]),
                     (
                         jobs(101),
-                        vec![job_page(&[
-                            (11, guest, "completed"),
-                            (12, "test (windows-latest)", "queued"),
-                            (13, "lint (windows)", "queued"),
-                        ])],
+                        vec![listed_jobs(
+                            101,
+                            &beside_the_twin(
+                                &[(guest, "completed"), ("lint (windows)", "queued")],
+                                &twin,
+                                "queued",
+                            ),
+                        )],
                     ),
                     (jobs(102), vec![job_page(&[(21, guest, "queued")])]),
                 ],
@@ -6038,7 +6118,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
 
     fn other_runs_still_choosing() -> Vec<Case> {
         let guest = TEST_WINDOWS_NAME;
-        let twin = TEST_WINDOWS_HOSTED_NAME;
+        let twin = twin_legs();
         let picker = PICK_WINDOWS_HOME_NAME;
         let earlier = 101;
         let later = 950;
@@ -6130,11 +6210,11 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             beside_one_run(
                 "an-earlier-run-sent-to-the-hosted-runner-is-not-counted",
                 earlier,
-                &[
-                    (picker, "completed"),
-                    (guest, "completed"),
-                    (twin, "in_progress"),
-                ],
+                &beside_the_twin(
+                    &[(picker, "completed"), (guest, "completed")],
+                    &twin,
+                    "in_progress",
+                ),
                 (0, 0),
                 "guest",
             ),
@@ -6148,7 +6228,7 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             beside_one_run(
                 "an-earlier-run-with-neither-a-picker-nor-a-guest-job-is-not-counted",
                 earlier,
-                &[("lint", "in_progress"), (twin, "in_progress")],
+                &beside_the_twin(&[("lint", "in_progress")], &twin, "in_progress"),
                 (0, 0),
                 "guest",
             ),
@@ -6354,6 +6434,126 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         ]
     }
 
+    fn pull_request_routing() -> Vec<(Lane, Case)> {
+        let guest = TEST_WINDOWS_NAME;
+        let empty = || vec![run_page(&[])];
+        let routed = Lane {
+            name: "a-pull-request-with-the-variable-1",
+            event: "pull_request",
+            pr_hosted: "1",
+        };
+        let mut out = vec![
+            (
+                routed,
+                Case {
+                    name: "a-pull-request-with-the-variable-1-goes-to-the-hosted-shards".to_owned(),
+                    busy: "",
+                    limit: "",
+                    pages: deep_queue(),
+                    home: "hosted",
+                    says: vec![PR_HOSTED.to_owned()],
+                    asked: Vec::new(),
+                },
+            ),
+            (
+                routed,
+                Case {
+                    name: "a-pull-request-with-the-variable-1-asks-nothing-under-a-limit"
+                        .to_owned(),
+                    busy: "",
+                    limit: "2",
+                    pages: vec![(runs("queued"), empty()), (runs("in_progress"), empty())],
+                    home: "hosted",
+                    says: vec![PR_HOSTED.to_owned()],
+                    asked: Vec::new(),
+                },
+            ),
+            (
+                routed,
+                Case {
+                    name: "a-pull-request-with-the-variable-1-asks-nothing-of-an-api-that-fails"
+                        .to_owned(),
+                    busy: "",
+                    limit: "2",
+                    pages: Vec::new(),
+                    home: "hosted",
+                    says: vec![PR_HOSTED.to_owned()],
+                    asked: Vec::new(),
+                },
+            ),
+            (
+                routed,
+                Case {
+                    name: "a-busy-guest-is-said-first-of-a-pull-request-with-the-variable-1"
+                        .to_owned(),
+                    busy: "1",
+                    limit: "",
+                    pages: Vec::new(),
+                    home: "hosted",
+                    says: vec![BUSY.to_owned()],
+                    asked: Vec::new(),
+                },
+            ),
+        ];
+        for unmoved in [
+            Lane {
+                name: "a-push-with-the-variable-1",
+                event: "push",
+                pr_hosted: "1",
+            },
+            Lane {
+                name: "a-pull-request-with-the-variable-true",
+                event: "pull_request",
+                pr_hosted: "true",
+            },
+            Lane {
+                name: "a-pull-request-with-the-variable-0",
+                event: "pull_request",
+                pr_hosted: "0",
+            },
+            Lane {
+                name: "a-pull-request-with-the-variable-01",
+                event: "pull_request",
+                pr_hosted: "01",
+            },
+            Lane {
+                name: "a-pull-request-with-the-variable-padded",
+                event: "pull_request",
+                pr_hosted: " 1",
+            },
+        ] {
+            out.push((
+                unmoved,
+                Case {
+                    name: format!("{}-is-answered-guest-with-routing-off", unmoved.name),
+                    busy: "",
+                    limit: "",
+                    pages: deep_queue(),
+                    home: "guest",
+                    says: vec![ROUTING_OFF.to_owned()],
+                    asked: Vec::new(),
+                },
+            ));
+            out.push((
+                unmoved,
+                Case {
+                    name: format!("{}-is-counted-under-a-limit", unmoved.name),
+                    busy: "",
+                    limit: "2",
+                    pages: vec![
+                        (runs("queued"), vec![run_page(&[101])]),
+                        (runs("in_progress"), empty()),
+                        (jobs(101), vec![job_page(&[(11, guest, "queued")])]),
+                    ],
+                    home: "guest",
+                    says: vec![limited(2), counted(1), ahead(0)],
+                    asked: vec![runs("queued"), runs("in_progress"), jobs(101)],
+                },
+            ));
+        }
+        out
+    }
+
     fn deep_queue() -> Vec<(String, Vec<Page>)> {
         let guest = TEST_WINDOWS_NAME;
         vec![
@@ -6401,9 +6601,11 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         }
     }
 
-    fn pick(snapshot: &Snapshot, run: u64, busy: &str, limit: &str) -> Picked {
-        let written = snapshot.dir.join(format!("github-output-{run}"));
-        let log = snapshot.dir.join(format!("gh-{run}.log"));
+    fn pick(snapshot: &Snapshot, run: u64, lane: &Lane, busy: &str, limit: &str) -> Picked {
+        let written = snapshot
+            .dir
+            .join(format!("github-output-{run}-{}", lane.name));
+        let log = snapshot.dir.join(format!("gh-{run}-{}.log", lane.name));
         let output = Command::new("bash")
             .args(["--noprofile", "--norc", "-eo", "pipefail"])
             .arg(&snapshot.script)
@@ -6411,9 +6613,11 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
             .env("PATH", &snapshot.path)
             .env("GITHUB_REPOSITORY", REPOSITORY)
             .env("GITHUB_RUN_ID", run.to_string())
+            .env("GITHUB_EVENT_NAME", lane.event)
             .env("GITHUB_OUTPUT", &written)
             .env("GH_TOKEN", "canned")
             .env("WINGUEST_BUSY", busy)
+            .env("WINGUEST_PR_HOSTED", lane.pr_hosted)
             .env("WINGUEST_QUEUE_LIMIT", limit)
             .env("FAKE_GH_PAGES", &snapshot.pages)
             .env("FAKE_GH_LOG", &log)
@@ -6462,29 +6666,40 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         }
     }
 
-    fn answer(case: &Case, script: &str, root: &Path) -> Result<(), String> {
+    fn answer(case: &Case, lanes: &[Lane], script: &str, root: &Path) -> Vec<String> {
         let snapshot = stage(root, &case.name, script, &case.pages);
-        let picked = pick(&snapshot, THIS_RUN, case.busy, case.limit);
-        let mut wrong = picked.wrong(case.home, &case.asked);
         let home_line = format!("home: {}", case.home);
-        for line in case.says.iter().chain(std::iter::once(&home_line)) {
-            if !picked.stdout.lines().any(|printed| printed == line) {
-                wrong.push(format!("it did not print {line:?}"));
+        let mut failures = Vec::new();
+        for lane in lanes {
+            let picked = pick(&snapshot, THIS_RUN, lane, case.busy, case.limit);
+            let mut wrong = picked.wrong(case.home, &case.asked);
+            for line in case.says.iter().chain(std::iter::once(&home_line)) {
+                if !picked.stdout.lines().any(|printed| printed == line) {
+                    wrong.push(format!("it did not print {line:?}"));
+                }
+            }
+            for printed in picked.stdout.lines() {
+                if printed != home_line && !case.says.iter().any(|line| line == printed) {
+                    wrong.push(format!(
+                        "it printed {printed:?}, which the case does not name"
+                    ));
+                }
+            }
+            if !wrong.is_empty() {
+                failures.push(format!(
+                    "{}, as {}:\n  {}\n  stdout:\n{}\n  stderr:\n{}",
+                    case.name,
+                    lane.name,
+                    wrong.join("\n  "),
+                    picked.stdout,
+                    picked.stderr
+                ));
             }
         }
-        if wrong.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "{}:\n  {}\n  stdout:\n{}\n  stderr:\n{}",
-            case.name,
-            wrong.join("\n  "),
-            picked.stdout,
-            picked.stderr
-        ))
+        failures
     }
 
-    fn together(burst: &Burst, script: &str, root: &Path) -> Result<(), String> {
+    fn together(burst: &Burst, lanes: &[Lane], script: &str, root: &Path) -> Vec<String> {
         let ids: Vec<u64> = burst.listed.iter().map(|(run, _)| *run).collect();
         let mut pages = vec![
             (runs("queued"), vec![run_page(&[])]),
@@ -6496,55 +6711,59 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         let snapshot = stage(root, burst.name, script, &pages);
         let limit = burst.limit.to_string();
 
-        let mut wrong = Vec::new();
-        let mut printed = Vec::new();
-        let mut on_guest = 0_usize;
-        for (run, home) in &burst.pickers {
-            if !ids.contains(run) {
-                wrong.push(format!(
-                    "run {run} picks and is not in the listing it reads"
+        let mut failures = Vec::new();
+        for lane in lanes {
+            let mut wrong = Vec::new();
+            let mut printed = Vec::new();
+            let mut on_guest = 0_usize;
+            for (run, home) in &burst.pickers {
+                if !ids.contains(run) {
+                    wrong.push(format!(
+                        "run {run} picks and is not in the listing it reads"
+                    ));
+                }
+                let mut asked = vec![runs("queued"), runs("in_progress")];
+                asked.extend(ids.iter().filter(|id| *id != run).map(|id| jobs(*id)));
+                let picked = pick(&snapshot, *run, lane, "", &limit);
+                wrong.extend(
+                    picked
+                        .wrong(home, &asked)
+                        .into_iter()
+                        .map(|fault| format!("run {run}: {fault}")),
+                );
+                if picked.written == "home=guest\n" {
+                    on_guest += 1;
+                }
+                printed.push(format!(
+                    "  run {run} stdout:\n{}\n  run {run} stderr:\n{}",
+                    picked.stdout, picked.stderr
                 ));
             }
-            let mut asked = vec![runs("queued"), runs("in_progress")];
-            asked.extend(ids.iter().filter(|id| *id != run).map(|id| jobs(*id)));
-            let picked = pick(&snapshot, *run, "", &limit);
-            wrong.extend(
-                picked
-                    .wrong(home, &asked)
-                    .into_iter()
-                    .map(|fault| format!("run {run}: {fault}")),
-            );
-            if picked.written == "home=guest\n" {
-                on_guest += 1;
+            let room = burst.limit.saturating_sub(burst.taken);
+            if on_guest + burst.taken > burst.limit {
+                wrong.push(format!(
+                    "together they sent {on_guest} runs to a guest that {} other runs hold or \
+                     will take first, past the limit of {}",
+                    burst.taken, burst.limit
+                ));
             }
-            printed.push(format!(
-                "  run {run} stdout:\n{}\n  run {run} stderr:\n{}",
-                picked.stdout, picked.stderr
-            ));
+            if on_guest < room.min(burst.pickers.len()) {
+                wrong.push(format!(
+                    "the guest had room for {room} of these {} runs and {on_guest} took it",
+                    burst.pickers.len()
+                ));
+            }
+            if !wrong.is_empty() {
+                failures.push(format!(
+                    "{}, as {}:\n  {}\n{}",
+                    burst.name,
+                    lane.name,
+                    wrong.join("\n  "),
+                    printed.join("\n")
+                ));
+            }
         }
-        let room = burst.limit.saturating_sub(burst.taken);
-        if on_guest + burst.taken > burst.limit {
-            wrong.push(format!(
-                "together they sent {on_guest} runs to a guest that {} other runs hold or will \
-                 take first, past the limit of {}",
-                burst.taken, burst.limit
-            ));
-        }
-        if on_guest < room.min(burst.pickers.len()) {
-            wrong.push(format!(
-                "the guest had room for {room} of these {} runs and {on_guest} took it",
-                burst.pickers.len()
-            ));
-        }
-        if wrong.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "{}:\n  {}\n{}",
-            burst.name,
-            wrong.join("\n  "),
-            printed.join("\n")
-        ))
+        failures
     }
 
     fn answers_on_path(program: &str) -> Result<(), String> {
@@ -6568,15 +6787,18 @@ if (( page == 1 )); then echo "fake gh: no canned answer for $path" >&2; exit 1;
         let tree = scratch_dir("pick-windows-home");
         let alone = cases();
         let started_together = bursts();
+        let routed = pull_request_routing();
         let failures: Vec<String> = alone
             .iter()
-            .map(|case| answer(case, script, tree.path()))
+            .flat_map(|case| answer(case, &UNMOVED, script, tree.path()))
             .chain(
                 started_together
                     .iter()
-                    .map(|burst| together(burst, script, tree.path())),
+                    .flat_map(|burst| together(burst, &UNMOVED, script, tree.path())),
             )
-            .filter_map(Result::err)
+            .chain(routed.iter().flat_map(|(lane, case)| {
+                answer(case, std::slice::from_ref(lane), script, tree.path())
+            }))
             .collect();
         assert!(
             failures.is_empty(),
@@ -6628,16 +6850,185 @@ fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {
     let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
     assert!(
         installed == [GOLDEN_IMAGE_TOOLCHAIN]
-            && WINDOWS_TEST_WITNESS.contains(&format!("$rustc -notmatch '^rustc {version} '")),
-        "the twin installs {installed:?} where the guest's suite step, which the twin runs too, \
-         asserts `{GOLDEN_IMAGE_TOOLCHAIN}`, so the two homes do not run the suite on one \
-         compiler"
+            && WINDOWS_SHARD_WITNESS.contains(&format!("$rustc -notmatch '^rustc {version} '")),
+        "the twin installs {installed:?} where its suite step, whose compiler questions are \
+         the guest's, asserts `{GOLDEN_IMAGE_TOOLCHAIN}`, so the two homes do not run the suite \
+         on one compiler"
     );
     assert_eq!(
         TEST_WINDOWS_CONDITION.replace("'guest'", "'hosted'"),
         TEST_WINDOWS_HOSTED_CONDITION,
         "the two Windows suite jobs' conditions are not one comparison of the picker's answer \
          with its two values"
+    );
+
+    let guest: Vec<&str> = WINDOWS_TEST_WITNESS.lines().collect();
+    let shard: Vec<&str> = WINDOWS_SHARD_WITNESS.lines().collect();
+    for line in [1_usize, 2, 4, 5] {
+        let guests = guest.get(line - 1);
+        assert!(
+            guests.is_some() && shard.get(line - 1) == guests,
+            "line {line} of the shards' suite step is {:?} and the guest's is {guests:?}: the \
+             compiler questions, the suite's exit and the count are not one text on the two \
+             homes",
+            shard.get(line - 1)
+        );
+    }
+    let whole_suite = format!("{TEST_COMMAND} | Tee-Object -Variable log");
+    assert_eq!(
+        guest.get(2).copied(),
+        Some(whole_suite.as_str()),
+        "line 3 of the guest's suite step is not `{TEST_COMMAND}` with its output kept for the \
+         count, so the guest does not run the whole suite"
+    );
+    let one_shard = format!("{TEST_COMMAND} -- ${{{{ matrix.tests }}}} | Tee-Object -Variable log");
+    assert_eq!(
+        shard.get(2).copied(),
+        Some(one_shard.as_str()),
+        "line 3 of the shards' suite step is not the guest's command with the leg's \
+         `matrix.tests` handed to libtest and nothing else, so a shard does not run its share \
+         of the guest's suite"
+    );
+    assert!(
+        shard
+            .get(5)
+            .is_some_and(|line| line.starts_with("if ($passed -lt ${{ matrix.floor }}) { throw ")),
+        "line 6 of the shards' suite step, {:?}, does not refuse a count below the leg's \
+         `matrix.floor`, so the floors the oracle holds the matrix to are floors no leg tests",
+        shard.get(5)
+    );
+}
+
+#[test]
+fn the_shard_tables_run_every_test_in_exactly_one_shard() {
+    let windows = shard_selections(&WINDOWS_SHARD_FILTERS);
+    assert_eq!(
+        windows,
+        [
+            "engine::topology::coordinator::tests::a",
+            "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a",
+            "engine::topology:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator::",
+            "engine:: --skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology::",
+            "--skip engine::topology::coordinator::tests::a --skip engine::topology::coordinator:: --skip engine::topology:: --skip engine::",
+        ],
+        "the Windows shards' libtest arguments are not the five written out here: each shard's \
+         are its filter and a `--skip` for every filter before it, and the last shard's are \
+         only the skips"
+    );
+    let macos = shard_selections(&MACOS_SHARD_FILTERS);
+    assert_eq!(
+        macos,
+        [
+            "engine::topology::",
+            "engine:: --skip engine::topology::",
+            "--skip engine::topology:: --skip engine::",
+        ],
+        "the macOS shards' libtest arguments are not the three written out here"
+    );
+    let unsharded = shard_selections(&[]);
+    assert_eq!(
+        unsharded,
+        [""],
+        "a table with no filter is not one shard with no arguments, which is the whole suite"
+    );
+
+    for (name, windows_shard, macos_shard) in [
+        (
+            "engine::topology::coordinator::tests::a_budget_stop_drains",
+            1,
+            1,
+        ),
+        (
+            "engine::topology::coordinator::tests::halt_cancels_in_flight_attempt_at_width_three",
+            2,
+            1,
+        ),
+        (
+            "engine::topology::coordinator::tests::interleaving::a_budget_stop_under_every_seed",
+            2,
+            1,
+        ),
+        (
+            "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+            3,
+            1,
+        ),
+        ("engine::tests::host_acceptance_record", 4, 2),
+        (
+            "workspace_manager::tests::engine::a_name_with_a_filter_inside_it",
+            4,
+            2,
+        ),
+        (
+            "effects::tests::the_workflow_shape_oracle_refuses_every_escape_the_ledger_names",
+            5,
+            3,
+        ),
+        ("tests::a_test_of_the_binary_harness", 5, 3),
+    ] {
+        for (table, selections, expected) in [
+            ("Windows", &windows, windows_shard),
+            ("macOS", &macos, macos_shard),
+            ("empty", &unsharded, 1),
+        ] {
+            let running: Vec<usize> = selections
+                .iter()
+                .enumerate()
+                .filter(|(_, selection)| libtest_runs(selection, name))
+                .map(|(index, _)| index + 1)
+                .collect();
+            assert_eq!(
+                running,
+                [expected],
+                "`{name}` runs in shards {running:?} of the {table} table, not in shard \
+                 {expected} alone. A test no shard runs is one the sharded suite never executes \
+                 while every shard reports success, and a test two shards run is run twice."
+            );
+        }
+    }
+
+    for (table, filters) in [
+        ("WINDOWS_SHARD_FILTERS", WINDOWS_SHARD_FILTERS.as_slice()),
+        ("MACOS_SHARD_FILTERS", MACOS_SHARD_FILTERS.as_slice()),
+    ] {
+        let malformed: Vec<&str> = filters
+            .iter()
+            .copied()
+            .filter(|filter| {
+                filter.is_empty() || filter.contains(char::is_whitespace) || filter.starts_with('-')
+            })
+            .collect();
+        assert!(
+            malformed.is_empty(),
+            "`{table}` holds {malformed:?}. Each filter is one word of a libtest command line: \
+             an empty one is no word at all, so its own shard has no filter and a later shard's \
+             `--skip` takes the next word as its string; one with whitespace in it is two words; \
+             and one that starts with `-` is read as an option."
+        );
+        let distinct: BTreeSet<&str> = filters.iter().copied().collect();
+        assert_eq!(
+            distinct.len(),
+            filters.len(),
+            "`{table}` names a filter twice, so the later of the two shards skips its own \
+             filter and selects no test"
+        );
+    }
+
+    assert_eq!(
+        WINDOWS_SHARD_FLOORS.len(),
+        windows.len(),
+        "`WINDOWS_SHARD_FLOORS` does not hold one floor for each Windows shard"
+    );
+    assert!(
+        WINDOWS_SHARD_FLOORS.iter().all(|floor| *floor > 0),
+        "a floor in {WINDOWS_SHARD_FLOORS:?} is zero, which a shard that executed nothing clears"
+    );
+    assert_eq!(
+        WINDOWS_SHARD_FLOORS.iter().sum::<u32>(),
+        WINDOWS_TEST_FLOOR,
+        "the Windows shards' floors {WINDOWS_SHARD_FLOORS:?} do not sum to the guest's floor: \
+         the hosted shards together must not accept fewer passing tests than the guest's one \
+         job does"
     );
 }
 
@@ -6652,7 +7043,7 @@ mod merge_gate_answers {
 
     const GUEST: &str = "TEST_WINDOWS_RESULT";
     const HOSTED: &str = "TEST_WINDOWS_HOSTED_RESULT";
-    const RESULTS: [&str; 4] = ["success", "failure", "cancelled", "skipped"];
+    const RESULTS: [&str; 5] = ["success", "failure", "cancelled", "skipped", "abandoned"];
 
     #[test]
     fn the_aggregate_requires_exactly_one_windows_suite_job_and_every_other_gate() {
@@ -6714,7 +7105,7 @@ mod merge_gate_answers {
             }
         }
         for gate in &others {
-            for result in ["failure", "cancelled", "skipped"] {
+            for result in ["failure", "cancelled", "skipped", "abandoned"] {
                 for (guest, hosted) in [("success", "skipped"), ("skipped", "success")] {
                     let mut results: Vec<(&str, &str)> = others
                         .iter()

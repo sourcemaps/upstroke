@@ -12,13 +12,16 @@ pub(super) const CLIPPY_GATE: &str = "cargo clippy --all-targets --all-features 
 
 pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";
 
+pub(super) const TEST_SHARD_COMMAND: &str =
+    "cargo test --all-targets --all-features -- ${{ matrix.tests }}";
+
 pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-features";
 
 pub(super) const GIT_IDENTITY_SCRIPT: &str = "git config --global user.email \"ci@upstroke.local\"\ngit config --global user.name \"upstroke CI\"\n";
 
 pub(super) const TEST_SCRIPTS: [&str; 4] = [
     GIT_IDENTITY_SCRIPT,
-    TEST_COMMAND,
+    TEST_SHARD_COMMAND,
     HOST_ACCEPTANCE_CAPTURE,
     CAPABILITY_OBSERVATION,
 ];
@@ -30,9 +33,25 @@ pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [
     CAPABILITY_WINDOWS_OBSERVATION,
 ];
 
+pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [
+    GIT_IDENTITY_SCRIPT,
+    WINDOWS_SHARD_WITNESS,
+    HOST_ACCEPTANCE_WINDOWS_CAPTURE,
+    CAPABILITY_WINDOWS_OBSERVATION,
+];
+
 pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 
 pub(super) const WINDOWS_TEST_WITNESS: &str = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\nif ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\ncargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
+
+pub(super) const WINDOWS_SHARD_WITNESS: &str = r#"$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
+if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
+cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
+if ($passed -lt ${{ matrix.floor }}) { throw "shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests" }
+"shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}"
+"#;
 
 pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail
 log="$RUNNER_TEMP/host-acceptance-record.log"
@@ -135,11 +154,30 @@ pub(super) const TEST_WINDOWS_TIMEOUT_MINUTES: i64 = 20;
 pub(super) const TEST_WINDOWS_CONDITION: &str = "needs.pick-windows-home.outputs.home == 'guest'";
 
 pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";
-pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest)";
-pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 55;
+pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest, ${{ matrix.shard }})";
+pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 40;
 pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
     "needs.pick-windows-home.outputs.home == 'hosted'";
+
+pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [
+    "engine::topology::coordinator::tests::a",
+    "engine::topology::coordinator::",
+    "engine::topology::",
+    "engine::",
+];
+
+pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];
+
+pub(super) const MACOS_SHARD_FILTERS: [&str; 2] = ["engine::topology::", "engine::"];
+
+pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";
+pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
+
+pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [
+    ("ubuntu-latest", &[]),
+    ("macos-latest", &MACOS_SHARD_FILTERS),
+];
 
 pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
 pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";
@@ -167,9 +205,10 @@ pub(super) const PICK_WINDOWS_HOME_STEP_FIELDS: [&str; 5] = ["env", "id", "name"
 
 pub(super) const PICK_WINDOWS_HOME_SHELL: &str = "bash";
 
-pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [
+pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 4] = [
     ("GH_TOKEN", "${{ github.token }}"),
     ("WINGUEST_BUSY", "${{ vars.WINGUEST_BUSY }}"),
+    ("WINGUEST_PR_HOSTED", "${{ vars.WINGUEST_PR_HOSTED }}"),
     ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
 ];
 
@@ -205,6 +244,9 @@ home=guest
 if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
   home=hosted
   echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
+elif [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && "${WINGUEST_PR_HOSTED:-}" == "1" ]]; then
+  home=hosted
+  echo "This run is a pull request's and WINGUEST_PR_HOSTED is 1, so its Windows suite runs on the hosted shards and the queue for the guest was not counted."
 elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
   echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a whole number from 1 to 999999, so routing on the queue is off and the queue for the guest was not counted."
 else
@@ -280,6 +322,16 @@ pub(super) const TEST_JOB_FIELDS: [&str; 5] =
 
 pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =
     ["if", "name", "needs", "runs-on", "steps", "timeout-minutes"];
+
+pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 7] = [
+    "if",
+    "name",
+    "needs",
+    "runs-on",
+    "steps",
+    "strategy",
+    "timeout-minutes",
+];
 
 pub(super) const MSRV_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];
