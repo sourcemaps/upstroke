@@ -49,8 +49,9 @@ use crate::workspace_manager::{EffectHooks, WorkspaceManager};
 use super::coordinator::PipelineSeams;
 use super::create::{ProbePair, Request, RunnerProbes, create_run};
 use super::identity::{InvocationLedger, SlotLimits};
-use super::preflight::RunPreflight;
+use super::preflight::{RunPreflight, refuse_unusable_profiles};
 use super::prelock::{self, PreLock, PreLockChecked, RunnerResolved};
+use super::profiled::profiled;
 use super::recover::{
     RecordsVerified, ResumeSeams, RootDerived, recover_verified, verify_for_recovery,
 };
@@ -178,6 +179,11 @@ pub fn prepare_fresh(
             }
         }
     };
+    refuse_unusable_profiles(
+        &analysis.config.pools,
+        authorization.runner_policy(),
+        opts.profile_environment(),
+    )?;
     let kind = authorization.runner_policy().kind;
     let image_environment = match kind {
         RunnerKind::Host => None,
@@ -332,6 +338,7 @@ impl FreshLeased {
                 base,
             )?),
         };
+        let runner = profiled(runner, &analysis.config.pools);
         let census = startup_census(
             WorktreeLocked::from(worktree),
             &mut hooks,
@@ -659,6 +666,7 @@ impl ResumeVerified {
                 base,
             )?),
         };
+        let runner = profiled(runner, &config.pools);
         one_spelling(&include_spelling, &manager)?;
         let paths = RunPaths::from_parts(
             root.public_dir().to_path_buf(),
@@ -670,7 +678,8 @@ impl ResumeVerified {
             shell,
             &crate::agent::probe_workspace(),
             started.probed_agents,
-        );
+        )
+        .with_pools(&config.pools);
         let (_recovered, handle) = recover_verified(
             records,
             &ResumeSeams {

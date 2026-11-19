@@ -11,6 +11,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::agent::Caps;
+use crate::capacity::Pool;
 use crate::config;
 use crate::error::UpstrokeError;
 use crate::events::{self, BindingSummary, ChainSummary, GateSummary};
@@ -135,6 +136,7 @@ pub(super) fn preflight_with_recorded(
     mut analysis: Analysis,
     recorded: Recorded,
 ) -> Result<Preflight, UpstrokeError> {
+    refuse_profiled_pools(&analysis.config.pools)?;
     let mut warnings = analysis.warnings.clone();
 
     if let Some(routing) = recorded.routing.as_ref() {
@@ -288,6 +290,25 @@ pub(super) fn preflight_with_recorded(
         mode,
         notifiers,
         budgets,
+    })
+}
+
+fn refuse_profiled_pools(pools: &[Pool]) -> Result<(), UpstrokeError> {
+    let Some((pool, profile)) = pools
+        .iter()
+        .find_map(|pool| pool.profile.as_ref().map(|profile| (pool, profile)))
+    else {
+        return Ok(());
+    };
+    Err(UpstrokeError::Refused {
+        message: format!(
+            "pool `{}` names the credential profile `{profile}`, and profiles apply to runs \
+             created on the execution topology (schema 4). This is the legacy coordinator \
+             (schema 1–3 runs), which does not carry a profile, so it refuses rather than run \
+             without the one the pool names. Remove the pool's `profile` to run here, or create \
+             the run on the execution topology",
+            pool.name
+        ),
     })
 }
 

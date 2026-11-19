@@ -17,12 +17,12 @@ not a leak, and it is the same posture §9 sets for plan importers.
 
 Two things this deliberately does not do:
 
-- **It never invents a profile.** §13 wants `connect` to enumerate
-  credential profiles, not just binaries, so that one vendor can back
-  several pools. There is no vendor registry of profiles to enumerate — the
-  mechanism is a config-directory environment variable, not a list — so v0.1
-  writes one pool per agent and leaves `profile` for the operator to add by
-  hand. See [`crate::capacity`]'s module docs for the v0.2 sketch.
+- **It never invents a profile.** §13 says `connect` does not enumerate
+  credential profiles, because no vendor lists them: the mechanism is a
+  config-directory environment variable, not a registry. So `connect` writes
+  one pool per agent, and `profile` is the operator's to add by hand, which
+  `connect` then carries across a `--force`. See [`crate::capacity`]'s module
+  docs for what a run does with a profile.
 - **It never clobbers.** §17 calls the pools file hand-editable, and it is
   the file that says which subscriptions exist. An existing file whose
   *settings* differ is printed and the command exits asking for `--force`;
@@ -245,6 +245,12 @@ also put a per-agent alias table here, so adding an adapter meant editing
 `connect`. Renaming the pool is the operator's call, and the file is
 hand-editable precisely so they can make it.
 
+The name this returns is frozen (§17): it never changes across versions.
+`--force` carries `profile`, `monthly_allowance` and `endpoint` over by pool
+name, so a default that changed would stop carrying an operator's keys into
+the pool it now names. `the_pool_keys_and_the_default_pool_names_are_frozen`
+pins each agent's name.
+
 ## `pub fn render_report(report: &ConnectReport) -> String {`
 
 What the CLI prints.
@@ -282,6 +288,21 @@ comment using the same words remains part of the content comparison.
 The round trip is the whole contract: a file this command writes must
 be one `config::load` accepts, or `upstroke capacity` reports on
 something `connect` cannot produce.
+
+## `fn the_pool_keys_and_the_default_pool_names_are_frozen() {`
+
+§17's frozen rule, pinned with every value spelled out rather than derived
+from the code it checks. One pool sets all ten keys the configuration reader
+accepts, each to a value the reader could not have supplied as a default, and
+`config::load` must read every one back without a warning. Each agent's
+default pool name is listed beside the agent. The test sits here because
+`default_pool_name` is private to this module, and the keys go through the
+same public reader as `upstroke capacity` and `upstroke run`.
+
+A failure is a change the rule forbids. The rule lets a new key be added
+beside the old ones, and an added key leaves this test passing, since it
+names only the frozen keys. A renamed or dropped key fails it, and so does a
+changed default name, which would break `--force`'s carrying by pool name.
 
 ## `let tree = scratch("clobber");`
 

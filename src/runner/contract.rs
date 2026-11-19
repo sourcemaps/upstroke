@@ -151,6 +151,17 @@ pub struct RunnerRequest {
     pub timeout: Duration,
     pub agent: Option<AgentId>,
     pub invocation: InvocationId,
+    pub credential_profile: Option<PathBuf>,
+}
+
+impl RunnerRequest {
+    #[must_use]
+    pub fn with_credential_profile(self, profile: PathBuf) -> Self {
+        Self {
+            credential_profile: Some(profile),
+            ..self
+        }
+    }
 }
 
 #[must_use]
@@ -168,6 +179,7 @@ pub fn worker_request(
         timeout,
         agent: Some(agent),
         invocation,
+        credential_profile: None,
     }
 }
 
@@ -186,6 +198,7 @@ pub fn review_request(
         timeout,
         agent: Some(agent),
         invocation,
+        credential_profile: None,
     }
 }
 
@@ -203,6 +216,7 @@ pub fn gate_request(
         timeout,
         agent: None,
         invocation,
+        credential_profile: None,
     }
 }
 
@@ -956,6 +970,7 @@ pub(crate) mod tests {
                     timeout: Duration::from_secs(1),
                     agent,
                     invocation,
+                    credential_profile: None,
                 });
             };
 
@@ -1212,6 +1227,7 @@ pub(crate) mod tests {
                             AttemptRole::Worker,
                             u32::try_from(index).unwrap_or(u32::MAX),
                         ),
+                        credential_profile: None,
                     })
                     .unwrap_or_else(|error| panic!("{}: {error}", fixture.name));
                 let outcome = adapter
@@ -1595,11 +1611,12 @@ pub(crate) mod tests {
             (
                 "src/runner/contract.rs",
                 3,
-                7,
+                8,
                 "worker_request, review_request, gate_request: the three \
                  in-attempt roles, where the binding is R3's rule rather than \
-                 the call site's — three literals, three return types, and the \
-                 declaration of the type itself",
+                 the call site's — three literals, three return types, the \
+                 declaration of the type itself, and the impl that carries \
+                 with_credential_profile, which binds no role",
             ),
         ];
 

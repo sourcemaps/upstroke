@@ -66,11 +66,15 @@ activation base's, older than all three, and unchanged here.
    private root, which must already exist, or [`prelock::resolve_runner`]
    for the default one, which may not); for the default root the run id and
    the incarnation are drawn next ([`DrawnIds`]), as [`prelock::check`]
-   draws them for an explicit root; then the review plan, the probed
+   draws them for an explicit root; then the profile refusals
+   (`preflight::refuse_unusable_profiles`, the ones a resume's pre-flight
+   makes), under the policy just resolved; then the recorded image's
+   environment (container runs only), the review plan, the probed
    agent set, the gate shells and programs (host runs only), the D4 width
    check, the budget ceiling, the slot limits and the configured notifiers.
    The runner comes before the review plan so that a refused container
-   selection has asked the adapter source nothing.
+   selection has asked the adapter source nothing, and so does a refused
+   profile.
 3. [`FreshPrepared::lease`]: the checkout's Git directory, read, then the
    physical worktree lease (`Lock.CreateWorktreeLockFile`,
    `Lock.AcquireWorktree`), the command's first effect. A conductor holding
@@ -94,16 +98,17 @@ activation base's, older than all three, and unchanged here.
 6. [`FreshLeased::run`]: the default root is authorized — canonicalized now
    that it exists, and refused unless it is a real directory, with the ids
    drawn in step 2; the inputs re-captured and compared with the checked
-   capture (a difference refuses); the startup census, under the lease step 3
-   took; the workspace manager; the execution root
+   capture (a difference refuses); the run's runner, built and profiled (its
+   profiles were refused or admitted in step 2); the startup
+   census, under the lease step 3 took; the workspace manager; the execution root
    (`Worktree.CreateExecutionRoot`, which the inventory places before
    `run_started`, and removed again when creation ends with nothing retained);
    the case observation; `run_started(4)`; P0–P8; the handover to the loop;
    the loop; the report.
 
 So the checks before any lock are the configuration's validation, the runner
-policy's read-only inspection and the run id and incarnation for either root,
-plus, for an explicit root, its authorization (an existing real directory,
+policy's read-only inspection, the run id and incarnation and the profile
+refusals for either root, plus, for an explicit root, its authorization (an existing real directory,
 canonical, spelled in UTF-8: [`prelock::check`]) and, for the default root,
 the spelling of the path it will resolve to
 ([`prelock::refuse_unspellable_default_root`]). What follows the lease for
@@ -154,8 +159,10 @@ real-directory check by `RunnerResolved::authorize`.
 6. `resume_harness` publishes the include under [`ResumeVerified::private_root`],
    the root the records proved, with both locks held.
 7. [`ResumeVerified::run`]: the runner from the record, the `RunnerPreflight`
-   over the recorded probe set, `recover::recover_verified` (steps (a1)–(h)),
-   the loop, the report.
+   over the recorded probe set, `recover::recover_verified` (steps (a1)–(h);
+   at step (c) the pre-flight's `certify` makes the profile refusals first,
+   under both locks and after steps 5 and 6, before any probe or recovery
+   event), the loop, the report.
 
 ### The runner
 
@@ -246,6 +253,42 @@ the effectful half (`FreshPrepared::run` then), after
 `.upstroke/git/recorded-objects.gitconfig` and its directories had been
 published under it, beside a refusal that said nothing was created.
 
+**A profile the run cannot honour is refused here, before the lease.** The
+statement after `let authorization = …;` is
+`preflight::refuse_unusable_profiles`, over the configuration's pools, the
+policy the authorization holds (`Authorization::runner_policy`: the checked
+policy for an explicit root, the resolved one for the default root) and
+`RunOptions::profile_environment` (the coordinator's environment in
+production). It is the function a resume's `RunPreflight::certify` calls
+first, so a fresh run refuses the same cases in the same words: a profile on
+the container runner, a profile for an agent other than Claude Code, a
+relative profile, a profile directory that is missing or not a directory,
+and any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set. With no profiled
+pool it returns at once and reads nothing.
+
+A fresh run that refuses here has published, locked and created nothing: it
+made no run exclusion (`.upstroke`), published no include and created no
+default root (the include's publication makes both), took no lease (whose
+first acquisition creates `upstroke-worktree.lock` in the worktree's Git
+directory), and created nothing of the run. The children it started are the
+read-only ones of the checks before it: Git's, for the analysis and a
+configured mount context, and, for a container selection, the runtime's
+inspection. No agent CLI was started and the adapter source was asked
+nothing, because the review plan and the probe set follow the refusal.
+`engine::tests`' three
+`a_fresh_schema_4_run_who…_is_refused_before_anything_is_created` tests hold
+it end to end (`assert_a_profile_refusal_created_nothing`): in a checkout no
+command has run in, the refusal leaves no `.upstroke`, an empty explicit
+private root and no lease file, beside the absence of every record of the
+run.
+
+Until this placement the call was in [`FreshLeased::run`], after the
+profiling, so a refused run had taken the worktree lease, made the run
+exclusion and published the include first. It left `<repo>/.upstroke`, the
+include under the private root and the lease file behind, beside a refusal
+whose closing said nothing was created; the three tests' new assertions
+failed on that source, each on the first of them, the `.upstroke` it found.
+
 ## `pub struct FreshLeased {`
 
 A [`FreshPrepared`] whose command holds the physical worktree lease and has
@@ -330,6 +373,26 @@ makes are owned snapshots (§6): the include's spelling, kept for
 run identity's strings and paths, which the runner owns; the frozen inputs'
 plan, which [`fresh_record`] still reads from the analysis; and the request's
 frozen inputs, which `create_run` consumes while the run keeps its own.
+
+**The runner is profiled before anything uses it.** Right after it is built,
+the runner goes through `profiled::profiled` with the configuration's pools,
+so the creation-time probes, the workers and the reviewers each carry their
+agent's bound credential profile. With no profiled pool that returns the
+runner unchanged (see `engine::topology::profiled`'s notes).
+
+**The profiles were refused before the lease, not here.** Every profile this
+body profiles the runner with has already passed
+`preflight::refuse_unusable_profiles`, which [`prepare_fresh`] calls over the
+same pools directly after the runner policy's resolution, so a profile the
+run cannot honour never reaches the lease, the run exclusion, the include or
+this body ([`prepare_fresh`] says what a refusal there has and has not done).
+Until that move the call was the statement after the profiling here, before
+the startup census and `create_run`: a refused run had spawned no agent CLI
+and created no run directory, private half, execution root or integration
+ref, but the lease file, the run exclusion's `.upstroke` and the include (and,
+for the default root, the root that publication made) were already in place,
+beside a refusal that said nothing was created. Before that call existed, the
+missing-profile and token runs of `engine::tests` were created and completed.
 
 ## `pub fn route_resume(opts: &ResumeOptions) -> Result<Option<RootDerived>, UpstrokeError> {`
 
@@ -493,6 +556,21 @@ for the reasons given there. The probed capabilities default only where
 nothing was probed, which cannot follow a recovery that returned: its step C
 is `RunnerPreflight::certify`, which records what it probed before it returns
 `Ok`, so the default discards no error (§7).
+
+The runner is profiled with the configuration's pools as on the fresh path,
+before `RunPreflight` is built over it, so the resume's probes, workers and
+reviewers carry their agent's bound credential profile too. The same pools
+go to the pre-flight (`RunPreflight::with_pools`), whose `certify` refuses a
+profile the run cannot honour before anything is spawned for it: one on the
+container runner, one for an agent other than Claude Code, a relative one, one
+whose directory is missing, or any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set
+(`engine::topology::preflight`'s notes). Its refusals are
+`preflight::refuse_unusable_profiles`, the function [`prepare_fresh`]
+calls before a fresh run's lease, so the two paths refuse alike. They are not
+made at the same point: a resume refuses first in `certify`, at recovery step
+(c), under its worktree lease and run lock and after `resume_harness` made
+its run exclusion and published its include, but before any probe and before
+any recovery event is appended.
 
 ## `fn fresh_record(fresh: &FreshRecord<'_>) -> Result<RunStarted4, UpstrokeError> {`
 

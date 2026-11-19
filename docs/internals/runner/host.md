@@ -26,7 +26,10 @@ Three things live here that are not in the funnel:
 
 * **Environment composition** (DESIGN.md:258-264). The Upstroke environment is the base; the runner
   supplies the reserved keys; `CommandSpec.env` is an overlay applied last and refused pre-flight if
-  it names a reserved key.
+  it names a reserved key. A request that carries a credential profile
+  (`RunnerRequest::credential_profile`) has that directory supplied as its agent's credential
+  location in place of the base's, for a role that `supplies_credentials`; `child_environment`
+  passes it to `HostEnvironment::compose` with the role and the agent.
 * **The `RunnerPreflight` shell probe** (INV-23). The recorded shell executing `exit 0` **through
   the Runner**, role `probe(shell)`, non-slotted, a registered invocation. Availability cannot be
   established by inspection; only a spawn establishes it.
@@ -122,7 +125,7 @@ composed values. `None` is "the composed environment does not carry that key at 
 
 | Item | Contract |
 |---|---|
-| `shell_probe_request(shell, workspace, invocation)` | The shell probe's request, for any `Runner`. A free function because both runners implement the same probe (INV-23). The argument vector is taken from `ShellKind::command` rather than rebuilt, so the probe runs under exactly the invocation a gate would. The role is `Probe(Shell)` — non-slotted — and `agent` is `None`, because this probe certifies the shell, not a CLI. |
+| `shell_probe_request(shell, workspace, invocation)` | The shell probe's request, for any `Runner`. A free function because both runners implement the same probe (INV-23). The argument vector is taken from `ShellKind::command` rather than rebuilt, so the probe runs under exactly the invocation a gate would. The role is `Probe(Shell)` — non-slotted — and `agent` is `None`, because this probe certifies the shell, not a CLI; it carries no credential profile for the same reason. |
 | `test_support::build_command(spec)` | Test-only translation witness. Production construction stays inside the Process funnel. |
 
 Re-exported from `mod probe`: `SHELL_PROBE_COMMAND`, `SHELL_PROBE_TIMEOUT`, `run_shell_probe`.

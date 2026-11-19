@@ -2027,6 +2027,18 @@ dollar column comes from.
 And §14's pre-flight snapshot is on the record — folding to nothing,
 which `assert_live_equals_replay` elsewhere is what proves.
 
+## `fn a_legacy_run_refuses_a_profiled_pool_at_preflight_rather_than_ignore_it() {`
+
+The legacy coordinator does not carry a pool's `profile`: only runs created on
+the execution topology (schema 4) stamp it onto their agents' requests. So a
+legacy run whose pools name one is refused at pre-flight
+(`preflight::refuse_profiled_pools`), naming the pool, the profile and where
+profiles apply, before the run branch or a run directory exists. Without the
+refusal it would run every attempt under the operator's default credentials
+while the pools file says otherwise. A fresh run is the case driven here; a
+legacy resume reaches the same check, because both go through
+`preflight_with_recorded`.
+
 ## `let (_tree, repo) = temp_engine_repo("poolexhausted");`
 
 §13 source 1 made real: the signal is ground truth, and the estimator
@@ -5523,6 +5535,138 @@ being absent counts as empty, since then there is nothing under it to hold one.
 The refusal check the absent-alternative tests lean on does not certify a private `runs` it cannot
 list: here a file stands where the directory would, so listing it fails with an error other than
 its absence, and the check fails rather than reading it as holding no commit record.
+
+## `fn profiled_pool_file(tree: &ScratchTree, profile: &Path) -> PathBuf {`
+
+[`stub_pool_file`]'s pool, `claude-max` for the topology stub's agent (`claude-code`), naming
+`profile` as its credential profile. The file sits in the scratch tree, outside the checkout, under
+a name of its own, so the run's tree stays clean and a test can switch between this file and
+[`stub_pool_file`]'s. The `toml` crate encodes the path, as a `toml::Value::String`, so a
+backslash, a quotation mark or an apostrophe in it is read back as written.
+
+## `fn the_profiled_pool_fixture_writes_a_profile_toml_reads_back() {`
+
+[`profiled_pool_file`] writes a profile whose path holds an apostrophe, quotation marks and a
+backslash (`/tmp/O'Brien/a "b"/c\d`), and the file it writes, parsed by the `toml` crate, gives
+`pools.claude-max.profile` back as that text.
+
+Measured before the repair, when the fixture wrote the path between apostrophes as a TOML literal
+string: the file did not parse. The `toml` crate stopped at line 4, column 19, the apostrophe in
+`O'Brien` that closed the literal early, expecting a newline or `#`.
+
+## `const FIXTURE_OAUTH_TOKEN: &str = "sk-ant-oat01-engine-fixture-token-value";`
+
+A recognisable token value, so a refusal can be asserted not to carry it.
+
+## `fn an_oauth_token_is_set(key: &str) -> Option<std::ffi::OsString> {`
+
+The coordinator environments a fresh run's profile check reads, through `RunOptions`'s
+test-only `coordinator_environment`, in place of the process environment, which every test in this
+binary shares. This one has `CLAUDE_CODE_OAUTH_TOKEN` and nothing else. `no_oauth_token` below has
+nothing at all.
+
+## `struct CountedStub {`
+
+The topology stub, counting the probes and builds a run asks of it. It is its own adapter source,
+which cannot be shared, so the run steps at width 1. A probe is the first process a fresh run spawns
+for an agent (P4), so `(0, 0)` means the run spawned nothing for its agents and built no worker or
+reviewer.
+
+## `fn assert_a_profile_refusal_created_nothing(`
+
+What every fresh-run profile refusal shares, asserted once:
+- it is a `Refused` in the pre-flight's own shape (`pre-flight: `);
+- it ends in the one closing sentence every profile refusal takes, on this path and a resume's
+  alike: no agent CLI was started and no event was appended, so correct the pools file or the
+  environment and run the same command again;
+- it is not a creation's refusal (`stopped at`), so `create_run` never began;
+- the stub was neither probed nor built;
+- [`assert_a_refused_creation_left_nothing`] holds;
+- the private `runs` directory holds no entry at all, so there is no private half, committed or not;
+- `<repo>/.upstroke` does not exist, so no run exclusion was made;
+- the private root is still a directory and an empty one, so no include was published under it;
+- the worktree Git directory holds no `upstroke-worktree.lock` ([`worktree_lock_path`]), so no
+  lease was taken.
+
+The last three are what make "before the lease" observable: a fresh run refuses a profile in
+`entry`'s `prepare_fresh`, before the lease, with nothing published, locked or created (the Git
+children of its checks ran, read-only). The fixture's checkout has no `.upstroke`, its private root
+is created empty ([`topology_options`]) and no earlier command took its lease, so each absence is
+this run's. A resume refuses the same profile first in `certify`, under its locks and after its
+exclusion and include, before any probe or recovery event, which is why the closing claims no more
+than the two paths share.
+
+Measured before the move, with these three assertions added and the call still in
+`FreshLeased::run` after the lease, the exclusion and the include (and the closing still the old
+one): all three tests that use this helper failed here and no other test failed. Each panicked at
+the first of the three, naming its checkout's `.upstroke` as existing, so the private root and lease
+assertions were not reached on that source; the refusal message each carried was the one its own
+test pins.
+
+Returns the message for the test's own pins.
+
+## `fn host_policy() -> crate::topology::events::RunnerPolicy {`
+
+The host runner's policy, which is the one a fresh run with no `[runner]` section records. The
+pre-flight's refusal names only its boundary (`this host`), so it stands in for the policy a
+resume's pre-flight would be handed for such a run.
+
+## `fn a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created() {`
+
+A fresh schema-4 run whose one pool names a profile directory that does not exist is refused
+through `run_with` before anything of the run is created
+([`assert_a_profile_refusal_created_nothing`]). The refusal names the pool and the path. The run's
+environment has no token, so the directory is the only thing wrong. Then a resume's pre-flight, a
+`RunPreflight` over the same pool certifying the host policy, refuses the same profile, and the two
+messages are equal: one refusal, worded once, on both paths. The resume's refusal comes before its
+token check, so the process environment it reads by default is never consulted.
+
+Measured before the repair, on the source with only this test, its partner and their test-only
+`coordinator_environment` field added: the `expect_err` panicked. The run had been created and had
+completed, `t1` and `t2` committed with four attempts on `claude-max`, all under a profile directory
+that did not exist.
+
+Measured again before the refusal moved into `prepare_fresh`, with the helper's three absence
+assertions added: the test panicked in the helper, "no run exclusion and no public namespace:
+…/repo/.upstroke exists", after a refusal that named the pool and the missing directory. The run
+had been refused after its lease, its exclusion and its include.
+
+## `fn a_fresh_schema_4_run_whose_pool_names_a_relative_profile_is_refused_before_anything_is_created()`
+
+A fresh schema-4 run whose one pool's profile is `.` is refused through `run_with` before anything of
+the run is created ([`assert_a_profile_refusal_created_nothing`]). `.` exists and is a directory
+from the coordinator's working directory, and the run's environment has no token, so its being
+relative is the only thing wrong. The refusal names the pool and the value, and its text does not
+contain "resumable": the refusal comes before `create_run`, so there is no run to resume
+(`PR386-FRESH-REFUSAL-NOT-RESUMABLE`). Then a resume's pre-flight over the same pool refuses in
+the same words, as for the missing profile above.
+
+`PR386-RELATIVE-PROFILE-CWD`: before the repair the pre-flight read a relative profile from the
+coordinator's working directory, while the host runner starts each agent process in its own task
+directory, so `.` passed the check and named a different directory for every process.
+
+Before the refusal moved into `prepare_fresh`, this test failed in the helper's first absence
+assertion as its partner did: `…/repo/.upstroke` existed beside the relative-profile refusal.
+
+## `fn a_fresh_schema_4_run_whose_profile_an_oauth_token_would_override_is_refused_before_anything_is_created()`
+
+A fresh schema-4 run whose pool names an existing profile directory, with
+`CLAUDE_CODE_OAUTH_TOKEN` set in the environment the check reads ([`an_oauth_token_is_set`]), is
+refused before anything of the run is created. The refusal names the variable, the pool and the
+profile, and never the token's value. Two controls follow in the same checkout:
+- the same configuration with no token creates the run and completes it, so the token was the only
+  thing wrong;
+- a pool that names no profile ([`stub_pool_file`]), with the token set again, is never checked,
+  and that run completes too. This is an unprofiled fresh run's behaviour, unchanged.
+
+Measured before the repair, as its partner was: the `expect_err` panicked. The run had been created
+and had completed although the environment it was given held the token: the fresh path read no
+environment and made none of the profile checks.
+
+Before the refusal moved into `prepare_fresh`, this test failed in the helper's first absence
+assertion too, before its controls ran: `…/repo/.upstroke` existed beside the token refusal. The
+controls create runs, so they follow the helper; the helper's absences are those of the refused run
+alone.
 
 ## `const ABSENT_ALTERNATIVE_CLI: &str = "upstroke-absent-codex-alternative-cli";`
 

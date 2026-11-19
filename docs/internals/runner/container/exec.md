@@ -906,13 +906,29 @@ therefore name the same path, target and disposition by construction.
 
 ### Errors
 
-[`UpstrokeError::Refused`] when the overlay names a reserved key, when the
+[`UpstrokeError::Refused`] when the request carries a credential profile,
+when the overlay names a reserved key, when the
 container name cannot be built from the request's identity, when the
 mount plan would hand the container a withheld path, when the settings
 file the command records is not a regular file of the run's settings
 directory, when a recorded mount fails its recheck or its exclusions or
 meets the role's own targets, or when a mount cannot be carried exactly.
 [`UpstrokeError::Io`] when the settings file cannot be read.
+
+## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `if let Some(profile) = &request.credential_profile {`
+
+A request carrying a credential profile (`RunnerRequest::credential_profile`)
+is refused first, whatever its role, before the name, the Git layout or a
+mount is computed — so before `contain` covers, writes an intent, or asks
+the runtime anything. `container-v1` gives an agent its credentials as the
+agent's recorded volume, mounted at `BoundaryLayout::credentials`; a
+pool's profile is a host directory, and handing one over would be a new
+mount this runner has no rule for, not a different value under the same
+key. The refusal names the invocation and the profile, and says that a
+pool's profile is supported on the host runner only. `host-v1` supplies
+the profile ([`host::HostEnvironment::reserved_values`](../../../../src/runner/host/environment.rs)).
+Pinned by
+`tests::the_container_runner_refuses_a_request_carrying_a_credential_profile_before_starting_anything`.
 
 ## `pub fn plan(&self, request: &RunnerRequest) -> Result<Invoc…` › `let intent = ContainerIntent::new(`
 

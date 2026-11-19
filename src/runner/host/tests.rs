@@ -237,7 +237,12 @@ fn environment_composition_fixtures() {
         let environment = HostEnvironment::with_base(synthetic_base(), *case);
         for fixture in &fixtures {
             let composed = environment
-                .compose(&fixture.role, fixture.agent.as_ref(), &fixture.overlay)
+                .compose(
+                    &fixture.role,
+                    fixture.agent.as_ref(),
+                    None,
+                    &fixture.overlay,
+                )
                 .unwrap_or_else(|error| panic!("{} ({case:?}) was refused: {error}", fixture.name));
             for (key, expected) in &fixture.expect {
                 assert_eq!(
@@ -277,7 +282,12 @@ fn every_composed_environment_disables_replacement_objects() {
                 vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
             ] {
                 let composed = environment
-                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .compose(
+                        &role,
+                        Some(&AgentId::new(claude::ADAPTER_ID)),
+                        None,
+                        &overlay,
+                    )
                     .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
                 assert_eq!(
                     value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
@@ -351,7 +361,12 @@ fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository()
                 .reading(legacy.environment().objects().clone());
             for role in ExecutionRole::all() {
                 let composed = environment
-                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .compose(
+                        &role,
+                        Some(&AgentId::new(claude::ADAPTER_ID)),
+                        None,
+                        &overlay,
+                    )
                     .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
                 let mut expected = prefix.map(OsString::from).unwrap_or_default();
                 if !expected.is_empty() {
@@ -393,7 +408,7 @@ fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository()
     base.push((os(NO_REPLACEMENT_OBJECTS.0), os("the-operators-own")));
     let composed = HostEnvironment::with_base(base, KeyCase::current())
         .reading(legacy.environment().objects().clone())
-        .compose(&ExecutionRole::Gate, None, &[])
+        .compose(&ExecutionRole::Gate, None, None, &[])
         .expect("compose");
     assert_eq!(
         value(&composed, NO_REPLACEMENT_OBJECTS.0, KeyCase::current()),
@@ -403,7 +418,7 @@ fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository()
     for role in ExecutionRole::all() {
         let composed = legacy
             .environment()
-            .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
+            .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), None, &[])
             .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
         let parameters = value(&composed, CONFIG_PARAMETERS, legacy.environment().case())
             .map(|value| value.to_string_lossy().into_owned())
@@ -799,7 +814,7 @@ fn a_reserved_key_the_base_does_not_carry_is_not_supplied() {
     let environment =
         HostEnvironment::with_base(vec![(os("PATH"), os("/usr/bin"))], KeyCase::Sensitive);
     let composed = environment
-        .compose(&ExecutionRole::Gate, None, &[])
+        .compose(&ExecutionRole::Gate, None, None, &[])
         .expect("compose");
     assert_eq!(
         value(&composed, "PATH", KeyCase::Sensitive),
@@ -831,7 +846,12 @@ fn a_reserved_key_in_the_overlay_is_a_preflight_error() {
             for role in ExecutionRole::all() {
                 let overlay = vec![(key.to_owned(), "/tmp/hijacked".to_owned())];
                 let error = environment
-                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .compose(
+                        &role,
+                        Some(&AgentId::new(claude::ADAPTER_ID)),
+                        None,
+                        &overlay,
+                    )
                     .expect_err(&format!("{key} was accepted for {role} ({case:?})"));
                 let message = error.to_string();
                 assert!(
@@ -856,7 +876,7 @@ fn a_reserved_key_is_refused_at_every_position_in_the_overlay() {
             .map(|key| ((*key).to_owned(), "harmless".to_owned()))
             .collect();
         environment
-            .compose(&ExecutionRole::Implement, Some(&agent), &harmless)
+            .compose(&ExecutionRole::Implement, Some(&agent), None, &harmless)
             .expect("four harmless pairs compose");
 
         for key in reserved_keys() {
@@ -868,7 +888,7 @@ fn a_reserved_key_is_refused_at_every_position_in_the_overlay() {
                 overlay.insert(position, (key.to_owned(), "/tmp/hijacked".to_owned()));
                 assert_eq!(overlay.len(), 4);
                 let error = environment
-                    .compose(&ExecutionRole::Implement, Some(&agent), &overlay)
+                    .compose(&ExecutionRole::Implement, Some(&agent), None, &overlay)
                     .expect_err(&format!(
                         "{key} at position {position} of {} was accepted ({case:?})",
                         overlay.len()
@@ -899,7 +919,7 @@ fn an_overlay_that_restates_a_reserved_key_with_the_runners_own_value_is_still_r
             let overlay = vec![(key.to_owned(), ours.clone())];
             for role in ExecutionRole::all() {
                 let error = environment
-                    .compose(&role, Some(&agent), &overlay)
+                    .compose(&role, Some(&agent), None, &overlay)
                     .expect_err(&format!(
                         "{role} ({case:?}) accepted an overlay restating {key}={ours}"
                     ));
@@ -933,6 +953,7 @@ fn windows_treats_reserved_keys_case_insensitively_and_unix_does_not() {
         .compose(
             &ExecutionRole::Gate,
             None,
+            None,
             &[("lang".to_owned(), "de".to_owned())],
         )
         .expect("compose");
@@ -947,6 +968,7 @@ fn windows_treats_reserved_keys_case_insensitively_and_unix_does_not() {
     let composed = sensitive
         .compose(
             &ExecutionRole::Gate,
+            None,
             None,
             &[("lang".to_owned(), "de".to_owned())],
         )
@@ -973,11 +995,12 @@ fn probe_and_execution_compose_the_same_environment() {
         .compose(
             &ExecutionRole::Probe(ProbeTarget::Agent(agent.clone())),
             Some(&agent),
+            None,
             &overlay,
         )
         .expect("probe composes");
     let execution = environment
-        .compose(&ExecutionRole::Implement, Some(&agent), &overlay)
+        .compose(&ExecutionRole::Implement, Some(&agent), None, &overlay)
         .expect("execution composes");
     assert_eq!(probe, execution);
 }
@@ -1420,7 +1443,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
     };
 
     for role in &roles {
-        let supplied = environment.reserved_values(role, Some(&agent));
+        let supplied = environment.reserved_values(role, Some(&agent), None);
         for key in from_the_boundary {
             let value = supplied
                 .iter()
@@ -1461,7 +1484,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
         "the two groups must partition the five roles, or a role is unasserted"
     );
     for (passage, group) in certified {
-        let first = environment.reserved_values(&group[0], Some(&agent));
+        let first = environment.reserved_values(&group[0], Some(&agent), None);
         assert!(
             !first.is_empty(),
             "{passage}: the group's reserved values are empty, so equality below \
@@ -1469,7 +1492,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
         );
         for role in group {
             assert_eq!(
-                environment.reserved_values(role, Some(&agent)),
+                environment.reserved_values(role, Some(&agent), None),
                 first,
                 "{passage}: {role} and {} were supplied different reserved values",
                 group[0]
@@ -1521,7 +1544,7 @@ fn credential_locations_are_role_scoped() {
         "three roles execute an agent CLI"
     );
     for (role, gets) in expected {
-        let supplied = environment.reserved_values(&role, Some(&agent));
+        let supplied = environment.reserved_values(&role, Some(&agent), None);
         let has = supplied.iter().any(|(key, _)| *key == "CODEX_HOME");
         assert_eq!(
             has,
@@ -1570,7 +1593,7 @@ fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other()
             ] {
                 let agent = agent.map(AgentId::new);
                 let composed = environment
-                    .compose(&role, agent.as_ref(), &[])
+                    .compose(&role, agent.as_ref(), None, &[])
                     .expect("compose");
                 for (id, key, expected) in all_credentials {
                     let bound = agent.as_ref().is_some_and(|a| a.as_str() == id);
@@ -1643,7 +1666,7 @@ fn base_witness_helper() {
     );
 
     let composed = base
-        .compose(&ExecutionRole::Gate, None, &[])
+        .compose(&ExecutionRole::Gate, None, None, &[])
         .expect("compose");
     for (key, want) in BASE_WITNESS {
         assert_eq!(
@@ -1715,7 +1738,7 @@ fn the_credential_location_is_the_bound_agents_and_no_others_value() {
     ] {
         let agent = AgentId::new(agent);
         assert_eq!(credential_location(&agent), Some(key));
-        let supplied = environment.reserved_values(&ExecutionRole::Implement, Some(&agent));
+        let supplied = environment.reserved_values(&ExecutionRole::Implement, Some(&agent), None);
         assert!(
             supplied.contains(&(key, os(expected))),
             "{agent} did not receive {key}"
@@ -1733,6 +1756,132 @@ fn the_credential_location_is_the_bound_agents_and_no_others_value() {
         }
     }
     assert_eq!(credential_location(&AgentId::new("gemini")), None);
+}
+
+fn handed_config_dirs(environment: &[String]) -> Vec<&str> {
+    environment
+        .iter()
+        .filter_map(|entry| entry.strip_prefix("CLAUDE_CONFIG_DIR="))
+        .collect()
+}
+
+#[test]
+fn a_worker_request_with_a_profile_hands_its_agent_that_directory_as_claude_config_dir() {
+    let workspace = scratch("profiled-worker");
+    let profile = scratch("pool-profile");
+    let runner = HostRunner::new().with_environment(HostEnvironment::with_base(
+        synthetic_base(),
+        KeyCase::current(),
+    ));
+    let request = crate::runner::worker_request(
+        dump_command(&[]),
+        workspace.clone(),
+        fixture_agent(),
+        Duration::from_secs(120),
+        worker_invocation(),
+    )
+    .with_credential_profile(profile.clone());
+
+    let environment = dumped_environment(&runner, &request);
+    let _ = std::fs::remove_dir_all(&workspace);
+    let _ = std::fs::remove_dir_all(&profile);
+
+    assert_eq!(
+        handed_config_dirs(&environment),
+        vec![profile.to_string_lossy()],
+        "the worker's agent was not handed its pool's profile, and only that, as its \
+         credential location: {environment:?}"
+    );
+    assert!(
+        !environment
+            .iter()
+            .any(|entry| entry.contains("/home/upstroke/.claude")),
+        "the coordinator's own credential location reached a worker that carries a profile: \
+         {environment:?}"
+    );
+}
+
+#[test]
+fn the_same_worker_request_with_no_profile_hands_its_agent_the_coordinators_claude_config_dir() {
+    let workspace = scratch("unprofiled-worker");
+    let runner = HostRunner::new().with_environment(HostEnvironment::with_base(
+        synthetic_base(),
+        KeyCase::current(),
+    ));
+    let request = crate::runner::worker_request(
+        dump_command(&[]),
+        workspace.clone(),
+        fixture_agent(),
+        Duration::from_secs(120),
+        worker_invocation(),
+    );
+    assert_eq!(
+        request.credential_profile, None,
+        "production's worker builder carries no profile"
+    );
+
+    let environment = dumped_environment(&runner, &request);
+    let _ = std::fs::remove_dir_all(&workspace);
+
+    assert_eq!(
+        handed_config_dirs(&environment),
+        vec!["/home/upstroke/.claude"],
+        "a worker with no profile was not handed the coordinator's own credential location: \
+         {environment:?}"
+    );
+}
+
+#[test]
+fn a_gate_request_carrying_a_profile_hands_its_child_no_credential_location() {
+    let workspace = scratch("profiled-gate");
+    let profile = scratch("gate-pool-profile");
+    let runner = HostRunner::new().with_environment(HostEnvironment::with_base(
+        synthetic_base(),
+        KeyCase::current(),
+    ));
+    let gate = crate::runner::gate_request(
+        dump_command(&[]),
+        workspace.clone(),
+        Duration::from_secs(120),
+        gate_invocation(),
+    );
+    let mut rows = 0_usize;
+    for (shape, request) in [
+        ("the gate production builds", gate.clone()),
+        (
+            "a gate that also names an agent",
+            RunnerRequest {
+                agent: Some(fixture_agent()),
+                ..gate
+            },
+        ),
+    ] {
+        let request = request.with_credential_profile(profile.clone());
+        let environment = dumped_environment(&runner, &request);
+        assert!(
+            environment.iter().any(|entry| entry == "LANG=C.UTF-8"),
+            "{shape}: the gate child did not receive the base, so the absences below are \
+             the absences of an empty environment: {environment:?}"
+        );
+        for (_, key) in CREDENTIAL_LOCATIONS {
+            assert!(
+                !environment
+                    .iter()
+                    .any(|entry| entry.starts_with(&format!("{key}="))),
+                "{shape}: a gate child was handed `{key}`: {environment:?}"
+            );
+        }
+        assert!(
+            !environment
+                .iter()
+                .any(|entry| entry.contains(&*profile.to_string_lossy())),
+            "{shape}: the pool's profile reached a gate child: {environment:?}"
+        );
+        rows += 1;
+    }
+    let _ = std::fs::remove_dir_all(&workspace);
+    let _ = std::fs::remove_dir_all(&profile);
+    assert_eq!(rows, 2, "both gate shapes");
 }
 
 struct ParityFixture {
@@ -1845,6 +1994,7 @@ fn supervision_parity_tests() {
             timeout: fixture.timeout,
             agent: None,
             invocation: gate_invocation(),
+            credential_profile: None,
         };
         let started = std::time::Instant::now();
         let actual = runner
@@ -2203,6 +2353,7 @@ fn the_runner_bounds_output_at_the_same_allowance_the_direct_funnel_does() {
         timeout: Duration::from_secs(120),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let started = std::time::Instant::now();
     let routed = HostRunner::new()
@@ -2263,6 +2414,7 @@ fn the_runner_executes_in_the_requested_workspace() {
         timeout: Duration::from_secs(30),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let output = HostRunner::new().run_blocking(&request).expect("run");
     assert_eq!(output.code, Some(0), "{output:?}");
@@ -2297,6 +2449,7 @@ fn the_overlay_reaches_the_child_and_a_reserved_key_never_gets_that_far() {
         timeout: Duration::from_secs(30),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let output = HostRunner::new().run_blocking(&request).expect("run");
     assert!(
@@ -2357,6 +2510,7 @@ fn a_gate_child_is_told_where_no_agents_credentials_live() {
         timeout: Duration::from_secs(30),
         agent: Some(AgentId::new(codex::ADAPTER_ID)),
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let gate = runner.run_blocking(&request).expect("gate runs");
     assert_eq!(gate.code, Some(0), "{gate:?}");
@@ -2791,6 +2945,7 @@ fn observed_points(runner_hooks: HarnessHooks) -> BTreeSet<SubEffectPoint> {
         timeout: Duration::from_secs(30),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let output = runner
         .run_blocking(&request)
@@ -2840,6 +2995,7 @@ fn point_order() -> Vec<SubEffectPoint> {
         timeout: Duration::from_secs(30),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let output = runner
         .run_blocking(&request)
@@ -3828,6 +3984,7 @@ fn the_grids_agent_cli_child_runs_no_test_and_exits_zero() {
             timeout: SHELL_PROBE_TIMEOUT,
             invocation: gate_invocation(),
             agent: None,
+            credential_profile: None,
         })
         .expect("the grid's non-shell child runs");
     let _ = std::fs::remove_dir_all(&workspace);
@@ -4121,6 +4278,7 @@ fn the_pre_exec_containment_step_runs_in_the_forked_child() {
         timeout: Duration::from_secs(30),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let output = runner
         .run_blocking(&request)
@@ -4558,6 +4716,7 @@ fn windows_ambient_coordinator_helper() {
         timeout: Duration::from_secs(60),
         agent: None,
         invocation: gate_invocation(),
+        credential_profile: None,
     };
     let _ = runner.run_blocking(&request);
     unreachable!("the coordinator helper was supposed to die at CreatedSuspended");
@@ -5431,7 +5590,7 @@ fn a_bare_name_that_only_pathext_resolves_runs_through_the_host_runner() {
 
     let environment = environment_on_path(&[&bin], Some(REAL_PATHEXT));
     let composed_env = environment
-        .compose(&ExecutionRole::Gate, None, &[])
+        .compose(&ExecutionRole::Gate, None, None, &[])
         .expect("compose the child environment");
     assert!(
         composed_env.iter().any(|(key, value)| key == "PATHEXT"
@@ -5757,7 +5916,7 @@ fn a_resolved_cmd_keeps_the_raw_tail_rule() {
 
     let environment = HostEnvironment::from_process();
     let composed = environment
-        .compose(&ExecutionRole::Gate, None, &[])
+        .compose(&ExecutionRole::Gate, None, None, &[])
         .expect("compose this process's environment");
     let resolved = resolve_program(
         &spec.program,
@@ -5977,7 +6136,12 @@ fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {
         .iter()
         .map(|(_, request)| {
             environment
-                .compose(&request.role, request.agent.as_ref(), &request.command.env)
+                .compose(
+                    &request.role,
+                    request.agent.as_ref(),
+                    request.credential_profile.as_deref(),
+                    &request.command.env,
+                )
                 .expect("compose each role's environment")
         })
         .collect();
@@ -6548,7 +6712,7 @@ fn an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name() {
             KeyCase::current(),
         );
         let composed_env = environment
-            .compose(&ExecutionRole::Gate, None, &[])
+            .compose(&ExecutionRole::Gate, None, None, &[])
             .expect("compose the child environment");
 
         let mut direct = Command::new(&name);
@@ -7429,6 +7593,7 @@ fn role_request(
             timeout,
             agent: None,
             invocation: shell_probe_invocation(),
+            credential_profile: None,
         },
         ExecutionRole::Probe(ProbeTarget::Agent(agent)) => RunnerRequest {
             command,
@@ -7438,6 +7603,7 @@ fn role_request(
             agent: Some(agent.clone()),
             invocation: InvocationId::probe(ProbeTarget::Agent(agent.clone()), 1)
                 .expect("an agent probe's identity"),
+            credential_profile: None,
         },
         ExecutionRole::Implement => crate::runner::worker_request(
             command,

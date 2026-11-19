@@ -3744,6 +3744,7 @@ fn probe_request_for(id: InvocationId, agent: Option<&str>) -> crate::runner::Ru
         timeout: std::time::Duration::from_secs(1),
         agent: agent.map(crate::runner::AgentId::new),
         invocation: id,
+        credential_profile: None,
     }
 }
 

@@ -1048,6 +1048,7 @@ fn hostile_bindings(workspace: &Path) -> Vec<RunnerRequest> {
             timeout: Duration::from_secs(10),
             agent: Some(claude.clone()),
             invocation: gate_id(7),
+            credential_profile: None,
         },
         RunnerRequest {
             command: ShellKind::Sh.spec("exit 0"),
@@ -1056,6 +1057,7 @@ fn hostile_bindings(workspace: &Path) -> Vec<RunnerRequest> {
             timeout: Duration::from_secs(10),
             agent: Some(claude),
             invocation: shell_probe_id(),
+            credential_profile: None,
         },
     ]
 }
@@ -1500,6 +1502,71 @@ fn an_own_settings_file_that_is_not_a_regular_file_of_the_runs_settings_director
         runner.plan(&control).is_ok(),
         "the control: the regular file the invocation materialized plans"
     );
+}
+
+#[test]
+fn the_container_runner_refuses_a_request_carrying_a_credential_profile_before_starting_anything() {
+    let fixture = Fixture::new("credential-profile", true);
+    let runner = fixture.runner();
+    let profile = fixture.root.join("pool-profile");
+    let ten = Duration::from_secs(10);
+    for (tag, request) in [
+        (
+            "a worker",
+            worker_request(
+                ShellKind::Sh.spec("exit 0"),
+                fixture.task_a.clone(),
+                AgentId::new("claude-code"),
+                ten,
+                worker_id(0),
+            ),
+        ),
+        (
+            "a gate",
+            gate_request(
+                ShellKind::Sh.spec("exit 0"),
+                fixture.task_a.clone(),
+                ten,
+                gate_id(0),
+            ),
+        ),
+    ] {
+        assert!(
+            runner.plan(&request).is_ok(),
+            "{tag}: the control: the same request with no profile plans"
+        );
+        let ops = fixture.trace.ops();
+        let profiled = request.with_credential_profile(profile.clone());
+        let refused = runner
+            .run_blocking(&profiled)
+            .expect_err("a request carrying a credential profile is refused");
+        assert_eq!(
+            refused.fate,
+            crate::error::ProcessFate::NeverStarted,
+            "{tag}: {refused}"
+        );
+        let message = refused.source.to_string();
+        assert!(
+            message.contains("a pool's profile is supported on the host runner only")
+                && message.contains(&*profile.to_string_lossy()),
+            "{tag}: the refusal does not say why, or for which profile: {message}"
+        );
+        assert_eq!(
+            fixture.trace.ops(),
+            ops,
+            "{tag}: the refused request asked the container runtime something"
+        );
+        assert!(
+            fixture.runtime.fake().container_names().is_empty(),
+            "{tag}: a container exists"
+        );
+        assert!(
+            list_intents(&fixture.private_root)
+                .expect("scan")
+                .is_empty(),
+            "{tag}: an intent was written"
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2962,7 +3029,7 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
             layout: &layout,
         };
         let mut host_composed: BTreeMap<String, String> = host_env
-            .compose(&role, agent.as_ref(), &overlay)
+            .compose(&role, agent.as_ref(), None, &overlay)
             .expect("the host composes")
             .into_iter()
             .map(|(key, value)| {
@@ -3041,7 +3108,7 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
         for reserved in host::reserved_keys() {
             let bad = vec![(reserved.to_owned(), "x".to_owned())];
             host_env
-                .compose(&role, agent.as_ref(), &bad)
+                .compose(&role, agent.as_ref(), None, &bad)
                 .expect_err("the host refuses");
             container_env
                 .compose(&scope, &bad)

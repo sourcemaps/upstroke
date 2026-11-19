@@ -104,6 +104,7 @@ pub fn probe_request(
         timeout,
         agent: Some(agent.clone()),
         invocation: InvocationId::probe(ProbeTarget::Agent(agent), ordinal)?,
+        credential_profile: None,
     })
 }
 

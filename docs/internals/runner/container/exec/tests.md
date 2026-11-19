@@ -315,6 +315,29 @@ materialized, which plans. The link case is built on Unix only and chained in
 as an `Option`, so a Windows build compiles the list without a mutable binding
 it never mutates (V225 found the `unused_mut` the earlier spelling left there).
 
+## `fn the_container_runner_refuses_a_request_carrying_a_credential_profile_before_starting_anything() {`
+
+`container-v1` refuses a request that carries a credential profile
+(`RunnerRequest::with_credential_profile`), before starting anything, and
+says that a pool's profile is supported on the host runner only.
+
+Two requests, a worker and a gate, because the refusal is the request's
+and not the role's: a gate carrying a profile would hand nothing over on
+the host, and it is still a request this runner cannot honour as asked.
+Each is first planned **without** the profile, as the control: a refusal
+that came from the fixture, the worktree or the mount plan would refuse
+that too.
+
+"Before starting anything" is asserted at every place a launch leaves a
+trace, not inferred from the error alone: the fate is `NeverStarted`;
+the runtime was asked nothing (its recorded operations are what they were
+before the run — the runner's construction and the control's plan may
+have asked it something, so the comparison is with that, not with
+empty); no container exists in the fake; and no intent was written in the
+private root, which is the first thing a launch writes. The message names
+the profile as well as the reason, so an operator can tell which
+directory the run asked for.
+
 ## `#[cfg(target_os = "linux")]` › `fn effective_ids() -> ContainerUser {`
 
 The oracle for the coordinator's user on Linux, read another way than

@@ -146,6 +146,13 @@ threads. Both are production paths since PR12, through `entry`: a shareable
 adapter source runs concurrently at any width, and an unshareable one at
 width 1 steps.
 
+## `mod profiled;`
+
+The runner wrapper that stamps each agent request with its agent's bound
+credential profile (`capacity::pool_for`'s pool, its `profile`). Private:
+only `entry` installs it, over the run's runner on both the fresh and the
+resume path; with no profiled pool it installs nothing.
+
 ## `pub mod entry;`
 
 PR12's production entry: the fresh and resume compositions `upstroke run` and

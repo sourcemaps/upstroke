@@ -2273,6 +2273,20 @@ assertion able to fail: the fold strips it to the literal prefix
 `src/alpha`, and a driver taking hints literally would record a prefix
 that overlaps nothing. Measured — that shipped, for one commit.
 
+## `fn a_run_assembled_with_a_profiled_pool_hands_its_worker_that_profile() {`
+
+**A run assembled with a profiled pool hands its worker that profile.** The
+driver test above, with one pool for the fixture's agent naming a profile:
+the pool goes into the frozen plans, and the recording runner is wrapped with
+`profiled::profiled` over the same pools, the way `entry` wraps the run's
+runner. One step runs the worker; every worker request reaches the recording
+runner carrying the profile, and any request with no agent carries none.
+
+It lives here for the reason the driver test does: this file's fixture is the
+one that produces a real resumed run. The wrapper's own cases (unprofiled
+pool, no agent, first pool wins, no wrapper at all) are
+`engine::topology::profiled`'s tests.
+
 ## `fn the_driver_carries_an_accepted_attempt_through_the_candidate_sequence() {`
 
 **The driver carries an accepted attempt through the whole candidate

@@ -24,8 +24,10 @@ the fold that collects those observations from a run's event log.
 the estimator so `upstroke capacity` and the dry-run preview can show what each
 strategy *would* do, and v0.2 wires it into the binder once the estimates
 have been watched for a while. So `pool_for` fills `WorkerProfile.pool` for
-**attribution only** — the binder still picks models from the catalog and
-pins, exactly as it did before this module existed.
+attribution, and it also selects the profile an agent runs under (see
+[Credential profiles](#credential-profiles) below). Nothing routes on it: the
+binder still picks models from the catalog and pins, exactly as it did before
+this module existed.
 
 The estimator is a pure function over plain values ([`estimate`]), so every
 rule in §13 is exercisable with no CLI installed and no file on disk. Only
@@ -47,21 +49,40 @@ Three properties hold by construction and are pinned by tests:
 
 ### Credential profiles
 
-The v0.2 sketch in DESIGN.md §13 calls for one vendor backing several
-pools (two Claude Max accounts, say), selected per attempt "through the
-provider's own profile mechanism, an environment variable on the subprocess
-rather than a token the engine ever handles". That mechanism is real on both
-vendors and is a config-*directory* variable: `COPILOT_HOME` (documented) and
-`CLAUDE_CONFIG_DIR` (works, undocumented as of Aug 2026). The shape that
-fits is upstroke-defined profile directories — `~/.upstroke/profiles/<name>` —
-handed to the CLI through that variable, with login staying a user-driven
-interactive step the engine never automates. "Does this CLI honour profile
-selection" then becomes a `probe()` axis like any other, verified at
-pre-flight instead of discovered mid-spend. v0.1 stops at [`Pool::profile`]:
-the field is parsed, displayed, and attributed through, and **nothing sets
-any environment variable**, because everything multi-profile actually buys
-(per-profile attribution, asymmetric reserve, rebind-instead-of-wait) is
-capacity-*driven* behaviour, which is v0.2 by sequencing.
+DESIGN.md §13 calls for one vendor backing several pools (two Claude Max
+accounts, say), told apart "through the provider's own profile mechanism, an
+environment variable on the subprocess rather than a token the engine ever
+handles". That mechanism is real on both vendors and is a config-*directory*
+variable: `COPILOT_HOME` (documented) and `CLAUDE_CONFIG_DIR` (works,
+undocumented as of Aug 2026). Login stays a user-driven interactive step the
+engine never automates.
+
+[`Pool::profile`] is that directory, and it is acted on for Claude Code on the
+host runner (§17). On a schema-4 run, each agent's bound pool, which
+[`pool_for`] says is the first pool in the file naming it, supplies the
+`profile`. The host runner then sets it as `CLAUDE_CONFIG_DIR` on that agent's
+work, review and probe processes (`src/engine/topology/profiled.rs` stamps the
+request, and `src/runner/host/environment.rs` composes it). The value is the
+configured string used as a path, with no `~/` expansion. A profile the run
+cannot honour is refused before anything runs for it, by one function
+(`src/engine/topology/preflight.rs`) that both paths call: a fresh run before
+its creation begins, so nothing of the run exists, and a resume at its
+pre-flight. What pre-flight checks of a profile is that it is an absolute
+path and an existing directory (besides the host runner, Claude Code and no
+`CLAUDE_CODE_OAUTH_TOKEN`). The agent's capability probe then runs under the
+profile. Nothing checks sign-in, so a profile that is not signed in passes
+pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+The legacy coordinator refuses any profiled pool.
+Nothing routes on a profile: the binder still binds each agent to one pool,
+because everything multi-profile actually buys (per-profile attribution,
+asymmetric reserve, rebind-instead-of-wait) is capacity-*driven* behaviour,
+which is v0.2 by sequencing.
+
+A resume reads today's configuration. A profile changed between a run's
+start and its resume is therefore used from the resume on, both in the
+resume's pre-flight and by every later attempt, because the run's record does
+not carry the profile it started under. Whether to record it is an owner
+question.
 
 ## `pub enum PoolKind {`
 
@@ -153,8 +174,11 @@ Rolling window, e.g. `"5h"`.
 ## `pub struct Pool` › `pub profile: Option<String>,`
 
 §13's credential-profile seam: an operator-writable config-directory
-path identifying *which account* this pool draws from. Parsed, carried,
-and displayed; **nothing acts on it in v0.1** (see the module docs).
+path identifying *which account* this pool draws from. Parsed, carried
+and displayed, and acted on for Claude Code on the host runner of a
+schema-4 run, which sets it as `CLAUDE_CONFIG_DIR` on the work, review
+and probe processes of the agent whose bound pool this is (see the
+module docs).
 
 ## `pub struct Pool` › `pub usable: bool,`
 
@@ -175,8 +199,11 @@ Which pool an attempt on `agent` drains: the first matching entry, table
 order as preference — the same convention `different_family_at` uses, so
 moving a pool up the file promotes it.
 
-**Attribution only.** Nothing routes on the answer in v0.1; it fills
-`WorkerProfile.pool` so the ledger can say which subscription paid.
+**Attribution and profile, never routing.** Nothing routes on the answer
+in v0.1. It fills `WorkerProfile.pool` so the ledger can say which
+subscription paid, and it also selects the profile an agent runs under:
+the answer for an agent is its bound pool, and only that pool's `profile`
+is set on the agent's processes (`src/engine/topology/profiled.rs`).
 
 ## `pub struct Spend {`
 

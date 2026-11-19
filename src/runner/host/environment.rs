@@ -387,6 +387,7 @@ impl HostEnvironment {
         &self,
         role: &ExecutionRole,
         agent: Option<&AgentId>,
+        profile: Option<&Path>,
     ) -> Vec<(&'static str, OsString)> {
         let mut supplied = Vec::new();
         for key in RESERVED_ALWAYS {
@@ -396,7 +397,10 @@ impl HostEnvironment {
         }
         if supplies_credentials(role) {
             if let Some(key) = agent.and_then(credential_location) {
-                if let Some(value) = self.lookup(key) {
+                let value = profile
+                    .map(|profile| profile.as_os_str().to_os_string())
+                    .or_else(|| self.lookup(key));
+                if let Some(value) = value {
                     supplied.push((key, value));
                 }
             }
@@ -408,6 +412,7 @@ impl HostEnvironment {
         &self,
         role: &ExecutionRole,
         agent: Option<&AgentId>,
+        profile: Option<&Path>,
         overlay: &[(String, String)],
     ) -> Result<Vec<(OsString, OsString)>, UpstrokeError> {
         self.preflight(overlay)?;
@@ -415,7 +420,7 @@ impl HostEnvironment {
         for reserved in reserved_keys() {
             composed.retain(|(name, _)| !self.case.same_key(name, OsStr::new(reserved)));
         }
-        for (key, value) in self.reserved_values(role, agent) {
+        for (key, value) in self.reserved_values(role, agent, profile) {
             upsert(&mut composed, self.case, OsString::from(key), value);
         }
         for (key, value) in overlay {

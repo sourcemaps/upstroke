@@ -82,6 +82,44 @@ What each agent's CLI reported about itself.
 
 The agent names, which is what the durable record carries.
 
+## `const CLAUDE_CODE_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";`
+
+The variable through which Claude Code takes a long-lived OAuth token. When
+it is set, Claude Code authenticates with it instead of the credentials in
+its configuration directory, which is what a profile is. The host runner
+passes the coordinator's environment to the child (it reserves `PATH`,
+`HOME`, `USERPROFILE` and the credential-location keys, not this one), so a
+token in the coordinator's environment reaches every profiled process.
+
+## `struct ProfiledPool {`
+
+A pool that names a `profile`: its name and agent, which the refusals cite,
+and the profile as a path. As in `profiled.rs`, the configured string is
+used as written, with no `~/` expansion, and a relative one is refused rather
+than resolved ([`refuse_unusable_profiles`], check 3).
+
+## `impl ProfiledPool` › `fn of(pool: &Pool) -> Option<Self> {`
+
+`None` for a pool that names no profile. Every pool that names one counts,
+not only an agent's bound pool (`capacity::pool_for`): a profile in the
+pools file that this run could not honour is refused wherever it is
+written, rather than passed over because a pool earlier in the file binds
+the agent.
+
+## `pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {`
+
+The coordinator's own environment, read when the profile checks run: the one
+the host runner composes each child's environment from
+(`HostEnvironment::from_process`). A function rather than a snapshot so that
+a run with no profiled pool reads nothing, and so that tests can stand in for
+it without changing the process environment, which every test in the binary
+shares.
+
+Two readers hand it to [`refuse_unusable_profiles`]: a `RunPreflight`, as its
+default `environment`, on a resume; and `RunOptions::profile_environment` on a
+fresh run. That is why it is visible to `engine` and not only here: the fresh
+path's reader is `RunOptions`', in `engine::options`.
+
 ## `pub struct RunPreflight<'a> {`
 
 The run's `RunnerPreflight`: a shell probe and one probe per recorded agent.
@@ -89,6 +127,17 @@ The run's `RunnerPreflight`: a shell probe and one probe per recorded agent.
 Holds no `&mut` anything: the [`RunnerPreflight`] trait's `certify` takes
 `&self` because `rebuild_from_record` holds the runner and the record while
 it calls it.
+
+## `pub struct RunPreflight<'a>` › `pools: Vec<Pool>,`
+
+The run's pools, in file order. Empty unless the caller supplied pools with
+[`RunPreflight::with_pools`]. [`refuse_unusable_profiles`] picks out the ones
+that name a profile, and when there are none, every profile check is skipped.
+
+## `pub struct RunPreflight<'a>` › `environment: fn(&str) -> Option<OsString>,`
+
+Where the token check looks: [`coordinator_environment`] in production,
+and a fixture in tests (`reading_environment`).
 
 ## `pub struct RunPreflight<'a>` › `ledger: Mutex<InvocationLedger>,`
 
@@ -115,6 +164,30 @@ recorded agents are `agents`.
 [`crate::agent::probe_request`] — "a probe asks a CLI about itself and
 has no workspace of its own" — and that decision is the adapter
 module's, not this one's.
+
+A pre-flight built with `new` alone carries no pools, so it makes no
+profile check and is the pre-flight it was before profiles existed.
+
+## `impl<'a> RunPreflight<'a>` › `pub fn with_pools(mut self, pools: &[Pool]) -> Self {`
+
+The run's pools, so `certify` can refuse a profile the run cannot honour.
+`entry` passes today's configured pools on the resume path, the same slice
+it hands `profiled`, so the pools the probes are stamped from are the pools
+checked here. A fresh run builds no `RunPreflight`. Its `prepare_fresh`
+calls [`refuse_unusable_profiles`] itself, before the lease, over the same
+slice `FreshLeased::run` later hands `profiled`. A builder rather than a fifth argument to `new`: a caller with
+no pools, which includes every test fixture that predates profiles, keeps
+the unprofiled pre-flight without having to say so.
+
+## `impl<'a> RunPreflight<'a>` › `fn reading_environment(mut self, environment: fn(&str) -> Option<OsString>) -> Self {`
+
+For the tests: the token check reads `environment` instead of the process
+environment. A test that changed the real variable would race every other
+test in the binary that reads it. It is private and no production path calls
+it. It is not `#[cfg(test)]`, because a `#[cfg(test)]` item inside the impl
+would end the file's production region there
+(`effects::tests::every_production_region_that_stops_early_stops_at_a_module`)
+and hide the rest of the file from every census that reads that region.
 
 ## `impl<'a> RunPreflight<'a>` › `pub fn probed(&self) -> Option<Probed> {`
 
@@ -165,17 +238,36 @@ pre-flight". A shell that cannot run a command is the cheaper refusal
 and the one that explains every agent failure that would follow it, so
 it goes first and the agent probes are never reached when it fails.
 
-`policy` is not consulted here and that is deliberate: the runner this
-executes through was *built* from the record — `rebuild_from_record`
-verified the runtime, the recorded image id and the volumes before
-calling this — so re-reading the record to decide anything would be
-this module deciding a question the rebuild already answered. It is
-named in the refusal, which is what a caller needs it for.
+Before either probe come the profile checks
+([`refuse_unusable_profiles`], over the pools `with_pools` gave it and its
+`environment`), which spawn nothing. A profile the run cannot honour is
+refused before the shell probe registers or runs anything, so that refusal
+leaves an empty ledger behind it. With no profiled pool they are skipped. On
+a resume this is recovery step (c): under the worktree lease and the run
+lock, after the run exclusion and the include `resume_harness` made, and
+before any probe or recovery event. A fresh run makes the same call in
+`entry`'s `prepare_fresh`, before its lease, so a profile is refused in the
+same words on both paths.
+
+`policy` decides one thing here: whether a profiled pool can run at all,
+which turns on its `kind`. Nothing else in it is consulted, and that is
+deliberate: the runner this executes through was *built* from the record
+— `rebuild_from_record` verified the runtime, the recorded image id and
+the volumes before calling this — so re-reading the record to decide
+anything else would be this module deciding a question the rebuild
+already answered. It is named in every refusal, which is what a caller
+needs it for.
+
+The agent probes run through the runner `entry` built, which `profiled`
+wraps, so a profiled pool's Claude Code CLI is probed under that pool's
+profile (`tests::the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile`).
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming the shell or the agent whose CLI did
-not answer. Every invocation registered before the refusal is settled —
+[`UpstrokeError::Refused`] naming the pool whose profile cannot be
+honoured, the shell, or the agent whose CLI did not answer. A profile
+refusal precedes every registration. Every invocation registered before
+any other refusal is settled —
 completed, or cancelled with its slot pair released — so the ledger
 balances on both paths, with one exception: a probe whose process the
 Runner could not establish as ended (`ProcessFate::Unresolved`) is not
@@ -192,9 +284,123 @@ rather than an argument here.
 
 (2) One probe per recorded agent, sequentially, in recorded order.
 
+## `pub(super) fn refuse_unusable_profiles(`
+
+What a profiled run must hold before anything is spawned for it. This is the
+one place the profile refusals are made, and both paths call it:
+
+- **A resume:** `RunPreflight::certify`, first, at recovery step (c): under
+  the resume's worktree lease and run lock, after its run exclusion and its
+  include, and before any probe or recovery event. It passes the pools
+  `with_pools` gave it and its `environment`.
+- **A fresh run:** `entry`'s `prepare_fresh`, directly after the runner
+  policy is resolved (and, for an explicit private root, authorized), before
+  the worktree lease. A refusal there has published, locked and created
+  nothing: no run exclusion, no include, no lease, nothing of the run;
+  the children it started are the read-only ones of the checks before it
+  (Git's, and a container selection's runtime inspection), and no agent CLI.
+  It passes today's configured pools, the policy the authorization holds, and
+  `RunOptions::profile_environment`, which is [`coordinator_environment`] in
+  production.
+
+So both paths refuse the same profiles in the same words. Only the pools that
+name a profile count (`ProfiledPool::of`). With none, it returns at once,
+reads no environment and leaves the run as it was before profiles existed.
+
+Each check refuses through [`profile_refused`], naming the pool:
+
+1. **The host runner.** A profile is a host directory handed to the child as
+   `CLAUDE_CONFIG_DIR`. The container runner has no way to supply one: it
+   refuses a request carrying a profile before starting it (`runner/
+   container/exec.md`). Refusing here, from the policy's `kind`, keeps that
+   from surfacing as a failed agent probe.
+2. **Claude Code.** This stage supports Claude Code's profile only
+   (`crate::agent::claude::ADAPTER_ID`). The host runner would place a
+   profile under any agent's credential-location key (`CODEX_HOME`,
+   `COPILOT_HOME`), so the limit is held here rather than by the runner.
+   For any other agent the refusal names the pool and that agent.
+3. **An absolute path.** A relative profile is refused, naming the pool and
+   the value as written; it is never resolved or joined to a base. Each task
+   runs in its own directory (the host runner starts every child in its
+   request's `workspace`), and `profiled` stamps the string as written, so a
+   relative path would name a different directory for each process, and a
+   different one again from the coordinator's working directory, where check 4
+   would read it. Pools are user-level, so no base directory is natural to
+   resolve one against. `~` is not expanded (`profiled.md`), so
+   `~/profiles/personal` is relative too, and the refusal says so.
+4. **An existing directory.** `fs::metadata` follows a symlink, so a link
+   to a directory passes. A missing path, or a dangling link, is refused as
+   not existing. A path that exists and is not a directory is refused as
+   such. Any other error, permission denied included, is refused with the
+   error.
+5. **No `CLAUDE_CODE_OAUTH_TOKEN`.** A token overrides the profile's
+   credentials, so the run would not use the profile it names. A variable
+   that is present counts as set, even with an empty value, and the refusal
+   names the variable, never its value.
+
+The checks are made in that order. The run-wide ones (1 and 5) name the
+first profiled pool. 2, 3 and 4 are made pool by pool, in file order.
+
+Every one of these refusals ends in [`profile_refused`]'s one closing
+sentence, which is the same on a fresh run and a resume and true of both
+(`engine::tests::a_fresh_schema_4_run_whose_pool_names_a_missing_profile_is_refused_before_anything_is_created`
+and its relative-profile partner hold the two paths' texts equal, and with the
+token test they hold that the fresh refusal left no `.upstroke`, an empty
+private root and no worktree lease file).
+
+Until the fresh call moved into `prepare_fresh`, it was `FreshLeased::run`'s,
+right after the runner was profiled. That was before the startup census and
+`create_run`, but after the worktree lease, the run exclusion and the
+include's publication, so a refused fresh run left the lease file,
+`<repo>/.upstroke` and the include behind, and the closing it ended in,
+"Nothing was created, spawned or appended", was false of it; on a resume the
+same sentence followed the resume's own exclusion and include. The closing
+now says only what holds on both paths.
+
+Until the relative check existed, `.` passed check 4 from the coordinator's
+working directory and was then handed to every agent process, each of which
+started somewhere else (`PR386-RELATIVE-PROFILE-CWD`;
+`tests::a_relative_profile_refuses_naming_the_pool_and_the_value` began as the
+witness of that). And until the profile refusals had their own closing, they
+went through `refused`, whose last words are "so the run is resumable". On a
+fresh run that was false: the refusal comes before `create_run`, so there is no
+run to resume (`PR386-FRESH-REFUSAL-NOT-RESUMABLE`).
+
+Until this function was shared, these were a method of `RunPreflight` and only
+a resume made them. A fresh run whose pool named a missing directory, or whose
+coordinator had `CLAUDE_CODE_OAUTH_TOKEN` set, was created and ran its
+attempts to completion. Its Claude Code processes were handed a profile
+directory that did not exist, or ran while the token overrode the profile's
+credentials. `engine::tests`' missing-profile and token fresh-run tests
+measured exactly that before the repair: each run completed.
+
+## `fn profile_refused(what: &str) -> UpstrokeError {`
+
+The refusal shape every profile refusal takes: `pre-flight: `, what is wrong,
+and one closing sentence of its own — "No agent CLI was started and no event
+was appended; correct the pools file or the environment and run the same
+command again."
+
+Not [`refused`], whose closing describes a probe: what was probed and inside
+which boundary, and that the run is resumable. A profile refusal probes nothing,
+and on a fresh run it precedes the lease and `create_run`, so there is no run to
+resume. The sentence is true on both paths, and says nothing that holds on one
+alone:
+- a fresh run refuses in `entry`'s `prepare_fresh`, before the lease, with
+  nothing published, locked or created; Git children ran, read-only, and no
+  agent CLI;
+- a resume refuses first in `certify`, under its locks and after its run
+  exclusion and include, before any probe or recovery event.
+
+So "nothing was created", which the closing said until the fresh call moved,
+is not claimed: a resume has made its exclusion and include by then. It takes
+no `policy`, so the wording cannot differ between the policy a fresh run was
+authorized under and the one a resume rebuilt from the record.
+
 ## `fn refused(policy: &RunnerPolicy, what: &str) -> UpstrokeError {`
 
-The refusal shape every pre-flight failure takes.
+The refusal shape every failure of the shell and CLI probes takes. The
+profile refusals, which precede the probes, take [`profile_refused`]'s.
 
 Names the image the probe ran inside, because "a recorded shell or agent CLI
 that fails **inside the recorded image**" is a different fact from the same

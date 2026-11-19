@@ -454,7 +454,14 @@ other inherited variable stays. A `git worktree` command the engine runs from
 that checkout goes without the inherited `GIT_INDEX_FILE`. The container base is
 not changed: a value its image provides stays.** The runner then supplies
 role-scoped `HOME`, `PATH`, and credential locations before applying
-non-reserved adapter overrides. An adapter that conflicts with a runner-reserved
+non-reserved adapter overrides. On the host the credential locations are the
+agents' credential-location variables, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME` and
+`CODEX_HOME`, and all three are reserved on every request. An agent's work,
+review and probe processes get their own agent's variable. Its value is the
+profile directory the request carries from the pool its agent is bound to
+(§17), or otherwise the value the Upstroke process inherited. A gate or shell
+probe gets none of the three. The container runner refuses a request that
+carries a profile. An adapter that conflicts with a runner-reserved
 environment key is a pre-flight error rather than an order-dependent override.
 Probes and real processes use the same composed environment and mounts; on the
 host, a process in a work tree the engine made then goes without the inherited

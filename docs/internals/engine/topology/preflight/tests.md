@@ -147,6 +147,143 @@ Asserted because the impl is hand-written: a derived one would print the
 `Mutex`es, and a `RunPreflight` in a refusal message would then carry every
 invocation identity the run has issued.
 
+## `const EXISTING_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");`
+
+---------------------------------------------------------------------------
+Profiled pools
+---------------------------------------------------------------------------
+
+## `const EXISTING_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src");`
+
+Profile paths that already exist (or, for `MISSING`, do not) in every
+checkout of this crate. This module is a topology module, where creating a
+directory is a build error, and the profile check only reads metadata, so a
+fixture that made a directory would add an effect without strengthening
+anything.
+
+## `const TOKEN: &str = "sk-ant-oat01-fixture-token-value";`
+
+A recognisable token value, so the refusal can be asserted not to carry
+it.
+
+## `fn no_token(_key: &str) -> Option<OsString> {`
+
+The coordinator environments the token check reads, standing in for the
+process environment (`RunPreflight::reading_environment`). `token_set` has
+`CLAUDE_CODE_OAUTH_TOKEN` and nothing else.
+
+## `const PROFILE_REFUSAL_CLOSING: &str = concat!(`
+
+The sentence every profile refusal ends in, on a fresh run and on a resume
+alike: no agent CLI was started and no event was appended, and the operator
+corrects the pools file or the environment and runs the same command again. It
+carries the full stop that ends the sentence before it, so `ends_with` holds the
+closing to being a sentence of its own. Spelled out here rather than read from
+`profile_refused`, so a change of wording is a change to this test as well, and
+to `engine::tests`' `assert_a_profile_refusal_created_nothing`, which spells the
+same closing for the fresh path. It replaces `refused`'s closing, which said the
+run was resumable: on a fresh run the profile refusal comes before the lease and
+`create_run`, so there is no run to resume (`PR386-FRESH-REFUSAL-NOT-RESUMABLE`).
+
+It says only what is true where each path refuses: a fresh run in `entry`'s
+`prepare_fresh`, before the lease, with nothing published, locked or created
+(Git children ran, read-only); a resume first in `certify`, under its locks and
+after its run exclusion and include, before any probe or recovery event. Until
+the fresh refusal moved into `prepare_fresh` the closing was "Nothing was
+created, spawned or appended", though the fresh refusal followed the lease, the
+exclusion and the include then, and the resume's follows its own.
+
+## `fn refused_before_anything_ran(`
+
+What every profile refusal shares, asserted once: it is a `Refused` that
+opens `pre-flight: ` and ends in the one closing sentence every profile
+refusal takes ([`PROFILE_REFUSAL_CLOSING`]), with nothing of `refused`'s
+probe sentence and no claim that the run is resumable; nothing reached the
+runner (not even the shell probe), nothing was registered or certified, and
+the ledger balances. Returns the message for the test's own pins.
+
+## `fn a_profiled_pool_on_the_container_runner_refuses_before_anything_runs() {`
+
+Check 1: a profiled pool on the container runner is refused from the
+policy's `kind`, naming the pool, before the container runner's own refusal
+of the stamped probe request could be reached. The directory exists, so the
+runner kind is the only thing wrong.
+
+## `fn a_profiled_pool_whose_agent_is_not_claude_code_refuses_naming_the_pool_and_agent() {`
+
+Check 2: a profile on a pool whose agent is not Claude Code is refused,
+naming that pool and its agent, even while a valid Claude Code profile
+stands beside it. Both directories exist, so the agent is the only thing
+wrong.
+
+## `fn a_profile_that_does_not_exist_refuses_naming_the_pool_and_the_path() {`
+
+Check 4, a missing path: the refusal names the pool and the path as
+configured.
+
+## `fn a_profile_that_is_not_a_directory_refuses_naming_the_pool_and_the_path() {`
+
+Check 4, a path that exists and is a file: refused as not a directory, so
+the operator is told something other than that it is missing.
+
+## `fn a_relative_profile_refuses_naming_the_pool_and_the_value() {`
+
+Check 3: a relative profile is refused, whatever it would name from here.
+Three values, each in a pool of its own name so that "naming its pool" has
+something to be wrong about:
+- `.`, which exists and is a directory from the coordinator's working
+  directory, so only its being relative is wrong;
+- `profiles/personal`, a plain relative path;
+- `~/profiles/personal`, which is relative too, because `~` is not expanded.
+
+Each refusal names its pool and the value as written, says that each task runs
+in its own directory, so a relative path would name a different directory for
+each process, says that `~` is not expanded, and asks for an absolute path.
+
+`PR386-RELATIVE-PROFILE-CWD`. The check read the profile with `fs::metadata`
+from the coordinator's working directory, `profiled` stamped the string as
+written, and the host runner starts each child in its request's `workspace`.
+So a relative profile was certified as one directory and handed to every agent
+process as another. Measured before the repair, as a witness: a host-runner
+Claude Code pool whose `profile` is `.` passed `refuse_unusable_profiles` on
+the unchanged code. This test is that witness, turned into the refusal.
+
+## `fn a_profile_that_cannot_be_inspected_refuses_with_the_error() {`
+
+Check 4, a path `fs::metadata` cannot inspect: refused with the error, not as
+missing. The path is absolute and carries a NUL byte, which no platform's
+filesystem call accepts (`ErrorKind::InvalidInput`), so the case is reached
+without creating or changing a permission on anything. It is here so the
+closing sentence [`refused_before_anything_ran`] asserts holds for the last of
+the profile refusals too.
+
+## `fn an_oauth_token_in_the_coordinators_environment_refuses_without_printing_it() {`
+
+Check 5: `CLAUDE_CODE_OAUTH_TOKEN` in the coordinator's environment would
+override the profile's credentials, so the run would not use the profile it
+names. The refusal names the variable, the pool and the profile, and never
+the token's value.
+
+## `fn a_profiled_claude_code_pool_on_the_host_with_its_directory_and_no_token_certifies() {`
+
+The pass case: a Claude Code pool whose profile directory exists, on the host
+runner, with no token set, certifies. The checks add no process of their
+own: the probes are the shell and the one agent, as for an unprofiled run.
+
+## `fn the_claude_code_probe_of_a_profiled_pool_runs_under_that_profile() {`
+
+The pre-flight's agent probe runs under the profile. The runner is assembled
+as `entry` assembles it, with `profiled` over the run's runner, and the
+pre-flight probes through it. The Claude Code probe arrives with its pool's
+profile. The shell probe, which has no agent, arrives with none.
+
+## `fn pools_that_name_no_profile_leave_the_preflight_as_it_was() {`
+
+An unprofiled run's pre-flight is unchanged. With pools that name no profile,
+none of the five checks applies: not on the container runner, not for an
+agent other than Claude Code, and not with a token set. The probes are the
+ones the run always made.
+
 ## `fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {`
 
 Review round 2's `R2-REG-2` (the PR11 record, §13, round R2). The `certify` section of

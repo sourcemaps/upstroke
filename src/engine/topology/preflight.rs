@@ -1,18 +1,20 @@
 //! Extended notes: `docs/internals/engine/topology/preflight.md`
 
 use std::borrow::BorrowMut;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::agent::{AdapterSource, Caps, ProcessOutput};
+use crate::capacity::Pool;
 use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::container::resolve::RunnerPreflight;
 use crate::runner::{
     Cancellation, InvocationId, RunFuture, Runner, RunnerCall, RunnerError, RunnerRequest,
 };
-use crate::topology::events::RunnerPolicy;
+use crate::topology::events::{RunnerKind, RunnerPolicy};
 use crate::workspace_manager::ComposedCommonDir;
 
 use super::identity::{InvocationEnd, InvocationLedger, PreflightIdentities, SlotPair, is_slotted};
@@ -31,12 +33,38 @@ impl Probed {
     }
 }
 
+const CLAUDE_CODE_OAUTH_TOKEN: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProfiledPool {
+    pool: String,
+    agent: String,
+    profile: PathBuf,
+}
+
+impl ProfiledPool {
+    fn of(pool: &Pool) -> Option<Self> {
+        let profile = pool.profile.as_ref()?;
+        Some(Self {
+            pool: pool.name.clone(),
+            agent: pool.agent.clone(),
+            profile: PathBuf::from(profile),
+        })
+    }
+}
+
+pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {
+    std::env::var_os(key)
+}
+
 pub struct RunPreflight<'a> {
     runner: &'a dyn Runner,
     adapters: &'a dyn AdapterSource,
     shell: ShellKind,
     workspace: PathBuf,
     agents: Vec<String>,
+    pools: Vec<Pool>,
+    environment: fn(&str) -> Option<OsString>,
     ledger: Mutex<InvocationLedger>,
     probed: Mutex<Option<Probed>>,
 }
@@ -67,9 +95,23 @@ impl<'a> RunPreflight<'a> {
             shell,
             workspace: workspace.to_path_buf(),
             agents,
+            pools: Vec::new(),
+            environment: coordinator_environment,
             ledger: Mutex::new(InvocationLedger::new()),
             probed: Mutex::new(None),
         }
+    }
+
+    #[must_use]
+    pub fn with_pools(mut self, pools: &[Pool]) -> Self {
+        self.pools = pools.to_vec();
+        self
+    }
+
+    #[must_use]
+    fn reading_environment(mut self, environment: fn(&str) -> Option<OsString>) -> Self {
+        self.environment = environment;
+        self
     }
 
     #[must_use]
@@ -112,6 +154,7 @@ impl<'a> RunPreflight<'a> {
 
 impl RunnerPreflight for RunPreflight<'_> {
     fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {
+        refuse_unusable_profiles(&self.pools, policy, self.environment)?;
         let registering = self.registering();
         let shell_id = PreflightIdentities::shell(0)?;
         crate::runner::host::run_shell_probe(
@@ -139,6 +182,79 @@ impl RunnerPreflight for RunPreflight<'_> {
         };
         *self.probed.lock().unwrap_or_else(PoisonError::into_inner) = Some(probed);
         Ok(())
+    }
+}
+
+pub(super) fn refuse_unusable_profiles(
+    pools: &[Pool],
+    policy: &RunnerPolicy,
+    environment: fn(&str) -> Option<OsString>,
+) -> Result<(), UpstrokeError> {
+    let profiled: Vec<ProfiledPool> = pools.iter().filter_map(ProfiledPool::of).collect();
+    let Some(first) = profiled.first() else {
+        return Ok(());
+    };
+    if policy.kind == RunnerKind::Container {
+        return Err(profile_refused(&format!(
+            "pool `{}` names the credential profile `{}`, and a profile is supported on the \
+             host runner only; this run's runner is the container runner",
+            first.pool,
+            first.profile.display()
+        )));
+    }
+    for pool in &profiled {
+        if pool.agent != crate::agent::claude::ADAPTER_ID {
+            return Err(profile_refused(&format!(
+                "pool `{}` names the credential profile `{}` for agent `{}`, and this stage \
+                 supports Claude Code's profile only (agent `{}`)",
+                pool.pool,
+                pool.profile.display(),
+                pool.agent,
+                crate::agent::claude::ADAPTER_ID
+            )));
+        }
+        if !pool.profile.is_absolute() {
+            return Err(profile_refused(&format!(
+                "pool `{}` names the credential profile `{}`, which is a relative path; each \
+                 task runs in its own directory, so a relative path would name a different \
+                 directory for each process, and `~` is not expanded; give the profile as an \
+                 absolute path",
+                pool.pool,
+                pool.profile.display()
+            )));
+        }
+        let problem = match std::fs::metadata(&pool.profile) {
+            Ok(metadata) if metadata.is_dir() => continue,
+            Ok(_) => "which is not a directory".to_owned(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                "which does not exist".to_owned()
+            }
+            Err(error) => format!("which cannot be inspected: {error}"),
+        };
+        return Err(profile_refused(&format!(
+            "pool `{}` names the credential profile directory `{}`, {problem}",
+            pool.pool,
+            pool.profile.display()
+        )));
+    }
+    if environment(CLAUDE_CODE_OAUTH_TOKEN).is_some() {
+        return Err(profile_refused(&format!(
+            "`{CLAUDE_CODE_OAUTH_TOKEN}` is set in this coordinator's environment, and a token \
+             overrides a profile's credentials, so the run would not use the profile pool `{}` \
+             names (`{}`); unset it to run under the profile",
+            first.pool,
+            first.profile.display()
+        )));
+    }
+    Ok(())
+}
+
+fn profile_refused(what: &str) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "pre-flight: {what}. No agent CLI was started and no event was appended; correct \
+             the pools file or the environment and run the same command again."
+        ),
     }
 }
 
