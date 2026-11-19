@@ -38,10 +38,11 @@ aggregate settle green over a platform Clippy never examined.
 ## `pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";`
 
 The command that executes this file's fixtures, character for character:
-the whole suite, with no selection. The guest's Windows job runs it so, as
-line 3 of [`WINDOWS_TEST_WITNESS`]. The hosted legs each run it over a
+the whole suite, with no selection. The guest's Windows job runs it so:
+line 4 of [`WINDOWS_TEST_WITNESS`] starts `cargo` as a process with this
+command's arguments and nothing else. The hosted legs each run it over a
 selection: the `test` job's as [`TEST_SHARD_COMMAND`], and the hosted twin's
-as line 3 of [`WINDOWS_SHARD_WITNESS`].
+on line 4 of [`WINDOWS_SHARD_WITNESS`].
 
 ## `pub(super) const TEST_SHARD_COMMAND: &str =`
 
@@ -154,8 +155,9 @@ is a deliberate act, and it edits this number in the same change.
 ## `pub(super) const WINDOWS_TEST_WITNESS: &str`
 
 The Windows leg's suite step, character for character: a refusal to run on
-any compiler but the image's, then the pinned test command, its exit
-status, and a count of what libtest reported.
+any compiler but the image's, then the pinned test command started as a
+process and waited on, its output read from files, the test processes it
+left running, its exit status, and a count of what libtest reported.
 
 The compiler check comes first because nothing else in the job makes the
 claim: no step installs a compiler, so the one that runs is whatever the
@@ -236,15 +238,130 @@ check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
 
+Between the compiler check and the count is the suite itself, lines 3 to 8,
+started as a process and waited on:
+
+3. Two paths in `RUNNER_TEMP`, one for each of Cargo's streams.
+4. `Start-Process` starts `cargo` with [`TEST_COMMAND`]'s arguments, its
+   streams sent to those files, and hands back the process (`-PassThru`).
+   `$null = $suite.Handle` has the process object open its handle while
+   Cargo runs, without which `ExitCode` can read empty once the process has
+   ended. `WaitForExit()` returns when Cargo's own process ends, and `$code`
+   keeps its exit. There is no `-Wait`, which waits for the process's
+   descendants as well.
+5. One `try` block, which reads and then lists. It prints the two files
+   and keeps standard output as `$log` for the count; the job log carries
+   the suite's output once Cargo has ended, not as it runs. It then lists
+   every process named `upstroke*` that is still running, with its command
+   line, and asks Windows to stop each one; the test harnesses are
+   `upstroke-<hash>.exe`. `Stop-Process` is given
+   `-ErrorAction SilentlyContinue` and nothing checks that the process
+   stopped, so the stop is attempted, not ensured. The listing names a
+   process, not the test that started it. A process left running under
+   another name is neither listed nor asked to stop.
+6. The `catch` for line 5. GitHub runs a `pwsh` step with
+   `$ErrorActionPreference = 'stop'`, so a failed read or a failed listing
+   ends line 5 where it fails. Where Cargo's exit was not zero, the `catch`
+   prints that failure and the script goes on to line 7, so the failure
+   cannot replace Cargo's exit code. Where Cargo exited zero, it throws the
+   failure again and the step fails: nothing was read or listed, so nothing
+   can be counted.
+7. Cargo's exit, where it is not zero. The line rests on line 4 having kept
+   one, as line 6's test does: PowerShell compares an empty value as not
+   equal to zero, and `exit` given nothing exits zero, before the count.
+8. A throw where line 5 listed anything.
+
+What is said here of `Handle`, `ExitCode`, `-Wait`, `exit`, `try` and
+`catch` was not executed where it was written: no PowerShell runs on the
+build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]). The step's first run on
+each home is the evidence for it.
+
+Before this the suite was a pipeline: line 3 was [`TEST_COMMAND`] piped into
+`Tee-Object -Variable log`, and line 4 read `$LASTEXITCODE`. Twice a hosted
+shard running that text reported its tests and did not end:
+
+- run 43719719561, 2026-11-15: the 1,669 s shard printed every
+  `test result: ok` line 31.6 minutes into its job and ran to the job's
+  limit, where the runner's clean-up killed a test process left over;
+- run 44277078005, 2026-11-18: `test (windows-latest, 3 of 5)`, job
+  134707868382, printed `test result: ok. 700 passed; 0 failed` at 09:50:41
+  and ran until its 40-minute limit cancelled it, and the job's clean-up
+  killed an orphaned test binary, `upstroke-8ddcc7d640fdf222`.
+
+That is what was observed: the passing result line, the hang, and a test
+binary killed at clean-up. The cause is inferred from it, and from Rust's
+`Command`, which on Windows hands a child the handles its parent holds as
+inheritable: a test process that outlived the suite held the pipe
+`Tee-Object` reads, so the pipeline never reached its end. Which test
+leaves the process is not established, and neither run was the guest's. The
+step is written against the inference. Waiting on Cargo's process does not
+depend on what that process left running, and nothing the script reads is a
+pipe a survivor can hold open; whether a leg that leaves a process now ends
+is the evidence of the next run in which one does.
+
+What is left running is the step's to report, where it was the runner's to
+kill at clean-up. Line 5 runs after a failed suite as after a passed one, so
+the processes are listed, and Windows is asked to stop them, either way.
+Line 6 keeps a failure in line 5 from replacing Cargo's exit code, line 7
+gives Cargo's failure that code, and line 8 fails a suite that passed and
+left a process: the job that ran the test names the process's command line,
+not the test. If the inference is wrong and Cargo itself does not end, line
+5 is never reached, and the job's limit still ends the leg.
+`the_windows_leg_counts_the_tests_it_ran` holds the script to line 4 as
+[`TEST_COMMAND`]'s arguments make it, and to six things about the process
+it starts: that it waits with `WaitForExit()` and not `-Wait`, pipes nothing
+into `Tee-Object`, exits with Cargo's code before it counts, lists the
+processes before that exit and throws for them after it, opens with lines 1
+and 2 whole and holds `cargo` after them once, on the line that starts the
+process, and reads and lists inside the `try` whose `catch` keeps Cargo's
+code. The six are `windows_suite_wait_complaints` in the test notes.
+Measured in the oracle, each an edit to the workflow that leaves this text
+alone: `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN`, line 4 a pipeline into
+`Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`, line 8 removed.
+Measured against this text itself, each an edit a pin cannot refuse because
+the workflow and the constant move together: the suite run a second time,
+and the `try` and its `catch` removed
+(`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit` in the
+test notes).
+
+The fifth of the six is the one that refuses a second run of the suite, and
+it reads this text's letters. It is drawn unless all of these hold:
+
+1. Line 1 is the compiler-questions line, whole.
+2. Line 2 is their refusal, whole, built from [`GOLDEN_IMAGE_TOOLCHAIN`]
+   with its dots escaped as line 2 writes them.
+3. Each later line holds `cargo`, in any letter case, once if it holds
+   `Start-Process` and never otherwise. The words
+   `Cargo compiled the harnesses`, in line 10's message, are set aside
+   before the count.
+4. `Start-Process` occurs once.
+
+Before `PR389-INDIRECT-SECOND-SUITE-RUN-UNREFUSED` the count skipped every
+`cargo` that followed `$` or `^`, on any line. Round two's frontier pass
+over #389 appended
+`& (($cargo -split ' ')[0]) test --all-targets --all-features` after line
+10, here and in `ci.yml` together, and every `effects::` test passed over a
+script that runs the suite twice. No `cargo` after line 2 is skipped now,
+whatever precedes it.
+
+The rule is for an edit made in good faith, a second run a change leaves in
+by mistake. It reads letters and parses nothing, so a second run the text
+never spells still passes it:
+`& ('car' + 'go') test --all-targets --all-features`, appended here and in
+`ci.yml` together. That is read from the text, not run, and it is filed as
+`PR389-UNSPELLED-SECOND-SUITE-RUN-UNREFUSED`, deferred. An edit to this
+constant or to the workflow is the owner's to read. The rule does not bound
+one, as no pin here bounds a hostile candidate (above).
+
 The hosted twin ran this step too, character for character, until it ran
 the suite in shards. Its legs now run [`WINDOWS_SHARD_WITNESS`], which keeps
-four of these six lines and changes two.
+eight of these ten lines and changes two.
 
 ## `pub(super) const WINDOWS_SHARD_WITNESS: &str`
 
 The suite step of every leg of the hosted twin, character for character:
 [`WINDOWS_TEST_WITNESS`] with the leg's shard on the cargo line, the leg's
-floor in the count's test, and a seventh line that prints the count. The
+floor in the count's test, and an eleventh line that prints the count. The
 three `matrix` expressions are text here, as they are in `ci.yml`; GitHub
 replaces each with the leg's value from the table
 [`TEST_WINDOWS_HOSTED_JOB`]'s matrix carries before PowerShell reads the
@@ -259,32 +376,48 @@ Line by line, against the guest's:
    claim rather than a hope: the toolchain action tolerates a failed `rustup
    default` and verifies only `rustc +1.97.1`, so it can report success
    while bare `cargo` is still the runner's preinstalled stable.
-3. [`TEST_COMMAND`], then `-- ${{ matrix.tests }}`, then the guest's
-   `Tee-Object`. What follows `--` goes to libtest in every harness
-   `--all-targets` builds: the leg's filter, if it has one, and a `--skip`
-   for each filter of the legs before it. Without the selection every leg
-   runs the whole suite.
-4. Cargo's exit through `Tee-Object`. The guest's line.
-5. The sum of every `test result: ok.` line's passed count. The guest's
+3. The two files Cargo's streams go to. The guest's line.
+4. The guest's line with ` -- ${{ matrix.tests }}` after [`TEST_COMMAND`]'s
+   arguments, inside the one quoted argument list: `cargo` started as a
+   process, waited on, its exit kept. What follows `--` goes to libtest in
+   every harness `--all-targets` builds: the leg's filter, if it has one,
+   and a `--skip` for each filter of the legs before it. Without the
+   selection every leg runs the whole suite.
+5. The `try` block: the two files, printed, with standard output kept for
+   the count, and the `upstroke*` processes still running, listed, with
+   Windows asked to stop each. The guest's line.
+6. The `catch` that keeps a failure in line 5 from replacing Cargo's exit
+   code. The guest's line.
+7. Cargo's exit, where it is not zero. The guest's line.
+8. The throw where a process was left running. The guest's line.
+9. The sum of every `test result: ok.` line's passed count. The guest's
    line.
-6. The refusal of a sum below `${{ matrix.floor }}`, where the guest's line
-   names [`WINDOWS_TEST_FLOOR`]. The message names the shard and its floor.
-7. The sum, the shard and the floor, printed. A leg that passes then says in
-   its log how far above its floor it ran, which is what a later change to a
-   floor is measured from; the guest's step prints the sum only when it
-   refuses.
+10. The refusal of a sum below `${{ matrix.floor }}`, where the guest's line
+    names [`WINDOWS_TEST_FLOOR`]. The message names the shard and its floor.
+11. The sum, the shard and the floor, printed. A leg that passes then says
+    in its log how far above its floor it ran, which is what a later change
+    to a floor is measured from; the guest's step prints the sum only when
+    it refuses.
+
+Lines 3 to 8 are why a leg waits on Cargo's process and reads files, and
+what it does about a test process left running: the two runs in which a
+shard reported its tests and did not end, 43719719561 and 44277078005, were
+both this job's, and what was observed in them and what is inferred from it
+is under [`WINDOWS_TEST_WITNESS`].
 
 The floor is not in this text. It reaches the script from the matrix, so
-the equality over the script holds that line 6 reads `matrix.floor` and
+the equality over the script holds that line 10 reads `matrix.floor` and
 the oracle's check of the matrix holds what each leg's floor is
 ([`WINDOWS_SHARD_FLOORS`]); a lowered floor in the table leaves this pin
 intact and is refused there. The same division holds the selection: this
-text says line 3 reads `matrix.tests`, and the matrix check says what each
+text says line 4 reads `matrix.tests`, and the matrix check says what each
 leg's is ([`WINDOWS_SHARD_FILTERS`]).
 
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
-holds lines 1, 2, 4 and 5 to the guest's lines, line 3 to the command with
-only the selection added, and line 6 to the matrix's floor. The count
+holds lines 1 to 3 and 5 to 9 to the guest's lines, line 4 to the guest's
+with only the selection added, and line 10 to the matrix's floor; and it
+holds this text to the six things the guest's is held to about the process
+it starts. The count
 carries over for the reason it exists on the guest: the twin's machines are
 GitHub's, not the build box, but a Cargo target runner or a `[workspace]`
 selection reaches them the same way. A shard's floor also refuses what the
@@ -292,8 +425,10 @@ whole suite's cannot see, a leg whose filter matched almost nothing.
 Measured, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`,
-`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`.
+`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`,
+`MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` and
+`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED`.
 
 No PowerShell runs on the build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]),
 so this text was not executed where it was written. Its execution is the
@@ -349,8 +484,9 @@ character, and on every leg of the hosted twin when the picker sends the run
 there. It stands immediately after the suite-and-witness step, so it runs
 the harness that step built on the compiler that step asserted.
 
-- `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`, as in
-  [`WINDOWS_TEST_WITNESS`].
+- `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`. The suite step
+  read Cargo's exit the same way until it stopped piping Cargo
+  ([`WINDOWS_TEST_WITNESS`]); this step runs one test and still pipes.
 - `-ccontains` requires the named test's pass line and `-cmatch` requires
   `1 passed; 0 failed; 0 ignored`.
 - The framed lines, split on single spaces, must be BEGIN first and END last
@@ -687,9 +823,13 @@ skipped, now means the guest's job or all five shards. `fail-fast` is
 
 40 minutes a leg: 1.75 times the slowest measured leg, and inside the merge
 queue's 60. In that run the 1,669 s shard printed every `test result: ok`
-line 31.6 minutes into its job and did not end: a leftover test process held
-the step's output until the job's limit, and the runner's clean-up killed
-it. The limit bounds that and does not repair it. The September and October
+line 31.6 minutes into its job and did not end. It ran to the job's limit,
+where the runner's clean-up killed a test process left over; that the
+process held the step's output until then is inferred, not seen. The limit
+bounds the hang and does not repair it. It happened again on
+2026-11-18, in run 44277078005, and the suite step now waits on Cargo's
+process where it piped Cargo; what the two runs showed, and what is inferred
+from it, is under [`WINDOWS_TEST_WITNESS`]. The September and October
 record of the hosted suite as one job is under [`TEST_WINDOWS_JOB`].
 Measured, `MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
 `MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
@@ -754,7 +894,7 @@ reads as a filter, none of them twice.
 The count each Windows shard must report before it may succeed, in shard
 order: [`WINDOWS_TEST_FLOOR`] divided among the five. Each is its leg's
 `floor:` in the twin's matrix, an integer the oracle holds to this list, and
-the number line 6 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
+the number line 10 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
 
 They sum to that floor, 1700, and
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds the sum, one

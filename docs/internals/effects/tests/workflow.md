@@ -503,6 +503,15 @@ an equality over the step is what stops those lines being dropped, or
 their floor lowered to a number an unexecuted suite clears. Measured,
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
 
+The same equality holds how the step runs the suite and what it does about a
+test process left running. `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN` makes line 4
+a pipeline into `Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`
+removes line 8, the throw for such a process. Each edits the workflow alone
+and is refused under `test-windows-command`. The same edit made to the
+workflow and to `WINDOWS_TEST_WITNESS` together is not this pin's to refuse:
+`windows_suite_wait_complaints` in `super` reads those relations from the
+constant.
+
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(windows_home_complaints(`
 
 The guest's job needs the picker, runs only when it answers `guest`, and
@@ -549,7 +558,12 @@ a filter of its own where the pinned text reads `matrix.tests`. Measured,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
 refuses: every leg runs the tests whose names contain `engine::`, and by the
-counts the floors were set from that subset clears all five.
+counts the floors were set from that subset clears all five. So, too, would
+one whose line 4 piped Cargo into `Tee-Object` again, or whose line 8, the
+throw for a test process left running, was gone:
+`MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` and
+`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED`, each refused under
+`test-windows-hosted-command`.
 
 Where the guest's job refuses a toolchain install, this one requires one:
 the toolchain action at step 1, with `clippy` among its components, since

@@ -5564,16 +5564,121 @@ fn no_repository_file_overrides_what_ci_compiles_or_runs() {
     );
 }
 
+fn windows_suite_start(selection: &str) -> String {
+    let (program, arguments) = TEST_COMMAND
+        .split_once(' ')
+        .expect("the pinned test command is a program and its arguments");
+    format!(
+        "$suite = Start-Process -FilePath {program} -ArgumentList '{arguments}{selection}' \
+         -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; \
+         $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode"
+    )
+}
+
+fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
+    let follows = |earlier: &str, later: &str| {
+        script
+            .find(earlier)
+            .zip(script.find(later))
+            .is_some_and(|(earlier, later)| earlier < later)
+    };
+    let lists = "$left = @(Get-CimInstance Win32_Process -Filter \"Name LIKE 'upstroke%'\"); ";
+    let exits = "if ($code -ne 0) { exit $code }\n";
+    let throws = "if ($left.Count -gt 0) { throw ";
+    let counts = "$passed = ";
+    let questions = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()";
+    let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
+    let refusal = format!(
+        "if ($rustc -notmatch '^rustc {version} ' -or $path_rustc -notmatch '^rustc {version} ' \
+         -or $cargo -notmatch '^cargo {version} ') {{ throw \"the suite would run on '$rustc' \
+         (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's \
+         {GOLDEN_IMAGE_TOOLCHAIN}: a compiler was chosen by something other than this \
+         workflow\" }}"
+    );
+    let catches = "catch { if ($code -ne 0) { \"reading the suite's output or listing the processes it left failed: $_\" } else { throw } }";
+    let lines: Vec<&str> = script.lines().collect();
+    let mut out = Vec::new();
+    if !follows("Start-Process ", "; $suite.WaitForExit(); ") || script.contains(" -Wait ") {
+        out.push(
+            "does not wait on the process it starts with `WaitForExit()` and with nothing \
+             else: `Start-Process -Wait` waits for the process's descendants too, so a test \
+             process left running would hold the step open",
+        );
+    }
+    if script.contains("Tee-Object") {
+        out.push(
+            "pipes into `Tee-Object`: a pipeline ends when every process holding its pipe has \
+             ended, so a test process that outlives the suite with that pipe in hand holds \
+             the step open after the last result line",
+        );
+    }
+    if !follows("; $code = $suite.ExitCode\n", exits) || !follows(exits, counts) {
+        out.push(
+            "does not exit with the code of the process it waited on before it counts, so a \
+             failed suite is judged by its count",
+        );
+    }
+    if !follows(lists, exits) || !follows(exits, throws) || !follows(throws, counts) {
+        out.push(
+            "does not list the `upstroke*` processes left running before it exits with \
+             Cargo's code and throw for them after, so a test that leaves a process running \
+             passes unreported",
+        );
+    }
+    let holds_cargo = |line: &str| {
+        line.replace("Cargo compiled the harnesses", "")
+            .to_ascii_lowercase()
+            .matches("cargo")
+            .count()
+    };
+    let opens_whole = lines.first().copied() == Some(questions)
+        && lines.get(1).copied() == Some(refusal.as_str());
+    let cargo_elsewhere = lines
+        .iter()
+        .skip(2)
+        .any(|line| holds_cargo(line) != usize::from(line.contains("Start-Process")));
+    let starts = script.to_ascii_lowercase().matches("start-process").count();
+    if !opens_whole || cargo_elsewhere || starts != 1 {
+        out.push(
+            "is not the compiler questions on line 1 and their refusal on line 2, each whole, and \
+             after them `cargo`, in any letter case, once on the one line that starts a process \
+             and on no other, so the suite can run twice and be counted from either run",
+        );
+    }
+    let kept = lines
+        .iter()
+        .position(|line| line.ends_with("$code = $suite.ExitCode"));
+    let after = |offset: usize| kept.and_then(|kept| lines.get(kept + offset).copied());
+    let reads_and_lists = after(1)
+        .is_some_and(|line| line.starts_with("try { Get-Content $err; ") && line.contains(lists));
+    if !reads_and_lists || after(2) != Some(catches) || after(3) != Some(exits.trim_end()) {
+        out.push(
+            "does not read the suite's output and list the processes it left inside the `try` \
+             whose `catch` keeps Cargo's code, with Cargo's exit on the next line, so a failure \
+             while reading the output or listing processes can replace Cargo's exit code",
+        );
+    }
+    out
+}
+
 #[test]
 fn the_windows_leg_counts_the_tests_it_ran() {
+    let whole_suite = windows_suite_start("");
     let cargo_lines = WINDOWS_TEST_WITNESS
         .lines()
-        .filter(|line| line.starts_with(TEST_COMMAND))
+        .filter(|line| *line == whole_suite)
         .count();
     assert_eq!(
         cargo_lines, 1,
-        "the Windows leg's step does not run `{TEST_COMMAND}` on exactly one line, so the \
-         suite it witnesses is not the suite the other legs run"
+        "the Windows leg's step does not start `{TEST_COMMAND}` as a process, with those \
+         arguments and nothing else, on exactly one line, so the suite it witnesses is not \
+         the suite the other legs run"
+    );
+    let unmet = windows_suite_wait_complaints(WINDOWS_TEST_WITNESS);
+    assert!(
+        unmet.is_empty(),
+        "the Windows leg's suite step:\n{}",
+        unmet.join("\n")
     );
     let version = GOLDEN_IMAGE_TOOLCHAIN.replace('.', "\\.");
     for (variable, tool, asked) in [
@@ -5589,7 +5694,7 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         );
     }
     assert!(
-        WINDOWS_TEST_WITNESS.find("-notmatch") < WINDOWS_TEST_WITNESS.find(TEST_COMMAND),
+        WINDOWS_TEST_WITNESS.find("-notmatch") < WINDOWS_TEST_WITNESS.find(&whole_suite),
         "the compiler check comes after the suite, so the suite has already run on the wrong \
          compiler by the time the step refuses"
     );
@@ -5598,6 +5703,108 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         "the Windows leg's step does not test the count against \
          {WINDOWS_TEST_FLOOR}, so the floor this contract documents is not the floor it runs"
     );
+}
+
+#[test]
+fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
+    let twice = "so the suite can run twice and be counted from either run";
+    let masked = "can replace Cargo's exit code";
+    for (home, script) in [
+        ("the guest's", WINDOWS_TEST_WITNESS),
+        ("the shards'", WINDOWS_SHARD_WITNESS),
+    ] {
+        let clean = windows_suite_wait_complaints(script);
+        assert!(
+            clean.is_empty(),
+            "{home} suite step, as the workflow runs it:\n{}",
+            clean.join("\n")
+        );
+        let start = script
+            .lines()
+            .find(|line| line.contains("Start-Process"))
+            .unwrap_or_else(|| panic!("{home} suite step starts no process"));
+        let unwrapped: String = script
+            .lines()
+            .filter(|line| !line.starts_with("catch { "))
+            .map(|line| {
+                let body = line
+                    .strip_prefix("try { ")
+                    .and_then(|body| body.strip_suffix(" }"));
+                format!("{}\n", body.unwrap_or(line))
+            })
+            .collect();
+        assert!(
+            unwrapped.lines().count() + 1 == script.lines().count()
+                && unwrapped.lines().nth(4).is_some_and(|line| {
+                    line.starts_with("Get-Content $err; $log = Get-Content $out; $log; $left = ")
+                }),
+            "{home} suite step has no `try` on line 5 and `catch` on line 6 to remove, so the \
+             last mutation below is not the one it is named for:\n{unwrapped}"
+        );
+        let indirect = "& (($cargo -split ' ')[0]) test --all-targets --all-features";
+        let joined_to = |line: usize| -> String {
+            script
+                .lines()
+                .enumerate()
+                .map(|(index, text)| {
+                    if index == line {
+                        format!("{text}; {indirect}\n")
+                    } else {
+                        format!("{text}\n")
+                    }
+                })
+                .collect()
+        };
+        for (mutation, mutated, complaint) in [
+            (
+                "the suite run again on a line after the count",
+                format!("{script}{TEST_COMMAND}\n"),
+                twice,
+            ),
+            (
+                "the suite run again on the compiler questions' line",
+                script.replacen('\n', &format!("; {TEST_COMMAND}\n"), 1),
+                twice,
+            ),
+            (
+                "the suite run again by a `Cargo` spelled with a capital",
+                format!("{script}{}\n", TEST_COMMAND.replacen("cargo", "Cargo", 1)),
+                twice,
+            ),
+            (
+                "a second copy of the line that starts the suite",
+                format!("{script}{start}\n"),
+                twice,
+            ),
+            (
+                "the suite run again through `$cargo`, on a last line",
+                format!("{script}{indirect}\n"),
+                twice,
+            ),
+            (
+                "the suite run again through `$cargo`, joined to the compiler questions' line",
+                joined_to(0),
+                twice,
+            ),
+            (
+                "the suite run again through `$cargo`, joined to the refusal's line",
+                joined_to(1),
+                twice,
+            ),
+            (
+                "the `try` and its `catch` removed from around the reading and the listing",
+                unwrapped,
+                masked,
+            ),
+        ] {
+            let complaints = windows_suite_wait_complaints(&mutated);
+            assert!(
+                matches!(complaints.as_slice(), [only] if only.contains(complaint)),
+                "{home} suite step with {mutation} did not draw the one complaint that says \
+                 `{complaint}`: {complaints:#?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -6864,38 +7071,46 @@ fn the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler() {
 
     let guest: Vec<&str> = WINDOWS_TEST_WITNESS.lines().collect();
     let shard: Vec<&str> = WINDOWS_SHARD_WITNESS.lines().collect();
-    for line in [1_usize, 2, 4, 5] {
+    for line in [1_usize, 2, 3, 5, 6, 7, 8, 9] {
         let guests = guest.get(line - 1);
         assert!(
             guests.is_some() && shard.get(line - 1) == guests,
             "line {line} of the shards' suite step is {:?} and the guest's is {guests:?}: the \
-             compiler questions, the suite's exit and the count are not one text on the two \
-             homes",
+             compiler questions, the files the suite writes to and is read from, the processes \
+             left running, the `catch` that keeps Cargo's exit code, the suite's exit, the \
+             refusal of a process left running and the count are not one text on the two homes",
             shard.get(line - 1)
         );
     }
-    let whole_suite = format!("{TEST_COMMAND} | Tee-Object -Variable log");
+    let whole_suite = windows_suite_start("");
     assert_eq!(
-        guest.get(2).copied(),
+        guest.get(3).copied(),
         Some(whole_suite.as_str()),
-        "line 3 of the guest's suite step is not `{TEST_COMMAND}` with its output kept for the \
-         count, so the guest does not run the whole suite"
+        "line 4 of the guest's suite step does not start `{TEST_COMMAND}` as a process, with \
+         those arguments and nothing else, wait on it and keep its exit code, so the guest \
+         does not run the whole suite"
     );
-    let one_shard = format!("{TEST_COMMAND} -- ${{{{ matrix.tests }}}} | Tee-Object -Variable log");
+    let one_shard = windows_suite_start(" -- ${{ matrix.tests }}");
     assert_eq!(
-        shard.get(2).copied(),
+        shard.get(3).copied(),
         Some(one_shard.as_str()),
-        "line 3 of the shards' suite step is not the guest's command with the leg's \
-         `matrix.tests` handed to libtest and nothing else, so a shard does not run its share \
-         of the guest's suite"
+        "line 4 of the shards' suite step is not the guest's with the leg's `matrix.tests` \
+         handed to libtest and nothing else, so a shard does not run its share of the guest's \
+         suite"
     );
     assert!(
         shard
-            .get(5)
+            .get(9)
             .is_some_and(|line| line.starts_with("if ($passed -lt ${{ matrix.floor }}) { throw ")),
-        "line 6 of the shards' suite step, {:?}, does not refuse a count below the leg's \
+        "line 10 of the shards' suite step, {:?}, does not refuse a count below the leg's \
          `matrix.floor`, so the floors the oracle holds the matrix to are floors no leg tests",
-        shard.get(5)
+        shard.get(9)
+    );
+    let unmet = windows_suite_wait_complaints(WINDOWS_SHARD_WITNESS);
+    assert!(
+        unmet.is_empty(),
+        "the shards' suite step:\n{}",
+        unmet.join("\n")
     );
 }
 

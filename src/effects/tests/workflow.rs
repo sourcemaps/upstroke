@@ -2456,9 +2456,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-WINDOWS-COMMAND-DELETED",
         escape: "the self-hosted job checks out, configures git, and runs no suite. The \
                  witness makes this one loud twice over -- the step is off its pin, and a \
-                 count of nothing is below the floor -- but the pin is what refuses it here.",
+                 step that started no suite has no output to read or count -- but the pin is \
+                 what refuses it here.",
         job: Some("test-windows"),
-        anchor: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         replacement: "",
         refused_as: "test-windows-command",
     },
@@ -4156,10 +4157,10 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED",
         escape: "a shard's ceiling raised from its 40 minutes, which is 1.75 times the slowest \
-                 measured leg and inside the merge queue's 60, to two hours. A leg whose \
-                 leftover test process holds its step's output after every result line has \
-                 printed, as one did in run 43719719561, then holds the required check and the \
-                 queue entry behind it until that ceiling",
+                 measured leg and inside the merge queue's 60, to two hours. A leg that prints \
+                 every result line and does not end, as one did in run 43719719561, where a \
+                 leftover test process is inferred to have held the step's output, then holds \
+                 the required check and the queue entry behind it until that ceiling",
         job: Some("test-windows-hosted"),
         anchor: "    timeout-minutes: 40\n",
         replacement: "    timeout-minutes: 120\n",
@@ -4365,8 +4366,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  on 2026-11-15 at 59 to 76 minutes a job, that is five legs cancelled at their \
                  limit; on a faster runner it is five green legs and no shard",
         job: Some("test-windows-hosted"),
-        anchor: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
-        replacement: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
@@ -4379,8 +4380,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  leg's 1085 among them: five green legs over a suite that lost the 2,188 tests \
                  of its largest shard",
         job: Some("test-windows-hosted"),
-        anchor: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
-        replacement: "          cargo test --all-targets --all-features -- engine:: | Tee-Object -Variable log\n",
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- engine::' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
@@ -4501,6 +4502,65 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "    timeout-minutes: 30\n",
         replacement: "    timeout-minutes: 45\n",
         refused_as: "test-job-timeout",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN",
+        escape: "line 4 of the guest's suite step is a pipeline again, Cargo piped into \
+                 `Tee-Object -Variable log`, as it read before the step started Cargo as a \
+                 process and waited on that. A pipeline ends when every process holding its \
+                 pipe has ended; by the inference the step is written against, a test process \
+                 that outlives the suite with that pipe in hand holds the step open after the \
+                 last result line, and a suite that passed runs to the guest's 20 minutes and \
+                 is cancelled, on the one machine every lane waits for. Lines 5 and 7 still \
+                 read the files and the exit code line 4 no longer makes: the row is the wait \
+                 put back and no working step, and the pin refuses the text whatever the rest \
+                 of it would then do",
+        job: Some("test-windows"),
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          cargo test --all-targets --all-features | Tee-Object -Variable log\n",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-SURVIVOR-ALLOWED",
+        escape: "line 8 of the guest's suite step, the throw for a test process left running, \
+                 is gone. Line 5 still lists each `upstroke*` process and asks Windows to stop \
+                 it, and the step goes on to its count: a suite that passed and left a process \
+                 is green. The listing is then a line in the log of a job nobody has a reason \
+                 to open, the process is forgotten whether or not it stopped, and which test \
+                 leaves it -- the one thing the two runs that did not end left unestablished \
+                 -- is looked for by no one",
+        job: Some("test-windows"),
+        anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
+        replacement: "",
+        refused_as: "test-windows-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN",
+        escape: "line 4 of the shards' suite step is a pipeline again, Cargo over the leg's \
+                 `matrix.tests` piped into `Tee-Object -Variable log`: the pipeline the legs \
+                 ran in runs 43719719561 and 44277078005, in each of which a shard reported \
+                 its tests and did not end before its job's limit. By the inference the step \
+                 is written against, a test process that outlives the suite holds that pipe, \
+                 so a leg whose tests all passed is cancelled at its 40 minutes with no \
+                 failing test to show for it, on whichever of the five legs runs the test \
+                 that leaves the process",
+        job: Some("test-windows-hosted"),
+        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        replacement: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
+        escape: "line 8 of the shards' suite step, the throw for a test process left running, \
+                 is gone, on all five legs at once. Each leg still lists the `upstroke*` \
+                 processes left and asks Windows to stop them, then counts and clears its \
+                 floor: the leg whose tests leave a process is green beside the other four, \
+                 the process is forgotten whether or not it stopped, and which test leaves it, \
+                 the question both runs that did not end left open, is asked by nothing",
+        job: Some("test-windows-hosted"),
+        anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
+        replacement: "",
+        refused_as: "test-windows-hosted-command",
     },
 ];
 
