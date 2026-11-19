@@ -139,8 +139,9 @@ How many rungs the resolved chain has.
 ## `pub struct LadderPolicy` › `pub max_defers: u32,`
 
 How many deferrals a task may take before the pool counts as down and
-the human is asked instead. Without the capacity engine there is no
-reset time to wait for, so this bound is what stops an exhausted pool
+the human is asked instead. The sequential engine now records a reset
+time on `pool_exhausted` where Claude Code's message names one, but
+nothing waits on it yet, so this bound is what stops an exhausted pool
 spinning forever.
 
 ## `pub struct LadderState {`
@@ -477,3 +478,82 @@ than a constructor argument, so the one production site that classifies a
 review result keeps its single `AttemptFailure::new` call and the census over
 those calls (`runner::contract::tests::an_observation_about_an_attempt_is_classified_in_one_production_place`)
 still counts one rule per observation.
+
+## `pub struct AttemptFailure {` › `limit_message: Option<String>,`
+
+The text that signalled a rate limit, when `reason` does not hold it whole.
+`engine::attempt::evaluate_outcome` sets it to a worker's stderr when that
+stderr signals the limit (`PR380-RESET-SIGNAL-CHANNEL-DROPPED`), and
+`engine::attempt::review_failure` to the text `review::run_review` keeps on
+`ReviewResult::Unavailable`: a reviewer's stderr under the same rule
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`), or else its full result text when
+that signals the limit, since the reason holds only that result's first 400
+bytes. The coordinator's
+`record_pool_exhausted` reads a Claude Code reset from it before the reason,
+and from the reason only when it names none, so an unrelated reset in the
+reason cannot stand in for the limit's
+(`PR380-UNRELATED-REASON-RESET-PREEMPTS-LIMIT`). Like `never_started` it is
+in memory only: `FailureRecord` does not carry it, so no event changes shape,
+and the ladder does not read it.
+
+Private, unlike every other field here. It is written only through
+[`AttemptFailure::with_limit_message`] and read only through
+[`AttemptFailure::limit_message`], inside the crate as well as outside it,
+so how the text is held is not part of the public contract
+(`PR380-ATTEMPT-FAILURE-PUBLIC-FIELD-BREAK`). Round three had declared it
+`pub`, which added a public field to a public struct with no compatibility
+assessment; the assessment is below, under the reader.
+
+## `impl AttemptFailure {` › `pub fn with_limit_message(mut self, text: String) -> Self {`
+
+Attach the limit text. A builder for the same reason as
+`from_a_process_that_never_started`: the worker's rate-limit arm and the
+reviewer-unavailable arm each keep their one `AttemptFailure::new` call.
+
+## `impl AttemptFailure {` › `pub fn limit_message(&self) -> Option<&str> {`
+
+The limit text, if one was attached; `None` otherwise. This is the only way
+to read it. The coordinator's `record_pool_exhausted` and the engine tests
+call it; nothing names the field outside this module.
+
+### What this does to `AttemptFailure`'s public surface
+
+`ladder` is a `pub mod` of the published library (`src/lib.rs`), so
+`AttemptFailure` is public API. The repository has no `RELEASING.md`. Its
+compatibility rule is `CODING_STANDARDS.md` §5 ("API shape"): a public API
+change is assessed for SemVer impact in review, and `cargo semver-checks` is
+the intended mechanism once a release leg runs it. No leg runs it yet, so this
+section is that assessment. The rule names below are those of the Cargo
+book's SemVer compatibility chapter.
+
+* **Public fields: unchanged.** `kind`, `origin`, `reason`, `feedback` and
+  `never_started` are what they were before round three, and none is added.
+  Reading them, and destructuring with `..`, work as before.
+* **Public methods: two added.** `with_limit_message` (the builder) and
+  `limit_message` (the reader). Adding inherent methods is a minor change.
+* **Construction outside the crate: closed. This is a major change, and making
+  the field private does not undo it.** Before round three every field was
+  public, so a downstream crate could build an `AttemptFailure` with a struct
+  literal or with functional record update (`..other`), and could match it
+  with an exhaustive pattern that has no `..`. Adding any field to a struct
+  whose fields are all public breaks all three. A public field breaks them
+  until the literal names the new field (`struct-add-public-field-when-no-private`).
+  A private field breaks them for good, because no code outside the crate
+  can name it (`struct-add-private-field-when-public`). Either way, code
+  outside the crate now builds the struct with `AttemptFailure::new` and the
+  builders, as code inside the crate already did. Nothing inside the crate
+  used a literal, so nothing inside it had to change.
+* **What the private field changes.** No new public field is committed to,
+  and the representation behind `limit_message()` can change without a
+  break. Because the struct now has a private field, nothing outside the crate
+  can build it by its fields, so adding another field is a minor change from
+  here on. For a private field that is `struct-private-fields-with-private`.
+  A public field follows from the same fact.
+* **Nothing else moves.** `AttemptFailure` derives only `Debug` and `Clone`,
+  not serde, so no wire format changes. Derived `Debug` output now includes
+  `limit_message`, and that output is not a stable contract.
+
+So the release that first ships this is breaking for any downstream that
+builds or exhaustively matches `AttemptFailure` by its fields. Under Cargo's
+convention for `0.y.z`, that means a `y` bump past 0.1. The version bump and
+its release note belong to the release, not to this change.

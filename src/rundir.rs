@@ -1967,35 +1967,133 @@ mod listing_fault {
 // The answer funnels
 // ---------------------------------------------------------------------------
 
-/// `Answer.StageWrite` — `answers/<qid>.json.partial`, writer-owned residue
-/// that every reader ignores and no coordinator ever prunes (R21).
+/// The file one publisher staged its answer in, and the name it publishes to.
+///
+/// Only [`stage_answer`] makes one, and only [`publish_answer`] consumes it:
+/// the staged file was created exclusively by this publisher, so no other
+/// publisher writes it, publishes it or removes it.
+#[derive(Debug)]
+#[must_use = "a staged answer is published by `publish_answer`, or left as residue"]
+pub struct StagedAnswer {
+    staged: PathBuf,
+    published: PathBuf,
+}
+
+impl StagedAnswer {
+    /// The staged file: `answers/<qid>.json.<pid>-<ulid>.partial`.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.staged
+    }
+}
+
+/// `Answer.StageWrite` — `answers/<qid>.json.<pid>-<ulid>.partial`, a file of
+/// this publisher's own, created exclusively (`create_new`), so two publishers
+/// of one answer never stage into the same file. Its name ends `.partial`, so
+/// it is writer-owned residue that every reader ignores (readers open only
+/// the exact `<qid>.json`) and no coordinator ever prunes (R21).
+///
+/// The bytes are exactly those [`util::write_json`] writes: the pretty JSON
+/// and a newline. What comes back is what [`publish_answer`] needs to find
+/// the staged file.
+///
+/// # Errors
+///
+/// A serialization failure stages nothing. An I/O error creating the file
+/// leaves nothing; one writing it removes the staged file, or leaves it,
+/// partly written, as `.partial` residue only if that removal fails too. The
+/// error is the write's, naming the staged file.
 pub fn stage_answer<T: Serialize>(
     answers: &Path,
     component: &str,
     answer: &T,
     hooks: &mut dyn RunDirHooks,
-) -> Result<(), UpstrokeError> {
+) -> Result<StagedAnswer, UpstrokeError> {
     funnel(hooks, EffectSiteId::Answer(AnswerSite::StageWrite), || {
-        util::write_json(&answers.join(format!("{component}.json.partial")), answer)
+        let staged = answers.join(format!(
+            "{component}.json.{}-{}.partial",
+            std::process::id(),
+            crate::ulid::ulid()
+        ));
+        let json = serde_json::to_string_pretty(answer).map_err(|e| UpstrokeError::Parse {
+            message: format!("serializing {}: {e}", staged.display()),
+        })?;
+        let io_error = |source| UpstrokeError::Io {
+            path: staged.clone(),
+            source,
+        };
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+            .map_err(io_error)?;
+        let written = file.write_all((json + "\n").as_bytes());
+        drop(file);
+        if let Err(source) = written {
+            // Cleanup that never changes the outcome: a staged name that
+            // cannot be removed stays as `.partial` residue.
+            let _ = fs::remove_file(&staged);
+            return Err(io_error(source));
+        }
+        Ok(StagedAnswer {
+            staged,
+            published: answers.join(format!("{component}.json")),
+        })
     })
 }
 
-/// `Answer.PublishRename` — the answer exists for the engine from here.
+/// `Answer.PublishRename` — publish the staged answer create-once: the answer
+/// exists for the engine from here, unless one already did.
+///
+/// The staged file is hard-linked to `answers/<qid>.json`, which fails if that
+/// name exists, so an answer already published is never replaced; there is no
+/// fallback to a replacing rename. Then, whatever the link did, the staged
+/// name is removed if it can be. That removal is cleanup and never changes
+/// the outcome: a staged name it cannot remove stays as `.partial` residue,
+/// which every reader ignores (readers open only the exact `<qid>.json`).
+///
+/// - [`AnswerPublication::Published`]: this answer is at `<qid>.json`. Its
+///   staged name is gone, or left as residue if it could not be removed.
+/// - [`AnswerPublication::AlreadyAnswered`]: `<qid>.json` already existed and
+///   is untouched; this answer is not published. Its staged name is gone, or
+///   left as residue if it could not be removed.
+///
+/// # Errors
+///
+/// An I/O error linking, for any reason but an existing `<qid>.json`, means
+/// the answer was **not** published: `<qid>.json` is as it was, and the
+/// staged file is removed, or left as residue if that removal fails too. The
+/// error is the link's, naming `<qid>.json`. A failure removing the staged
+/// name is never an error.
+///
+/// [`AnswerPublication::Published`]: crate::interaction::AnswerPublication::Published
+/// [`AnswerPublication::AlreadyAnswered`]: crate::interaction::AnswerPublication::AlreadyAnswered
 pub fn publish_answer(
-    answers: &Path,
-    component: &str,
+    staged: StagedAnswer,
     hooks: &mut dyn RunDirHooks,
-) -> Result<(), UpstrokeError> {
+) -> Result<crate::interaction::AnswerPublication, UpstrokeError> {
+    use crate::interaction::AnswerPublication;
     funnel(
         hooks,
         EffectSiteId::Answer(AnswerSite::PublishRename),
         || {
-            let staged = answers.join(format!("{component}.json.partial"));
-            let published = answers.join(format!("{component}.json"));
-            fs::rename(&staged, &published).map_err(|source| UpstrokeError::Io {
-                path: published,
-                source,
-            })
+            let StagedAnswer { staged, published } = staged;
+            let linked = fs::hard_link(&staged, &published);
+            // The staged file is this publisher's alone and no coordinator
+            // prunes it, so it is removed on every path. The link already
+            // decided the outcome; a removal that fails leaves `.partial`
+            // residue, which no reader opens, and is not this call's error.
+            let _ = fs::remove_file(&staged);
+            match linked {
+                Ok(()) => Ok(AnswerPublication::Published),
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                    Ok(AnswerPublication::AlreadyAnswered)
+                }
+                Err(source) => Err(UpstrokeError::Io {
+                    path: published,
+                    source,
+                }),
+            }
         },
     )
 }

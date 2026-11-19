@@ -627,6 +627,9 @@ effect_free = [
     "ledger",
     "lock_file",
     "new",
+    # `StagedAnswer::path`: the staged answer file's path, for a caller that
+    # inspects the residue. A path; nothing is opened.
+    "path",
     "permits_deletion",
     "plan_json",
     "public_dir",
@@ -716,6 +719,9 @@ effect_free = [
     # thread can satisfy (`PR6-LANEF-001`).
     "barriers_on_this_thread",
     "barriers_performed",
+    # Calendar arithmetic on integers: a day count to a civil date and back,
+    # for the event timestamps and for reading a rate limit's reset time.
+    "civil_from_days",
     "clear",
     # Arms and disarms a process-wide, path-keyed barrier fault (a test's, the
     # guard's `drop` disarms it); reaches no filesystem effect of its own.
@@ -724,6 +730,7 @@ effect_free = [
     # The same fault, scoped to the file barriers directly under a directory,
     # for a staged file whose name the write chooses (PR10's round 8).
     "fail_file_barriers_within",
+    "days_from_civil",
     "deserialize",
     "executable_extensions",
     "fence_for",
@@ -744,10 +751,15 @@ effect_free = [
     "recording",
     "records",
     "records_for",
+    # Formats a unix time; reads no clock.
+    "rfc3339_utc",
     "rfc3339_utc_now",
     "serialize",
     "steps",
     "tail",
+    # Reads the system clock; `rfc3339_utc_now` reads it through this. A clock
+    # read is no effect in this classification, as that row already records.
+    "unix_seconds_now",
     "user_upstroke_dir",
 ]
 
@@ -1783,16 +1795,19 @@ effect_free = [
     "drain_of",
     "effective_remaining",
     "estimate",
+    "exhausted_pools_of",
     "fmt",
     "is_empty",
     "observe",
     "parse",
     "parse_duration",
+    "pool_exhausted_to_record",
     "pool_for",
     "read_in_v0_1",
     "render",
     "render_duration",
     "report",
+    "retire_served_pools",
     "strategy_preview",
 ]
 
@@ -2117,6 +2132,11 @@ not_an_effect = [
     "P_PID",
     "P_PIDFD",
     "RLIMIT_CORE",
+    # The file-size limit the rundir tests' staging child lowers below an
+    # answer's size, so that its staging write fails part-way
+    # (`a_failed_staging_write_removes_its_staged_file`); the effect is
+    # `setrlimit`.
+    "RLIMIT_FSIZE",
     "RLIMIT_NOFILE",
     "SA_RESTART",
     "SA_SIGINFO",
@@ -2145,6 +2165,9 @@ not_an_effect = [
     "SIGTTIN",
     "SIGTTOU",
     "SIGUSR1",
+    # Ignored by the same staging child, so that a write past its file-size
+    # limit answers `EFBIG` rather than ending it; the effect is `signal`.
+    "SIGXFSZ",
     "SIG_BLOCK",
     "SIG_DFL",
     "SIG_ERR",
@@ -2232,6 +2255,7 @@ not_an_effect = [
     "proc_listpids",
     "proc_pidinfo",
     "read",
+    "rlim_t",
     "rlimit",
     "sigaddset",
     "sigemptyset",

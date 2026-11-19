@@ -142,21 +142,47 @@ shape is written as it is; the reader's rule (a citation-less conviction
 reads as a discovery) covers a file something other than this writer
 produced.
 
-Write an answer atomically.
+Write an answer atomically, and say what happened to it:
+`Result<AnswerPublication, UpstrokeError>`.
 
-Temp file plus rename, because the engine may be reading this directory at
-any moment. That atomicity is what lets [`read_answer`] be strict: it
-refuses a file it cannot parse rather than skipping it, which is only a
-safe policy because a half-written file can never be observed. A corrupt
-one therefore means something outside upstroke wrote here, and silently
-ignoring what might be an operator's answer is worse than stopping to say
-so.
+A staged file of the publisher's own plus a create-once hard link, because
+the engine may be reading this directory at any moment. The answer is staged
+in `<qid>.json.<pid>-<ulid>.partial`, created exclusively, so no two
+publishers share a staging file; then it is hard-linked to `<qid>.json`, and
+the staged name removed. That atomicity is what lets [`read_answer`] be
+strict: it refuses a file it cannot parse rather than skipping it, which is
+only a safe policy because a half-written file can never be observed. A
+corrupt one therefore means something outside upstroke wrote here, and
+silently ignoring what might be an operator's answer is worse than stopping
+to say so.
 Through `Answer.StageWrite` then `Answer.PublishRename` — the two sites the
 frozen inventory gives the answer command. Same two steps, same bytes.
 
-Atomic is not create-once: the rename replaces an answer file that already
-exists, and this writer never refuses to publish over one
-(`PR381-ANSWER-PUBLISH-RACE`).
+The link fails if `<qid>.json` exists, and there is no fallback to a
+replacing rename. So `AnswerPublication::Published` means this answer is the
+published file, and `AnswerPublication::AlreadyAnswered` means another was
+published first: it is untouched, this answer is not published, and this
+answer's staged file is removed. A caller tells "already answered" from an
+I/O error, and from the uncited-conviction refusal, by type. Whatever the
+link did, the staged file is then removed if it can be. Once the link has
+succeeded or found `<qid>.json` existing, the outcome is decided, and a
+failure removing the staged name does not change it: that name stays as
+`.partial` residue, which readers ignore, and the outcome is still returned.
+An I/O error means the link failed for another reason and the answer was not
+published; the staged file is removed then too. Staging can fail before
+there is anything to link: an I/O error creating the staged file leaves
+nothing, and one writing it (a full disk, a file-size limit) removes the
+staged file `stage_answer` just created and returns the write's error, so
+`publish_answer` is never reached and nothing is published. Every path
+leaves at most the staged `.partial`, and only when its removal fails.
+
+Atomic and create-once: each publisher stages its answer in a file of its
+own, `<qid>.json.<pid>-<ulid>.partial`, created exclusively, and publishes it
+by a hard link to `<qid>.json` that fails when `<qid>.json` exists. That
+failure becomes `AnswerPublication::AlreadyAnswered`, which `upstroke answer`
+refuses with the same "already answered" sentence as its check before the
+write, naming the answer that was kept. This closes
+`PR381-ANSWER-PUBLISH-RACE`.
 
 ## `pub fn read_answer_record(`
 
@@ -349,8 +375,10 @@ Waiting, injectable so tests never actually sleep.
 ## `pub const DEFAULT_DEFER_BACKOFF: Duration = Duration::from_secs(60);`
 
 First wait after a rate-limited attempt. Windows reset on the order of
-hours (§13), but without the capacity engine there is no reset time to read
-— so this backs off rather than pretending to know one.
+hours (§13). The sequential engine now records a reset time on
+`pool_exhausted` where Claude Code's message names one, but nothing waits
+on it yet — the capacity engine ships read-only — so this backs off rather
+than waiting for a time it often does not have.
 
 ## `pub const MAX_DEFER_BACKOFF: Duration = Duration::from_secs(600);`
 
@@ -390,6 +418,22 @@ a prompt, but it gives up immediately.
 ## `fn answers_survive_the_trip_through_a_file()` › `let leftovers: Vec<String> = std::fs::read_dir(&dir)`
 
 Nothing partial is left behind for the engine to trip over.
+
+## `fn two_concurrent_answers_publish_exactly_one() {`
+
+`PR381-ANSWER-PUBLISH-RACE`: two publishers of one answer, here two `write_answer` calls with
+distinct answers for one question in one answers directory, released together by a
+`std::sync::Barrier`. Each round asserts that exactly one is told `Published` and the other
+`AlreadyAnswered`, that the retained `<qid>.json` holds the bytes of the one told it published,
+and that the directory holds nothing but that file: no `.partial` is left behind. The expected
+bytes are taken from `write_answer` itself, each answer published alone into a directory of its
+own, and the test asserts the two differ, so the byte check can tell the winner from the loser.
+
+Which publisher wins is up to the scheduler, so the rounds repeat (256, each in a fresh
+directory) to make the race likely to be hit both ways while staying well under a second. A
+replacing publication fails here as two `Published` outcomes, or as a retained file that is the
+loser's. The deterministic interleaving of the same race (A stages, B stages, A publishes, B
+publishes) is `two_publishers_of_one_answer_publish_exactly_one` in `src/rundir/tests.rs`.
 
 ## `fn a_detached_run_waits_for_an_answer_file_then_gives_up()` › `let tree = scratch("answer-wait");`
 
@@ -444,7 +488,7 @@ answer's, so a witness run over both shapes cannot lose that power without a tes
 
 The rule is the run layout's design: `design/15`, "An answer file is read, never taken". Ingestion
 reads a published answer and never takes it, so an ingestion leaves the file exactly as it found
-it; publication, which can replace the file, is outside the rule. The answer file belongs to the run-scoped
+it; publication, which creates the file once and never replaces it, is outside the rule. The answer file belongs to the run-scoped
 run-directory contents that the effects vocabulary's row R21 accounts for. After a read of a
 published answer, the file is still present and `fs::read` of it equals the bytes taken before the
 read; each assertion message names R21's read-never-take rule and the read under test.

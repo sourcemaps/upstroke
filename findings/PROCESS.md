@@ -559,13 +559,19 @@ Mechanics that are not optional, each of which has cost time:
 
 **Triaging a review.** *What a lane must fix before it may merge is `MAINTAINING.md`'s rule, not
 this one, and nothing here loosens it.* `MAINTAINING.md` sets a mandatory fix set per lane —
-the P3 findings lane is ready only on a `PASS`, the P1/P2 findings lane fixes P0–P2 and files P3,
+the P3 findings lane is ready with no P0–P2 and at most three unwitnessed P3s (a witnessed P3 is
+fixed), the P1/P2 findings lane fixes P0–P2 and files P3,
 feature and sweep work fixes P0–P1 and files P2 and P3 — and which of those a sweep branch selects
 is the open question in §9. On top of whatever that lane requires:
 
 - **P1** → repair round on the same head, by a fresh `claude-opus-5` `max` session, then re-review.
 - **Anything the lane is not required to fix** → filed as a new finding with a `deferred` ledger
-  row, one file per finding, and the batch proceeds.
+  row, one file per finding, and the batch proceeds. A P3 may instead be recorded as
+  `accepted-risk` (owner's ruling, 2026-11-13, in every lane): it is filed like every open
+  finding, with `disposition: accepted-risk`, and the audit accepts it without the owner's read,
+  provided its ledger row records the review's severity. A P2 or higher recorded as
+  `accepted-risk` is still the owner's call. The next bullet outranks both: a witnessed or `MUST`
+  P3 is fixed.
 - **Fixed whatever its label, in every lane:** a finding carrying a failing test, a reproduction or
   a mutation witness, **and a deviation from a mandatory standard in code this change touches.**
   That second exception is `MAINTAINING.md`'s and an earlier draft of this section dropped it.

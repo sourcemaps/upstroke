@@ -456,6 +456,69 @@ NOT a rejection of the change: the engine has to tell "the code is wrong"
 apart from "the judge was unavailable", or a rate-limited pool reads as a
 failed task and the retry ladder punishes the implementer for it.
 
+## `pub enum ReviewResult` › `limit_message: Option<String>,`
+
+The text that signalled a rate-limited reviewer's limit, whole: the first of
+its stderr and its full result text that names a quota limit
+(`agent::names_a_quota_limit`), and when neither does, the first of them
+that signals a limit at all (`agent::looks_rate_limited`). `None` on every
+other unavailable result.
+`engine::attempt::review_failure` hands it to the failure through
+`AttemptFailure::with_limit_message`. That is the same in-memory carrier a
+worker's stderr rides on, so the coordinator can read the reviewer's reset
+from it through `AttemptFailure::limit_message()`
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`). Nothing stores it.
+
+### What this does to `ReviewResult`'s public surface
+
+`review` is a `pub mod` of the published library (`src/lib.rs`), so
+`ReviewResult` is public API. Callers get it in the `result` field of the
+`ReviewOutcome` that `run_review` returns. v0.1.0 shipped the variant as
+`Unavailable { status, detail }`, and this change adds `limit_message`.
+`standards/05_standards_types_modules_apis.md` ("API shape") asks for a
+SemVer assessment of a public API change in review. No release leg runs
+`cargo semver-checks` yet, so this section is that assessment, done the way
+`ladder`'s notes do it for `AttemptFailure`
+(`PR380-REVIEW-RESULT-PUBLIC-FIELD-BREAK`). The rule names below are those of
+the Cargo book's SemVer compatibility chapter.
+
+* **What breaks: building the variant, and a pattern that names every field
+  without `..`.** An enum variant's fields are as public as the enum, so
+  adding one is a major change (`enum-fields-new`). A downstream struct
+  literal `ReviewResult::Unavailable { status, detail }` no longer compiles,
+  because it does not name `limit_message`. A pattern
+  `ReviewResult::Unavailable { status, detail }` with no `..` fails the same
+  way, because it no longer covers the variant. Each compiles again once it
+  names the new field (`limit_message: None` in a literal).
+* **What does not break.** A pattern with `..`, such as
+  `ReviewResult::Unavailable { status, .. }`, compiles and binds what it did
+  before. `Judged(Verdict)` is untouched, so building it and matching it work
+  as before. No variant is added, so a `match` that covers both variants is
+  still exhaustive. `ReviewResult` derives only `Debug`, not serde, so no
+  wire format changes. Derived `Debug` output now includes `limit_message`,
+  and that output is not a stable contract.
+* **Why the field is on the variant.** The limit text belongs to the
+  unavailable outcome alone. A `Judged` result comes from a reviewer that
+  answered, so it has no limit to report. On the variant the text sits beside
+  the `status` it is evidence for, and it is `Some` only when that status is
+  `RateLimited`. Putting it on `ReviewOutcome` would let a judged result carry
+  limit text that means nothing, and it would not avoid the break: every field
+  of `ReviewOutcome` is public, so a new one there is
+  `struct-add-public-field-when-no-private`. The field cannot be made private
+  as `AttemptFailure`'s was, because an enum variant has no private fields.
+* **Later additions stay breaking.** The variant is not `#[non_exhaustive]`,
+  so adding another field to it later is also a major change. Adding the
+  attribute would be a major change of its own (`attr-adding-non-exhaustive`),
+  and it would stop code outside the crate from building the variant at all.
+  This change does neither.
+
+So the first release that ships this breaks any downstream code that builds
+`ReviewResult::Unavailable`, or matches it by every field without `..`.
+`Cargo.toml` still says 0.1.0. Under Cargo's convention for `0.y.z`, a
+breaking change bumps `y`, so this is a minor-version break past 0.1. That is
+the same bump `ladder`'s notes record for `AttemptFailure`. The version bump
+and its release note belong to the release, not to this change.
+
 ## `pub struct ReviewOutcome` › `pub invocations: u32,`
 
 How many agent invocations it took (2 means the re-ask was needed).
@@ -553,6 +616,46 @@ answered and then crashed still told us something.
 
 The reviewer never ran properly: re-asking an exhausted pool or a
 hung process just spends again for the same result.
+
+## `let limit_message = (outcome.status == OutcomeStatus::RateLimited`
+
+Claude Code can exit 1 with a JSON result unrelated to the limit, such as
+`request failed`, and print the limit with its reset on stderr.
+`claude::parse_output` classifies the review `RateLimited` from that stderr,
+but the detail it keeps is the JSON result, so the detail alone loses the
+reset. The stderr is kept when the status is `RateLimited` and the stderr
+itself signals the limit, the rule `engine::attempt::evaluate_outcome`
+applies to a worker's: stderr that signals nothing did not classify the
+review, and the text that did is already in the detail. Before, only the
+status and the detail were kept, and a reviewer whose limit was on stderr
+recorded its pool exhausted with no reset
+(`PR380-REVIEWER-STDERR-RESET-DROPPED`).
+
+When stderr does not signal the limit, the detail, the full result text, is
+kept instead if it signals the limit. That text is already behind the
+failure's reason, but `review_failure` puts only its first 400 bytes there,
+and a limit later in the result was cut off before anything read its reset.
+A result reading `MCP cache resets 9am (UTC)`, then more than 400 bytes of
+diagnostics, then `You've hit your 5-hour limit · resets 5:30am (UTC)` left
+the reason only the unrelated reset; it once recorded 09:00, and since the
+parser stopped reading a reset no limit gives, `None`. Kept whole, the
+result is read before anything shortens it, and the reset is 05:30. The
+reason keeps its 400-byte head, so nothing displayed changes. Stderr comes
+first because, when it signals, the result is the unrelated text beside it
+(`request failed`), as above.
+
+"Signals the limit" is two tests, tried in turn. The first text, stderr then
+the result, that names a quota limit (`agent::names_a_quota_limit`, the test
+the coordinator reads a reset with) is kept; only when neither names one is
+the first that `agent::looks_rate_limited` accepts kept, as before. That
+matcher is broad (`429`, `rate limit`, ...), so a stderr of `HTTP 429: rate
+limit` beside the result above used to win: the limit message named no
+quota, the reason's head held only the unrelated reset, the coordinator found
+no text naming a quota limit, and `pool_exhausted` recorded no reset
+(`PR380-GENERIC-STDERR-HIDES-REVIEW-RESET`). Now the result names the quota,
+so it is kept, and the reset is 05:30.
+`a_reviewers_quota_limit_in_the_result_outranks_a_generic_limit_on_stderr_on_pool_exhausted`
+holds it.
 
 ## `Ok(ReviewOutcome {`
 

@@ -6265,12 +6265,22 @@ left byte-identical by finalization, never ingested, and never pruned.
 ## `fn late_answer_after_finalization_is_inert_and_reported_not…`
 
 `late_answer_after_finalization_is_inert_and_reported_not_live`
-(T-ANSWER): `upstroke answer` after finalization writes its file — through
-the `Answer.StageWrite`/`PublishRename` funnels the command delegates to —
-and finds the run not live by the same `rundir::is_running` probe the
-command reports (`src/answer.rs`,
-`an_answer_lands_where_the_engine_will_find_it`); the file stays inert
-across every later resume.
+(T-ANSWER): an answer published after finalization stays inert across every
+later resume, and the run reads as not live by the same `rundir::is_running`
+probe `upstroke answer` reports (`src/answer.rs`,
+`an_answer_lands_where_the_engine_will_find_it`).
+
+The test does not run `upstroke answer`. It publishes the late answer with
+`publish_answer_file`, which calls `rundir::stage_answer` and
+`rundir::publish_answer` directly: the `Answer.StageWrite`/`PublishRename`
+funnels the command reaches through `interaction::write_answer`. And it
+deletes an answer first. The plant (`PlantedAnswerFiles`) already published
+an answer to the parked question before finalization, and publication is
+create-once: over that file the late publication would come back
+`AlreadyAnswered`, which fails `publish_answer_file`'s assertion that it
+published, just as the command would refuse it as already answered. Removing the planted
+`<qid>.json` frees the name, so the late answer is really published and the
+test can watch what the finalized run does with it.
 
 ## `fn late_answer_before_halting_settlement_is_inert_and_retai…`
 

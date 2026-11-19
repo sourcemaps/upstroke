@@ -90,8 +90,21 @@
 #   - no finding in that review has a severity the lane must fix
 #   - every allowed finding has a ledger row in the body whose disposition is deferred, with
 #     exactly one file under findings/ on the branch whose YAML frontmatter (the block
-#     between the opening --- and the next) carries `id: <the finding id>`; a rejected or
-#     accepted-risk row is the owner's call and sends the pull request to MANUAL
+#     between the opening --- and the next) carries `id: <the finding id>` as its only `id:`
+#     line (a file naming two ids is two findings in one file, and `multi-id-file` for each of
+#     them, in either arm) -- or, when the
+#     finding's severity is one `may_accept_for` answers for the lane (P3, in every lane, by the
+#     owner's ruling of 2026-11-13), whose disposition is accepted-risk, which needs that same
+#     one file (an accepted finding is still open, and findings/ is the whole of the open work)
+#     and a row recording the review's own severity: a row whose severity differs is
+#     `severity-mismatch`, NOT-READY. Every other accepted-risk row, and every rejected row, is
+#     the owner's call and sends the pull request to MANUAL. A witnessed or MUST P3 never reaches
+#     its row: both are blocked first, whatever the row says (the two hard rules, below)
+#   - the audit's OWN run of .github/scripts/validate-pr-body.sh, on the pull request's title and
+#     on the very bytes the ledger is parsed from -- the body is fetched once and both read that one
+#     copy -- exits 0; any other status is `body-policy-failed:<status>`. A green
+#     `upstroke-pr-policy` is not this: it judged the body the pull request carried when it ran,
+#     and a body edit does not move the head
 #
 # This script decides whether to merge, so every uncertainty resolves to NOT-READY. A read that
 # failed, a read that may be short, and a field the review did not record are each an uncertainty,
@@ -99,9 +112,10 @@
 # a review comment the audit could not fetch as `review-fetch-failed`, a parser that exited
 # non-zero as `review-parse-failed`, a parser result that did not arrive whole as
 # `review-parse-incomplete`, an unreadable timeline as `timeline-lookup-failed`, an unreadable
-# pull request as `pr-lookup-failed`, an unreadable pull-request body as `ledger-lookup-failed`
-# and one the parser refused or that did not arrive whole as `ledger-parse-failed` and
-# `ledger-parse-incomplete`, a review that records no reviewed commit as
+# pull request as `pr-lookup-failed`, an unreadable pull-request title as `title-lookup-failed`,
+# an unreadable pull-request body as `ledger-lookup-failed`, a body validator that is missing or
+# unreadable as `body-policy-failed:127`, a body the parser refused or that did not arrive whole
+# as `ledger-parse-failed` and `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
 # `finding-file-lookup-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
@@ -115,8 +129,9 @@
 # retargeted since its review enqueued. Every one of these channels now names its permissive
 # answer explicitly and blocks on everything else -- `timeline-answer-unreadable` for a retarget
 # answer that is neither `yes` nor `no`, `review-id-unreadable` for a comment id that is not a
-# number, a refusal for a ruleset state that is not two flags, and a refusal from `must_fix_for`
-# for a lane it does not know (an empty must-fix set makes every severity deferrable). The
+# number, a refusal for a ruleset state that is not two flags, a refusal from `must_fix_for`
+# for a lane it does not know (an empty must-fix set makes every severity deferrable), and
+# `may-accept-unanswered` when `may_accept_for` cannot answer for the lane. The
 # permissive answer has to be SAID; it is never the one everything else falls into.
 #
 # Reading "I could not look" as "there is nothing there" is precisely how a blocked pull request
@@ -176,17 +191,24 @@
 # reach the audit, and the deferring implementor's row asserts there is none (MAINTAINING step 5
 # binds them). A merge-in is checked on step 5's terms: git's own merge of its parents, the
 # branch diff byte-identical before and after, no gate edited by the pull request, and no branch
-# commit outside the ledger.
+# commit outside the ledger. Of the policy validators the `upstroke-pr-policy` check runs, the
+# audit runs validate-pr-body.sh and, as before, no other: validate-pr-ledger-evidence.sh and
+# validate-pr-branch.sh reach READY only through that check's conclusion. And it samples the
+# checks before it fetches the body, as before, so a body edited after the check ran is held to
+# validate-pr-body.sh by the audit's own run and to the other validators by nothing but a check run
+# that judged the body it replaced.
 #
-# The pure parts (the lane table, the parser call and the reader for its result, the frontmatter id
-# match, the newest-check-run choice) are functions, exercised by
-# .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing
+# The pure parts (the lane table, the parser call and the reader for its result, the body
+# validator's call, the frontmatter id match, the newest-check-run choice) are functions, exercised
+# by .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing
 # this file with PR_READY_AUDIT_LIBRARY=1 defines them, and `scripts/lane.sh`'s with them, without
 # running the audit.
 #
 # Needs: bash, git (a checkout with `origin` pointing at the repository), gh (its built-in --jq
-# does the API-side JSON work), and python3 or python, which now reads BOTH review forms and the
-# pull request's ledger; without a python nothing is judged and every pull request blocks.
+# does the API-side JSON work), python3 or python, which now reads BOTH review forms and the
+# pull request's ledger -- without a python nothing is judged and every pull request blocks -- and
+# .github/scripts/validate-pr-body.sh where this file's checkout keeps it, without which every pull
+# request blocks as `body-policy-failed:127`.
 
 set -euo pipefail
 
@@ -196,11 +218,11 @@ set -euo pipefail
 # a run from any directory finds them beside the audit rather than beside the caller.
 audit_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# `lane_for`, `lane_list`, `must_fix_for` and `effort_for`, from the one table. Sourced rather than
-# copied: the copy in this file, the copy in review-poller.sh and the copy in make-fix-brief.sh all
-# read `codex/` prefixes that the branch vocabulary does not contain, and all three disagreed. A
-# table that cannot be read is not a table with no lanes in it, so a failure here refuses the whole
-# run -- an audit with no severity to fix defers everything.
+# `lane_for`, `lane_list`, `must_fix_for`, `may_accept_for` and `effort_for`, from the one table.
+# Sourced rather than copied: the copy in this file, the copy in review-poller.sh and the copy in
+# make-fix-brief.sh all read `codex/` prefixes that the branch vocabulary does not contain, and all
+# three disagreed. A table that cannot be read is not a table with no lanes in it, so a failure here
+# refuses the whole run -- an audit with no severity to fix defers everything.
 if ! source "$audit_dir/lane.sh"; then
   echo "refusing: $audit_dir/lane.sh could not be sourced, so no pull request has a lane." >&2
   exit 2
@@ -269,11 +291,59 @@ read_parser_fields() {
   ((${#fields[@]} == head_count + per_record * 10#$count))
 }
 
+# ---- the body policy -----------------------------------------------------------------------------
+
+# run_body_validator TITLE FILE: run .github/scripts/validate-pr-body.sh -- the body validator the
+# `upstroke-pr-policy` check runs -- with TITLE as the pull request's title and FILE as its body, and
+# return the validator's exit status. 0 is the one answer that lets a pull request be READY; every
+# other status, whatever it means, is `body-policy-failed:<status>` at the caller.
+#
+# THE AUDIT RUNS IT ITSELF, ON THE BYTES IT PARSES, because the check's verdict is not about those
+# bytes. The checks are sampled before the body is fetched, and an edit to the body does not move
+# the head, so a green `upstroke-pr-policy` judged whatever body the pull request carried when it
+# ran. Three bodies the validator refuses and the ledger parser read whole -- a row whose guard
+# cell is `—`, an accepted P3 row beside the `None yet` row, and a filed P2's `deferred` followed by
+# U+00A0, which the parser's `str.strip()` removed and `[[:space:]]` under C keeps -- each read
+# READY at exit 0, on a ledger the policy had refused or never seen. The parser now trims only what
+# the validator trims and keeps the U+00A0; the first two it still reads whole. The caller hands this the one file it fetched
+# and handed the parser, so the body judged and the body read are the same bytes.
+#
+# `LC_ALL=C` so the answer is a function of the bytes and not of the caller's locale: the
+# validator's `trim` is `[[:space:]]` and its patterns are ranges, and both are the locale's to
+# define.
+#
+# A VALIDATOR THAT IS NOT THERE IS NOT A VALIDATOR THAT PASSED. Its path is settled from this file's
+# own location, as the parser's is, and a missing or unreadable file returns 127 here -- said, not
+# left to whatever `bash` makes of a path it cannot run. A body bash cannot open for the validator
+# is a redirection that failed: 1, with the validator never run, and it blocks the same way, since
+# no status but 0 lets anything through.
+run_body_validator() {
+  local validator="$audit_dir/../.github/scripts/validate-pr-body.sh"
+  [[ -f "$validator" && -r "$validator" ]] || return 127
+  LC_ALL=C "$BASH" "$validator" "$1" < "$2"
+}
+
 # frontmatter_has_id ID: reads a finding file on stdin and PRINTS `1` when its YAML frontmatter,
 # the block between the opening `---` on line 1 and the next `---`, carries the line `id: ID`
-# (README: the id lives in the frontmatter, not the name), and `0` when it does not. The same
+# (README: the id lives in the frontmatter, not the name) and no other `id:` line, `2` when it
+# carries `id: ID` beside another `id:` line, and `0` when it does not carry `id: ID`. The same
 # line in prose or a code block further down is not a frontmatter id. The id is a fixed string,
 # whole line.
+#
+# A LINE ENDS LF OR CRLF. One carriage return before the newline -- or at the very end of a last
+# line with no newline -- is the line ending and comes off before anything is compared, as
+# .github/scripts/changed-in-range.sh has it: a file authored on Windows opens `---\r`, which is not
+# `---`, and every such finding read as having no frontmatter at all, so as filing no id. A
+# carriage return anywhere else is part of the line, so `id: A\rB` is not the line `id: AB` and not
+# the line `id: A`.
+#
+# `2` IS NOT A KIND OF YES. One file per finding is the rule (findings/README.md), and a file
+# whose frontmatter names two ids is two findings in one file: counted as a file for each, two
+# accepted or deferred P3s read READY on one file between them, and the queue findings/ is held
+# one entry short. An `id:` line is one whose key is `id` -- the line begins `id`, then any
+# spaces or tabs, then `:` -- whatever follows, because the question is how many ids the block
+# names and not whether each is spelled as this match spells one: `id: A` beside `id:B` is still
+# two, though `B` is never the whole line `id: B`.
 #
 # THE ANSWER IS WHAT IT PRINTS AND THE STATUS IS ONLY EVER FAILURE, because the caller opens the
 # file and the caller's open can fail. `cmd < file` on a file bash cannot open returns 1 WITH THE
@@ -296,20 +366,42 @@ frontmatter_has_id() {
   # a whole-line string comparison, as `grep -xF` was: no character of the id means anything.
   #
   # `answered` guards the END block, which `exit` runs on its way out: without it the early exits
-  # would print their answer and then print it again.
+  # would print their answer and then print it again. `ids` counts the block's `id:` lines, the
+  # matching one included, so the answer is `2` exactly when this id is one of several. The class
+  # `[ \t]` is two named characters and not a range, so no locale decides what it holds.
   FRONTMATTER_ID="id: $1" awk '
+    { sub(/\r$/, "") }
     NR == 1     { if ($0 != "---") { print 0; answered = 1; exit 0 }   # no opening fence, no frontmatter
                   next }
-    $0 == "---" { print (found ? 1 : 0); answered = 1; exit 0 }        # the block ends here
+    $0 == "---" { print (found ? (ids > 1 ? 2 : 1) : 0); answered = 1; exit 0 }   # the block ends here
+    /^id[ \t]*:/ { ids++ }
     $0 == ENVIRON["FRONTMATTER_ID"] { found = 1 }
-    END         { if (!answered) print (found ? 1 : 0) }
+    END         { if (!answered) print (found ? (ids > 1 ? 2 : 1) : 0) }
   '
 }
 
 # finding_file_count ID TREEISH: how many files under the finding ledger in TREEISH carry `id: ID`
-# in their YAML frontmatter. A non-zero status means the listing, or one of the files it named,
-# could not be read -- which is not a count of zero. This rule wants exactly one file, so a read
-# that quietly does not count can turn two files into one as easily as one into none.
+# in their YAML frontmatter as its only `id:` line -- or `multi`, and no count, when any file
+# there carries `id: ID` beside another `id:` line. A non-zero status means the listing, or one of
+# the files it named, could not be read -- which is not a count of zero. This rule wants exactly
+# one file, so a read that quietly does not count can turn two files into one as easily as one
+# into none.
+#
+# WHAT ELSE A COUNTED FILE IS, all of it at once: a regular file -- mode `100644` or `100755` in
+# the tree, below -- under either ledger prefix, NAMED `*.md`, not one of the ledger's own two
+# documents, whose frontmatter carries the line `id: <ID>` WHOLE, a fixed string and nothing either
+# side of it but the line's LF or CRLF ending (`frontmatter_has_id` says how a line ends). This is
+# its own rule and not the branch policy's: a file .github/scripts/validate-pr-branch.sh accepts
+# and this does not count is no file for its id here, so a finding filed only in such a file
+# reads `no-file`.
+#
+# A FILE IS ONE FINDING, so a file naming two ids is not a file for either of them, and it is a
+# blocker for every id it names whichever ledger arm asks. Counted per id as it used to be, two
+# P3s filed in ONE file each counted 1: the `accepted-risk` arm and the `deferred` arm alike added
+# no blocker, and the audit read READY on one file for two open findings
+# (PR382-FILING-CARDINALITY-NOT-ENFORCED). `multi` is printed only once every candidate has been
+# read, so a file the read could not finish still refuses the count rather than being hidden
+# behind it.
 #
 # The candidates are the tree's own paths, from `git ls-tree`, and every one of them is read.
 # `git grep` cannot supply them: it answers with the files it managed to search, and a blob it
@@ -328,11 +420,15 @@ frontmatter_has_id() {
 # `validate-pr-branch.sh` against the same defect, from the same source: what git records, never
 # what a checkout materialised or what a name suggests.
 #
-# Each file then gets exactly one of three answers: it carries the id, it does not, or it could
-# not be read. `frontmatter_has_id` PRINTS the first two and keeps its status for the third, so
-# that a blob bash could not open for it -- a redirection that fails returns 1 without running
-# the command -- cannot answer in its place. Anything but a printed `0` or `1`, status included,
-# refuses the count rather than being folded into "no".
+# The directory's own README.md and PROCESS.md, by exact path under either prefix, are not
+# candidates at all: they are the ledger's documents and never a finding, whatever their
+# frontmatter says -- the exemption validate-pr-branch.sh grants them, and the same four paths.
+#
+# Each file then gets exactly one of four answers: it carries the id alone, it carries the id
+# among others, it does not, or it could not be read. `frontmatter_has_id` PRINTS the first three
+# and keeps its status for the fourth, so that a blob bash could not open for it -- a redirection
+# that fails returns 1 without running the command -- cannot answer in its place. Anything but a
+# printed `0`, `1` or `2`, status included, refuses the count rather than being folded into "no".
 #
 # A LIST THAT ENDED IS NOT A LIST THAT WAS READ, which is the same rule one level up. `read`
 # returns non-zero at end of input AND on a failed read, the loop below ends on either, and what
@@ -349,7 +445,7 @@ frontmatter_has_id() {
 # zero for every finding, on a tree that holds the file. The gate builds a small repository and
 # counts in it, because that is the mistake a shape rule does not catch.
 finding_file_count() {
-  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand answer complete=0
+  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 multi=0 entry cand answer complete=0
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
   # BOTH LEDGER PREFIXES, BECAUSE TREEISH IS THE CALLER'S REVISION AND NOT THIS CHECKOUT. The
@@ -376,6 +472,19 @@ finding_file_count() {
     case "${entry%% *}" in 100644|100755) ;; *) continue ;; esac
     cand="${entry#*$'\t'}"
     [[ "$cand" == *.md ]] || continue
+    # THE DIRECTORY'S OWN TWO DOCUMENTS ARE NOT FINDINGS, under either ledger prefix: README.md
+    # names and shapes the findings and PROCESS.md is the working process. Counted as candidates,
+    # `id: X` in findings/README.md's frontmatter was the one file filing X, and a P3 recorded
+    # `accepted-risk` read READY with no finding file for it at all
+    # (PR382-LEDGER-DOC-COUNTS-AS-FINDING). Exact path, exact case, as check_added_findings in
+    # .github/scripts/validate-pr-branch.sh exempts them: a lower-case readme, or the same name
+    # one directory down, is still a candidate. THE TWO LISTS MUST AGREE: a path only the
+    # validator exempts is a document that can file a finding here, and a path only this exempts
+    # is a file the validator holds to be a finding that is never counted as one.
+    case "$cand" in
+      findings/README.md|findings/PROCESS.md) continue ;;
+      reviews/findings/README.md|reviews/findings/PROCESS.md) continue ;;
+    esac
     if ! git show "$treeish:$cand" > "$blob_file" 2>/dev/null; then
       rm -f "$cand_file" "$blob_file"
       return 1
@@ -388,13 +497,14 @@ finding_file_count() {
     if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
     case "$answer" in
       1) n=$((n + 1)) ;;
+      2) multi=1 ;;                                      # this id among others: no file for it
       0) ;;                                              # read to the end and did not match
-      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # neither answer is not an answer
+      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # none of the answers is not an answer
     esac
   done < "$cand_file"
   ((complete)) || { rm -f "$cand_file" "$blob_file"; return 1; }
   rm -f "$cand_file" "$blob_file"
-  printf '%s' "$n"
+  if ((multi)); then printf 'multi'; else printf '%s' "$n"; fi
 }
 
 # audit_state MOVED: sets `state` from the `blockers` collected for this pull request and from how
@@ -880,7 +990,7 @@ audit_one() {
     printf '%-5s %-14s %-8s %-13s %s\n' "#$pr" "-" "-" NOT-READY "blockers=pr-lookup-failed"
     return 0
   fi
-  local lane must_fix state
+  local lane must_fix may_accept may_accept_status=0 state
   # A BRANCH OUTSIDE THE VOCABULARY HAS NO LANE, AND IS NOT GIVEN ONE. The catch-all this replaces
   # is the defect: it handed a prefix nobody had thought about the loosest fix set in silence.
   # `lane_for` refuses it and prints the table; this pull request is reported unaudited, and the
@@ -891,8 +1001,18 @@ audit_one() {
     return 0
   fi
   must_fix="$(must_fix_for "$lane")"
+  may_accept="$(may_accept_for "$lane")" || may_accept_status=$?
   blockers=()
   state=READY
+  # THE SEVERITIES THIS LANE MAY ACCEPT WITHOUT A MANUAL READ (owner, 2026-11-13) -- on a ledger
+  # row recording the review's severity and one finding file, not on the row alone -- and a lane it
+  # cannot answer for is not a lane that accepts nothing quietly: it is a blocker, so the pull
+  # request is NOT-READY and says why. The set is emptied as well, so no `accepted-risk` row below
+  # is read as accepted on an answer that never came.
+  if ((may_accept_status != 0)); then
+    blockers+=("may-accept-unanswered:$lane")
+    may_accept=""
+  fi
 
   [[ "$draft" == "true" ]] && blockers+=("draft")
   case "$merge_state" in
@@ -1110,29 +1230,79 @@ audit_one() {
   # not spill, and either `awk` dying all ended the run through `set -e` rather than through
   # anything that had decided what to do about it. What the audit does is stated here instead, and
   # the lookup itself is an expansion, so there is no command in it left to fail.
-  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition nfiles j k
-  ledger_id=(); ledger_disposition=()
+  #
+  # Three fields per row: its id, its severity and its disposition. The severity is the ROW'S, and
+  # it is read so an `accepted-risk` row is held to the severity the review gave: judged on the
+  # review's alone, a review P3 whose row recorded P2 and `accepted-risk` read READY, though a P2
+  # recorded so is the owner's call.
+  #
+  # AND THE SAME BYTES ARE JUDGED BY THE BODY POLICY, by the audit's own run of
+  # validate-pr-body.sh (`run_body_validator`). The body is fetched ONCE, into one file, and that
+  # file is what both read: the parser can read a body whole that the validator refuses, and the
+  # `upstroke-pr-policy` check sampled above judged whatever body the pull request carried when it
+  # ran, so neither the parse nor the check says the body passes the policy. Any status but 0 is
+  # `body-policy-failed:<status>`. The validator judges the title too, so the title is read here;
+  # a title that could not be read is `title-lookup-failed`, and the validator is not run on a
+  # title that was never read, since its refusal would then be the read's and not the body's.
+  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition row_severity nfiles j k
+  local title title_status=0 policy_status=0
+  ledger_id=(); ledger_severity=(); ledger_disposition=()
+  title="$(gh pr view "$pr" --repo "$repo" --json title --jq .title)" || title_status=$?
+  if ((title_status != 0)); then blockers+=("title-lookup-failed"); fi
   body_file="$(mktemp)"
   ledger_file="$(mktemp)"
   gh pr view "$pr" --repo "$repo" --json body --jq .body > "$body_file" || ledger_body_status=$?
   if ((ledger_body_status != 0)); then
     blockers+=("ledger-lookup-failed")
   else
+    # The validator's diagnostics go to stderr, beside the parser's: the table is stdout's.
+    if ((title_status == 0)); then
+      run_body_validator "$title" "$body_file" >&2 || policy_status=$?
+      if ((policy_status != 0)); then blockers+=("body-policy-failed:$policy_status"); fi
+    fi
     run_review_parser ledger "$body_file" "$ledger_file" || ledger_status=$?
     if ((ledger_status != 0)); then
       blockers+=("ledger-parse-failed:$ledger_status")
-    elif ! read_parser_fields "$ledger_file" ledger 2 2; then
+    elif ! read_parser_fields "$ledger_file" ledger 2 3; then
       blockers+=("ledger-parse-incomplete")
     else
-      for ((j = 2; j < ${#fields[@]}; j += 2)); do
+      for ((j = 2; j < ${#fields[@]}; j += 3)); do
         ledger_id+=("${fields[j]}")
-        ledger_disposition+=("${fields[j + 1]}")
+        ledger_severity+=("${fields[j + 1]}")
+        ledger_disposition+=("${fields[j + 2]}")
       done
     fi
   fi
   rm -f "$body_file" "$ledger_file"
 
-  local sev id wit unwitnessed_p3=0
+  local sev id wit unwitnessed_p3=0 repeated=()
+  # ONE ID IS ONE FINDING, IN THE REVIEW AS IN findings/. The parser hands the review's findings
+  # over as given, duplicates included, and everything below judges a finding against the ledger BY
+  # ITS ID -- so two distinct unwitnessed P3s sharing `DUP-P3` were both satisfied by the one
+  # `accepted-risk` (or `deferred`) row and the one file that id can have, and the pull request read
+  # READY with the second finding recorded nowhere (PR382-DUPLICATE-REVIEW-ID-REUSES-FILE). One row
+  # and one file cannot stand for two findings, and the audit cannot tell which of the two they
+  # were written for, so an id the review gives more than once is a blocker for that id, raised
+  # here, once, and the findings carrying it never reach the ledger lookup below.
+  #
+  # Decided here and not in the parser, whose payload is the review as written and is asserted as
+  # such: refusing the review there would be `review-parse-failed`, which names no id. An `ERR`
+  # finding's id is the parser's reason, not the review's id, and is blocked on its own below; `-` is
+  # no id at all, and each of those is a manual line of its own. Compared by expansion and whole, as
+  # the ledger lookup compares, so an id is repeated exactly when the lookup would answer both
+  # findings with one row.
+  for ((k = 0; k < ${#finding_sev[@]}; k++)); do repeated+=(0); done
+  for ((k = 0; k < ${#finding_sev[@]}; k++)); do
+    id="${finding_id[k]}"
+    if [[ "${finding_sev[k]}" == ERR || "$id" == "-" || "${repeated[k]}" == 1 ]]; then continue; fi
+    for ((j = k + 1; j < ${#finding_sev[@]}; j++)); do
+      if [[ "${finding_sev[j]}" != ERR && "${finding_id[j]}" == "$id" ]]; then
+        repeated[k]=1; repeated[j]=1
+      fi
+    done
+    if [[ "${repeated[k]}" == 1 ]]; then blockers+=("duplicate-review-id:$id"); fi
+  done
+
   for ((k = 0; k < ${#finding_sev[@]}; k++)); do
     sev="${finding_sev[k]}"; id="${finding_id[k]}"; wit="${finding_flags[k]}"
     [[ "$id" == "-" ]] && id=""   # "-" is how the parser says the finding recorded no id
@@ -1144,6 +1314,13 @@ audit_one() {
       continue
     fi
     # wit is a bit field from the parser: 1 = a witness field is present, 2 = a MUST deviation.
+    #
+    # THESE TWO RUN BEFORE THE LEDGER IS CONSULTED, AND `continue`, AND THAT ORDER IS WHAT KEEPS
+    # STEP 5'S TWO HARD RULES. A witnessed finding and a MUST deviation are fixed whatever their
+    # severity, so a witnessed or MUST P3 is blocked here and never reaches the `accepted-risk` arm
+    # below, where a P3 is otherwise accepted on its row and its one finding file. Moving the
+    # ledger lookup above these, or dropping a `continue`, lets that row accept what step 5 says is
+    # fixed.
     if (( wit & 2 )); then
       blockers+=("must-deviation:${id:-unnamed}")
       continue
@@ -1160,12 +1337,21 @@ audit_one() {
       blockers+=("manual:$sev-without-id")
       continue
     fi
-    # The first row with this id wins, as the `awk`'s `exit` made it win. Compared by expansion:
-    # a here-string bash could not spill left the previous finding's disposition in place, which
-    # is a deferred row standing in for a finding that has none.
-    disposition=""
+    # An id the review repeats is blocked above as `duplicate-review-id`, and no row is looked up
+    # for it: whichever finding the row was written for, the other has none, and a row answering
+    # both is the defect. Below the two hard rules and the must-fix set, so each of those still
+    # blocks a repeated finding in its own words.
+    if [[ "${repeated[k]}" == 1 ]]; then continue; fi
+    # The row with this id. There is at most one: the parser refuses a body with a second ledger
+    # heading or an id in two rows, and when it took the first of two a draft section's
+    # `accepted-risk` row stood in for the real ledger's. Compared by expansion: a here-string bash
+    # could not spill left the previous finding's disposition in place, which is a deferred row
+    # standing in for a finding that has none.
+    disposition=""; row_severity=""
     for ((j = 0; j < ${#ledger_id[@]}; j++)); do
-      if [[ "${ledger_id[j]}" == "$id" ]]; then disposition="${ledger_disposition[j]}"; break; fi
+      if [[ "${ledger_id[j]}" == "$id" ]]; then
+        disposition="${ledger_disposition[j]}"; row_severity="${ledger_severity[j]}"; break
+      fi
     done
     case "$disposition" in
       deferred)   # the lane rule: an allowed finding is filed and deferred, one file per finding
@@ -1176,9 +1362,40 @@ audit_one() {
         case "$nfiles" in
           1) ;;
           0) blockers+=("no-file:$id") ;;
+          multi) blockers+=("multi-id-file:$id") ;;   # a file naming this id and another is no file for either
           *) blockers+=("duplicate-file:$id") ;;
         esac ;;
-      rejected|accepted-risk) blockers+=("manual:disposition-$disposition:$id") ;;   # the owner's call, not the audit's
+      accepted-risk)
+        # A P3 ACCEPTED WITHOUT A MANUAL READ (owner, 2026-11-13), and on three conditions, every
+        # one of which must hold. Only an unwitnessed, non-MUST finding gets here at all: the two
+        # hard rules are applied above and `continue`, and that order is what keeps them.
+        #
+        #   - THE ROW RECORDS THE REVIEW'S SEVERITY. Tested on the review's severity alone, a
+        #     review P3 whose row said P2 read READY, though a P2 recorded as accepted-risk is the
+        #     owner's call. The row and the finding disagree, so this is NOT-READY, not MANUAL:
+        #     there is nothing for the owner to rule on until the row says what the review said.
+        #   - THAT SEVERITY IS ONE `may_accept_for` ANSWERS FOR THIS LANE. Any other severity
+        #     recorded as accepted-risk is still the owner's call, not the audit's.
+        #   - EXACTLY ONE FILE UNDER findings/ AT THE HEAD CARRIES THE ID, AND NO OTHER, by the same
+        #     count and with the same blockers as a deferred finding. An accepted finding is still
+        #     open, and findings/ is the whole of the outstanding work: the release and integration
+        #     re-triage reads it, and a finding the row alone recorded dropped out of that queue --
+        #     as did the second of two accepted P3s filed in one file between them.
+        if [[ "$row_severity" != "$sev" ]]; then
+          blockers+=("severity-mismatch:$id")
+        elif [[ " $may_accept " != *" $sev "* ]]; then
+          blockers+=("manual:disposition-$disposition:$id")
+        elif ! nfiles="$(finding_file_count "$id" "$head")"; then
+          blockers+=("finding-file-lookup-failed:$id")
+        else
+          case "$nfiles" in
+            1) ;;
+            0) blockers+=("no-file:$id") ;;
+            multi) blockers+=("multi-id-file:$id") ;;
+            *) blockers+=("duplicate-file:$id") ;;
+          esac
+        fi ;;
+      rejected) blockers+=("manual:disposition-$disposition:$id") ;;   # the owner's call, not the audit's
       fixed)
         [[ "$moved" == repairs || "$moved" == merge-edits:* ]] || blockers+=("fixed-but-head-unmoved:$id") ;;
       "") blockers+=("no-row:$id") ;;

@@ -37,7 +37,37 @@ aggregate settle green over a platform Clippy never examined.
 
 ## `pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";`
 
-The command that executes this file's fixtures, character for character.
+The command that executes this file's fixtures, character for character:
+the whole suite, with no selection. The guest's Windows job runs it so:
+line 4 of [`WINDOWS_TEST_WITNESS`] starts `cargo` as a process with this
+command's arguments and nothing else. The hosted legs each run it over a
+selection: the `test` job's as [`TEST_SHARD_COMMAND`], and the hosted twin's
+on line 4 of [`WINDOWS_SHARD_WITNESS`].
+
+## `pub(super) const TEST_SHARD_COMMAND: &str =`
+
+The `test` job's suite step, character for character: [`TEST_COMMAND`], then
+` -- ${{ matrix.tests }}`. The expression is text here, as it is in
+`ci.yml`; GitHub replaces it with the leg's `tests:` value from the job's
+matrix ([`TEST_LEGS`]) before bash reads the line. What follows `--` goes to
+libtest in every harness `--all-targets` builds.
+
+- On the Linux leg the value is the empty string. The line ends at `--`,
+  libtest is handed nothing, and the leg runs the whole suite, as it did
+  when the step was [`TEST_COMMAND`] alone.
+- On a macOS leg it is the shard's filter, if it has one, and a `--skip` for
+  each filter of the legs before it. Without the selection each of the three
+  runs the whole suite.
+
+One step for every leg, so nothing in it varies by leg except through that
+expression and the case-fold map's ([`TEST_STEP_ENV`]); what the expression
+evaluates to is the matrix check's to hold. The oracle recognises the suite
+step by this text, and
+`the_workflow_that_runs_these_tests_installs_the_compiler_they_need` holds
+it to [`TEST_COMMAND`] with the selection appended and nothing else, so the
+two constants cannot drift apart with each pin holding. Measured,
+`MUT-CI-CARGO-TEST-STEP-DELETED`, `MUT-TEST-SHARD-SELECTION-DROPPED` and
+`MUT-TEST-FILTER-HARDCODED`.
 
 ## `pub(super) const WINDOWS_BUILD_WITNESS: &str = "cargo build --all-targets --all-features";`
 
@@ -81,24 +111,35 @@ Measured, `MUT-TEST-WINDOWS-RUN-RETARGETED` and `MUT-TEST-RUN-RETARGETED`.
 
 ## `pub(super) const TEST_SCRIPTS: [&str; 4] = [`
 
-Every script the hosted test job may run: the identity script, the suite,
+Every script the hosted test job may run: the identity script, the suite
+over the leg's selection ([`TEST_SHARD_COMMAND`]),
 [`HOST_ACCEPTANCE_CAPTURE`] and [`CAPABILITY_OBSERVATION`]. Each is one exact
 string; the list grows by one pinned script at a time, and nothing in it is a
 pattern.
 
 ## `pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [`
 
-The scripts the Windows test leg runs: the identity script, the suite
-with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`] and
-[`CAPABILITY_WINDOWS_OBSERVATION`].
+The scripts the guest's Windows suite job runs: the identity script, the
+suite with the witness that it executed, [`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]
+and [`CAPABILITY_WINDOWS_OBSERVATION`].
 
-Both Windows suite jobs run this one list, the guest's and its hosted twin
-[`TEST_WINDOWS_HOSTED_JOB`]'s. The twin's suite step is the guest's, compiler
-questions included, because the twin installs the guest's compiler
-([`GOLDEN_IMAGE_TOOLCHAIN`]). The two acceptance-record steps carry over
+Until the hosted twin ran the suite in shards both Windows suite jobs ran
+this one list. The twin's is now [`TEST_WINDOWS_HOSTED_SCRIPTS`], which
+differs in its suite step alone.
+
+## `pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [`
+
+The scripts every leg of the hosted twin [`TEST_WINDOWS_HOSTED_JOB`] runs:
+[`TEST_WINDOWS_SCRIPTS`] with [`WINDOWS_SHARD_WITNESS`] in the suite's place.
+
+The other three are the guest's own constants, not copies. The identity
+script is the same on any runner. The two acceptance-record steps carry over
 because neither depends on the guest's image: each runs the test it names
 and checks the frame it prints, and every container capability class
-passes, an absent Docker included.
+passes, an absent Docker included. Each of the five legs runs both, after
+its own share of the suite, so a run sent to the twin prints five host
+acceptance records and five capability observations where the guest prints
+one of each.
 
 ## `pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;`
 
@@ -114,8 +155,9 @@ is a deliberate act, and it edits this number in the same change.
 ## `pub(super) const WINDOWS_TEST_WITNESS: &str`
 
 The Windows leg's suite step, character for character: a refusal to run on
-any compiler but the image's, then the pinned test command, its exit
-status, and a count of what libtest reported.
+any compiler but the image's, then the pinned test command started as a
+process and waited on, its output read from files, the test processes it
+left running, its exit status, and a count of what libtest reported.
 
 The compiler check comes first because nothing else in the job makes the
 claim: no step installs a compiler, so the one that runs is whatever the
@@ -196,23 +238,209 @@ check, and this is the leg saying that it ran what it claims to have run.
 Measured, `MUT-WINDOWS-WITNESS-FLOOR-DROPPED` and
 `MUT-WINDOWS-WITNESS-COUNT-DROPPED`.
 
-The same step runs on the hosted twin, character for character. There a
-step does install the compiler -- the image's version, at step 1 -- and the
-three questions are what make that install the claim rather than a hope:
-the toolchain action tolerates a failed `rustup default` and verifies only
-`rustc +1.97.1`, so it can report success while bare `cargo` is still the
-runner's preinstalled stable. The count carries over for the reason it
-exists on the guest: the twin's machine is GitHub's, not the build box, but
-a Cargo target runner or a `[workspace]` selection reaches it the same way.
-Measured on the twin, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
-`MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED` and
-`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`.
+Between the compiler check and the count is the suite itself, lines 3 to 8,
+started as a process and waited on:
+
+3. Two paths in `RUNNER_TEMP`, one for each of Cargo's streams.
+4. `Start-Process` starts `cargo` with [`TEST_COMMAND`]'s arguments, its
+   streams sent to those files, and hands back the process (`-PassThru`).
+   `$null = $suite.Handle` has the process object open its handle while
+   Cargo runs, without which `ExitCode` can read empty once the process has
+   ended. `WaitForExit()` returns when Cargo's own process ends, and `$code`
+   keeps its exit. There is no `-Wait`, which waits for the process's
+   descendants as well.
+5. One `try` block, which reads and then lists. It prints the two files
+   and keeps standard output as `$log` for the count; the job log carries
+   the suite's output once Cargo has ended, not as it runs. It then lists
+   every process named `upstroke*` that is still running, with its command
+   line, and asks Windows to stop each one; the test harnesses are
+   `upstroke-<hash>.exe`. `Stop-Process` is given
+   `-ErrorAction SilentlyContinue` and nothing checks that the process
+   stopped, so the stop is attempted, not ensured. The listing names a
+   process, not the test that started it. A process left running under
+   another name is neither listed nor asked to stop.
+6. The `catch` for line 5. GitHub runs a `pwsh` step with
+   `$ErrorActionPreference = 'stop'`, so a failed read or a failed listing
+   ends line 5 where it fails. Where Cargo's exit was not zero, the `catch`
+   prints that failure and the script goes on to line 7, so the failure
+   cannot replace Cargo's exit code. Where Cargo exited zero, it throws the
+   failure again and the step fails: nothing was read or listed, so nothing
+   can be counted.
+7. Cargo's exit, where it is not zero. The line rests on line 4 having kept
+   one, as line 6's test does: PowerShell compares an empty value as not
+   equal to zero, and `exit` given nothing exits zero, before the count.
+8. A throw where line 5 listed anything.
+
+What is said here of `Handle`, `ExitCode`, `-Wait`, `exit`, `try` and
+`catch` was not executed where it was written: no PowerShell runs on the
+build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]). The step's first run on
+each home is the evidence for it.
+
+Before this the suite was a pipeline: line 3 was [`TEST_COMMAND`] piped into
+`Tee-Object -Variable log`, and line 4 read `$LASTEXITCODE`. Twice a hosted
+shard running that text reported its tests and did not end:
+
+- run 43719719561, 2026-11-15: the 1,669 s shard printed every
+  `test result: ok` line 31.6 minutes into its job and ran to the job's
+  limit, where the runner's clean-up killed a test process left over;
+- run 44277078005, 2026-11-18: `test (windows-latest, 3 of 5)`, job
+  134707868382, printed `test result: ok. 700 passed; 0 failed` at 09:50:41
+  and ran until its 40-minute limit cancelled it, and the job's clean-up
+  killed an orphaned test binary, `upstroke-8ddcc7d640fdf222`.
+
+That is what was observed: the passing result line, the hang, and a test
+binary killed at clean-up. The cause is inferred from it, and from Rust's
+`Command`, which on Windows hands a child the handles its parent holds as
+inheritable: a test process that outlived the suite held the pipe
+`Tee-Object` reads, so the pipeline never reached its end. Which test
+leaves the process is not established, and neither run was the guest's. The
+step is written against the inference. Waiting on Cargo's process does not
+depend on what that process left running, and nothing the script reads is a
+pipe a survivor can hold open; whether a leg that leaves a process now ends
+is the evidence of the next run in which one does.
+
+What is left running is the step's to report, where it was the runner's to
+kill at clean-up. Line 5 runs after a failed suite as after a passed one, so
+the processes are listed, and Windows is asked to stop them, either way.
+Line 6 keeps a failure in line 5 from replacing Cargo's exit code, line 7
+gives Cargo's failure that code, and line 8 fails a suite that passed and
+left a process: the job that ran the test names the process's command line,
+not the test. If the inference is wrong and Cargo itself does not end, line
+5 is never reached, and the job's limit still ends the leg.
+`the_windows_leg_counts_the_tests_it_ran` holds the script to line 4 as
+[`TEST_COMMAND`]'s arguments make it, and to six things about the process
+it starts: that it waits with `WaitForExit()` and not `-Wait`, pipes nothing
+into `Tee-Object`, exits with Cargo's code before it counts, lists the
+processes before that exit and throws for them after it, opens with lines 1
+and 2 whole and holds `cargo` after them once, on the line that starts the
+process, and reads and lists inside the `try` whose `catch` keeps Cargo's
+code. The six are `windows_suite_wait_complaints` in the test notes.
+Measured in the oracle, each an edit to the workflow that leaves this text
+alone: `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN`, line 4 a pipeline into
+`Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`, line 8 removed.
+Measured against this text itself, each an edit a pin cannot refuse because
+the workflow and the constant move together: the suite run a second time,
+and the `try` and its `catch` removed
+(`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit` in the
+test notes).
+
+The fifth of the six is the one that refuses a second run of the suite, and
+it reads this text's letters. It is drawn unless all of these hold:
+
+1. Line 1 is the compiler-questions line, whole.
+2. Line 2 is their refusal, whole, built from [`GOLDEN_IMAGE_TOOLCHAIN`]
+   with its dots escaped as line 2 writes them.
+3. Each later line holds `cargo`, in any letter case, once if it holds
+   `Start-Process` and never otherwise. The words
+   `Cargo compiled the harnesses`, in line 10's message, are set aside
+   before the count.
+4. `Start-Process` occurs once.
+
+Before `PR389-INDIRECT-SECOND-SUITE-RUN-UNREFUSED` the count skipped every
+`cargo` that followed `$` or `^`, on any line. Round two's frontier pass
+over #389 appended
+`& (($cargo -split ' ')[0]) test --all-targets --all-features` after line
+10, here and in `ci.yml` together, and every `effects::` test passed over a
+script that runs the suite twice. No `cargo` after line 2 is skipped now,
+whatever precedes it.
+
+The rule is for an edit made in good faith, a second run a change leaves in
+by mistake. It reads letters and parses nothing, so a second run the text
+never spells still passes it:
+`& ('car' + 'go') test --all-targets --all-features`, appended here and in
+`ci.yml` together. That is read from the text, not run, and it is filed as
+`PR389-UNSPELLED-SECOND-SUITE-RUN-UNREFUSED`, deferred. An edit to this
+constant or to the workflow is the owner's to read. The rule does not bound
+one, as no pin here bounds a hostile candidate (above).
+
+The hosted twin ran this step too, character for character, until it ran
+the suite in shards. Its legs now run [`WINDOWS_SHARD_WITNESS`], which keeps
+eight of these ten lines and changes two.
+
+## `pub(super) const WINDOWS_SHARD_WITNESS: &str`
+
+The suite step of every leg of the hosted twin, character for character:
+[`WINDOWS_TEST_WITNESS`] with the leg's shard on the cargo line, the leg's
+floor in the count's test, and an eleventh line that prints the count. The
+three `matrix` expressions are text here, as they are in `ci.yml`; GitHub
+replaces each with the leg's value from the table
+[`TEST_WINDOWS_HOSTED_JOB`]'s matrix carries before PowerShell reads the
+script.
+
+Line by line, against the guest's:
+
+1. The three compiler questions. The guest's line.
+2. The refusal of any compiler but [`GOLDEN_IMAGE_TOOLCHAIN`]'s. The guest's
+   line. On the twin a step does install the compiler -- the image's
+   version, at step 1 -- and the questions are what make that install the
+   claim rather than a hope: the toolchain action tolerates a failed `rustup
+   default` and verifies only `rustc +1.97.1`, so it can report success
+   while bare `cargo` is still the runner's preinstalled stable.
+3. The two files Cargo's streams go to. The guest's line.
+4. The guest's line with ` -- ${{ matrix.tests }}` after [`TEST_COMMAND`]'s
+   arguments, inside the one quoted argument list: `cargo` started as a
+   process, waited on, its exit kept. What follows `--` goes to libtest in
+   every harness `--all-targets` builds: the leg's filter, if it has one,
+   and a `--skip` for each filter of the legs before it. Without the
+   selection every leg runs the whole suite.
+5. The `try` block: the two files, printed, with standard output kept for
+   the count, and the `upstroke*` processes still running, listed, with
+   Windows asked to stop each. The guest's line.
+6. The `catch` that keeps a failure in line 5 from replacing Cargo's exit
+   code. The guest's line.
+7. Cargo's exit, where it is not zero. The guest's line.
+8. The throw where a process was left running. The guest's line.
+9. The sum of every `test result: ok.` line's passed count. The guest's
+   line.
+10. The refusal of a sum below `${{ matrix.floor }}`, where the guest's line
+    names [`WINDOWS_TEST_FLOOR`]. The message names the shard and its floor.
+11. The sum, the shard and the floor, printed. A leg that passes then says
+    in its log how far above its floor it ran, which is what a later change
+    to a floor is measured from; the guest's step prints the sum only when
+    it refuses.
+
+Lines 3 to 8 are why a leg waits on Cargo's process and reads files, and
+what it does about a test process left running: the two runs in which a
+shard reported its tests and did not end, 43719719561 and 44277078005, were
+both this job's, and what was observed in them and what is inferred from it
+is under [`WINDOWS_TEST_WITNESS`].
+
+The floor is not in this text. It reaches the script from the matrix, so
+the equality over the script holds that line 10 reads `matrix.floor` and
+the oracle's check of the matrix holds what each leg's floor is
+([`WINDOWS_SHARD_FLOORS`]); a lowered floor in the table leaves this pin
+intact and is refused there. The same division holds the selection: this
+text says line 4 reads `matrix.tests`, and the matrix check says what each
+leg's is ([`WINDOWS_SHARD_FILTERS`]).
+
+`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
+holds lines 1 to 3 and 5 to 9 to the guest's lines, line 4 to the guest's
+with only the selection added, and line 10 to the matrix's floor; and it
+holds this text to the six things the guest's is held to about the process
+it starts. The count
+carries over for the reason it exists on the guest: the twin's machines are
+GitHub's, not the build box, but a Cargo target runner or a `[workspace]`
+selection reaches them the same way. A shard's floor also refuses what the
+whole suite's cannot see, a leg whose filter matched almost nothing.
+Measured, `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`,
+`MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` and
+`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED`.
+
+No PowerShell runs on the build box ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]),
+so this text was not executed where it was written. Its execution is the
+twin's evidence, on the first run sent there.
 
 ## `pub(super) const HOST_ACCEPTANCE_CAPTURE: &str = r#"set -o pipefail`
 
 The hosted `test` job's capture of the native HOST acceptance record (G7,
-root direction `087fea89`), character for character. It runs on both legs in
-GitHub's default `bash -e` and must stand immediately after the suite step.
+root direction `087fea89`), character for character. It runs on every leg in
+GitHub's default `bash -e` and must stand immediately after the suite step;
+each of the three macOS legs runs it after its own share of the suite, so a
+run prints three macOS records where it printed one.
 Line by line:
 
 1. `set -o pipefail`. Under `bash -e` a pipeline takes its status from its
@@ -252,12 +480,13 @@ Measured in the oracle: `MUT-TEST-CAPTURE-STEP-DELETED`,
 ## `pub(super) const HOST_ACCEPTANCE_WINDOWS_CAPTURE: &str = r#"cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture`
 
 The same capture on the guest, under the job's PowerShell, character for
-character, and on the hosted twin when the picker sends the run there. It
-stands immediately after the suite-and-witness step, so it runs the harness
-that step built on the compiler that step asserted.
+character, and on every leg of the hosted twin when the picker sends the run
+there. It stands immediately after the suite-and-witness step, so it runs
+the harness that step built on the compiler that step asserted.
 
-- `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`, as in
-  [`WINDOWS_TEST_WITNESS`].
+- `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`. The suite step
+  read Cargo's exit the same way until it stopped piping Cargo
+  ([`WINDOWS_TEST_WITNESS`]); this step runs one test and still pipes.
 - `-ccontains` requires the named test's pass line and `-cmatch` requires
   `1 passed; 0 failed; 0 ignored`.
 - The framed lines, split on single spaces, must be BEGIN first and END last
@@ -281,8 +510,9 @@ and not a local one. Measured in the oracle:
 
 The hosted `test` job's container capability observation (G7, root direction
 `ecf15a9c`, contract version 2 under its root audit 2), character for
-character. It runs on both legs in GitHub's default `bash -e` and must stand
-immediately after [`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
+character. It runs on every leg in GitHub's default `bash -e`, the three
+macOS legs each, and must stand immediately after
+[`HOST_ACCEPTANCE_CAPTURE`]. Line by line:
 
 1. `set -eo pipefail`. Under `bash -e` a pipeline takes its status from `tee`;
    with `pipefail` it takes Cargo's. It is spelled with `-e` because the bare
@@ -434,7 +664,8 @@ action at a pinned commit with an allowlisted input name. Measured,
 The job that runs those fixtures for the one platform whose test execution
 is not in the `test` matrix, on the curated guest, on every lane -- unless
 the run's `pick-windows-home` answers `hosted`, when this job is skipped and
-[`TEST_WINDOWS_HOSTED_JOB`] runs the same suite on `windows-latest`.
+[`TEST_WINDOWS_HOSTED_JOB`] runs the same suite on `windows-latest`, in five
+shards.
 
 The Windows suite is spawn- and worktree-heavy, and on `windows-latest` it
 was the whole CI wall clock: a median of 12.5 minutes and a tail of 21 on
@@ -459,17 +690,21 @@ other build, not the retired second one -- as a scheduling repair that
 names no cause for the hosted runs and repairs no test. One guest serves
 every lane, so a queue entry waits for it behind whatever build holds it --
 unless the operator has set `WINGUEST_BUSY`, or has set a
-`WINGUEST_QUEUE_LIMIT` the guest's queue has reached, when the run goes to
-[`TEST_WINDOWS_HOSTED_JOB`] instead. Neither is set by default. A run
+`WINGUEST_QUEUE_LIMIT` the guest's queue has reached, or the run is a pull
+request's and the owner has set `WINGUEST_PR_HOSTED`, when the run goes to
+[`TEST_WINDOWS_HOSTED_JOB`] instead. None of the three is set by default. A run
 the guest takes runs its commit on the guest, and says no more than that:
 the picker answers for each run on its own, so taking the guest for one run
 says nothing about where the earlier runs of the same change ran. With
-neither variable set every run of a change is on the guest, and a test whose
+none of the three set every run of a change is on the guest, and a test whose
 outcome depends on the machine is not seen first by the push to master. With
-either set, a pull request and its queue entry can both pass on the twin and
+`WINGUEST_BUSY` or a limit set, a pull request and its queue entry can both
+pass on the twin and
 the push to master be the change's first run on the guest, where such a test
 is then first seen; `WINGUEST_BUSY` cleared between the queue entry and the
-push is enough. That is why `MAINTAINING.md` step 3 asks for a Windows-only
+push is enough. With `WINGUEST_PR_HOSTED` alone set, a change's pull-request
+runs are on the twin and its queue entry is its first run on the guest.
+That is why `MAINTAINING.md` step 3 asks for a Windows-only
 failure to be run on the other home before it is believed. The second review
 of #375 found this paragraph, and the workflow's comment above
 `test-windows`, still naming the guest as the machine "every pull request
@@ -503,8 +738,9 @@ job is now refused outright, since at this very version it would pass the
 witness while the workflow, not the image, chose the compiler.
 
 The hosted twin, [`TEST_WINDOWS_HOSTED_JOB`], has no image to carry a
-compiler, so it installs this version, exactly, and runs the guest's
-[`WINDOWS_TEST_WITNESS`], whose questions assert it. It first installed
+compiler, so it installs this version, exactly, and runs
+[`WINDOWS_SHARD_WITNESS`], whose compiler questions are the guest's and
+assert it. It first installed
 `stable`; the first review of #375 found that the split the hosted queue
 lane's pin had removed, and the operator pinned the twin to the guest's
 compiler on 2026-11-12. A twin on `stable` runs the suite on a compiler the
@@ -549,26 +785,57 @@ answer is `guest`. Measured, `MUT-TEST-WINDOWS-TIMEOUT-RAISED`,
 
 ## `pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";`
 
-The Windows suite's hosted twin: `test (windows-latest)` on GitHub's
+The Windows suite's hosted twin, a matrix of five legs on GitHub's
 `windows-latest`, needing `pick-windows-home` and running only when its
-answer is `hosted`. It installs [`GOLDEN_IMAGE_TOOLCHAIN`] with `clippy` at
-step 1 and then runs the guest's [`TEST_WINDOWS_SCRIPTS`], so the two homes
-run one suite, on one compiler, against one floor. The two conditions
-compare the one answer with its two values, so exactly one of the two jobs
-runs on any run whose picker succeeded;
+answer is `hosted`. Each leg installs [`GOLDEN_IMAGE_TOOLCHAIN`] with
+`clippy` at step 1 and then runs [`TEST_WINDOWS_HOSTED_SCRIPTS`]: one shard
+of the guest's suite, on the guest's compiler, against that shard's share of
+the guest's floor. The two conditions compare the one answer with its two
+values, so exactly one of the two jobs runs on any run whose picker
+succeeded;
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`
-holds the install to the version the suite step asserts, and the conditions
-to that shape.
+holds the install to the version the suite step asserts, the conditions to
+that shape, and the legs' suite step to the guest's.
 
-55 minutes: the ceiling the hosted Windows suite last ran under. The job
-inherits that suite's record -- 21 to 28 minutes a job in September 2026,
-and merge-queue entries cancelled at 45 and then 55 minutes in October with
-the cause unknown ([`TEST_WINDOWS_JOB`]). Sharding the suite, as draft pull
-request #339 proposed, is not done. Measured,
-`MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
+The name is `test (windows-latest, ${{ matrix.shard }})`, an expression, and
+the constant holds it as the workflow writes it. GitHub lists each leg under
+the name with its shard in place, `test (windows-latest, 1 of 5)` to
+`test (windows-latest, 5 of 5)`, and those are the names another run's
+picker is handed; it reads none of them
+([`PICK_WINDOWS_HOME_SCRIPT`] selects the guest's job and the picker).
+
+Five legs, because the suite as one job stopped fitting. Measured on
+2026-11-15, run 43719719561, on `windows-latest` with four processors: the
+whole suite took 3,311 to 4,292 s in the harness, 59 to 76 minutes a job,
+past the 55 minutes this job then ran under. Four shards by test name took
+692 to 1,669 s and ran 193 + 776 + 320 + 2,218 = 3,507 tests, the whole
+suite's count; the slowest leg that ended took 22m 53s. The 1,669 s shard,
+the rest of `engine::topology::`, is divided in two, which makes the five of
+[`WINDOWS_SHARD_FILTERS`]. Draft pull request #339 had proposed sharding
+the suite.
+
+The aggregate is unchanged by the matrix. `needs.<job>.result` for a matrix
+job is `success` only when every leg succeeded, and the aggregate already
+read the `test` and `msrv` matrices through one result each; so its rule,
+exactly one of the two Windows suite jobs succeeded and the other was
+skipped, now means the guest's job or all five shards. `fail-fast` is
+`false`, so a failed leg does not cancel the others before they report.
+
+40 minutes a leg: 1.75 times the slowest measured leg, and inside the merge
+queue's 60. In that run the 1,669 s shard printed every `test result: ok`
+line 31.6 minutes into its job and did not end. It ran to the job's limit,
+where the runner's clean-up killed a test process left over; that the
+process held the step's output until then is inferred, not seen. The limit
+bounds the hang and does not repair it. It happened again on
+2026-11-18, in run 44277078005, and the suite step now waits on Cargo's
+process where it piped Cargo; what the two runs showed, and what is inferred
+from it, is under [`WINDOWS_TEST_WITNESS`]. The September and October
+record of the hosted suite as one job is under [`TEST_WINDOWS_JOB`].
+Measured, `MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
 `MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED` and
-`MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`.
+`MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`; the matrix's own rows are under
+`windows_shard_matrix_complaints` in the workflow notes.
 
 ## `pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";`
 
@@ -577,13 +844,159 @@ restores caches from its own ref or the default branch. A merge-queue
 entry's ref is a fresh `gh-readonly-queue/` branch, and `master` saves a
 twin cache only on a push the picker itself sent to the twin, which with
 routing opt-in is rare; so nearly every twin run would start cold and then
-upload, inside its 55 minutes, a cache nothing later reads, spending the
+upload, inside its 40 minutes, a cache nothing later reads, spending the
 repository's cache space. That was the hosted merge-queue lane's reason for
 carrying none before `d3434ace`. The twin first carried one, "like the other
 hosted jobs", which the first review of #375 found did not answer that
 reason; the operator removed it on 2026-11-12. A pull request sent to the
 twin twice is the one run that would have gained. Measured,
 `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
+
+## `pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [`
+
+The ordered filters that divide the Windows suite into five shards, as data:
+the list the hosted twin's matrix is held to
+([`TEST_WINDOWS_HOSTED_JOB`]). The table came first, with the proof that it
+loses no test and repeats none, and the matrix is derived from it rather
+than written beside it: `windows_shard_matrix_complaints` in
+`super::workflow` requires each leg's `tests:` in `ci.yml` to be the string
+`shard_selections` makes of this list for that shard, in order. The five
+strings are written out in one test of the oracle, the one named below. The
+second is written out once more, in the anchor of the ledger row that
+deletes that leg, `MUT-TEST-WINDOWS-HOSTED-SHARD-DROPPED`; the other rows
+are under `windows_shard_matrix_complaints` in the workflow notes.
+
+The rule is `shard_selections`' in `super::workflow`. Shard `k` runs the tests
+whose names contain filter `k` and none of the filters before it, and one
+more shard, after the last filter's, runs the tests that contain none of
+them. Four filters make five shards:
+
+1. `engine::topology::coordinator::tests::a`: everything in the
+   coordinator's `tests` module whose name begins with `a`;
+2. the rest of `engine::topology::coordinator::`;
+3. the rest of `engine::topology::`;
+4. the rest of `engine::`;
+5. everything else, the bin harness's tests among them.
+
+The order is part of the rule. libtest's filter is a substring of a test's
+whole path, not a prefix and not a module, and each filter here contains the
+one after it, so the narrowest comes first: placed after a wider one it would
+find every test it names already skipped, and its shard would select nothing.
+For the same reason a name that only contains `engine::` -- a module called
+`engine` anywhere else in the tree -- runs in shard 4, which is still exactly
+one shard. `the_shard_tables_run_every_test_in_exactly_one_shard` holds the
+five derived argument strings to literals, places eight names of those kinds
+in the shard each belongs to, and holds every filter to one word that libtest
+reads as a filter, none of them twice.
+
+## `pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];`
+
+The count each Windows shard must report before it may succeed, in shard
+order: [`WINDOWS_TEST_FLOOR`] divided among the five. Each is its leg's
+`floor:` in the twin's matrix, an integer the oracle holds to this list, and
+the number line 10 of [`WINDOWS_SHARD_WITNESS`] tests the leg's count against.
+
+They sum to that floor, 1700, and
+`the_shard_tables_run_every_test_in_exactly_one_shard` holds the sum, one
+entry for each shard, and every entry above zero. The hosted shards together
+must not accept fewer passing tests than the guest's one job does; and a
+shard whose floor is zero passes having executed nothing, which is the
+arrival the count exists to refuse ([`WINDOWS_TEST_WITNESS`]). That test
+holds this list; the oracle holds each leg's `floor:` in `ci.yml` to it.
+Measured, `MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-LOWERED` and
+`MUT-TEST-WINDOWS-HOSTED-SHARD-FLOOR-ZEROED`.
+
+Each floor is about half of its shard's passing count as the sharding
+measurement gives it: 193, 59, 684, 304 and 2,188. Those are 3,428 together,
+the guest's count for the whole suite, of which its 1700 is about half in the
+same way. The last two are counted as the witness counts them, child-harness
+result lines included. Shards 2 and 3 divide the measurement's second shard,
+whose 776 tests took 1,669 s; their two counts come from the per-test lines of
+a whole-suite control in the same run.
+
+## `pub(super) const MACOS_SHARD_FILTERS: [&str; 2] = ["engine::topology::", "engine::"];`
+
+The same kind of list for the macOS suite, under the same rule: two filters,
+three shards -- `engine::topology::`, the rest of `engine::`, and everything
+else. The `test` job's three macOS legs are derived from it, through
+[`TEST_LEGS`]; until the macOS suite was divided nothing in `ci.yml` read
+it, and the suite was one leg of the `test` matrix.
+`the_shard_tables_run_every_test_in_exactly_one_shard` holds its three
+derived argument strings to literals and places the same eight names, and
+holds its filters to the same shape.
+
+The table has no floors beside it, where the Windows one has
+[`WINDOWS_SHARD_FLOORS`]. The `test` job's legs held no count of passing
+tests before the shards and gained none with them. A filter here that
+matches no test only moves tests to a later leg; none stops running.
+
+## `pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";`
+
+The `test` job's `name:`, an expression, held as the workflow writes it.
+GitHub lists each leg under the name with its `leg:` in place:
+`test (ubuntu-latest)`, and `test (macos-latest, 1 of 3)` to
+`test (macos-latest, 3 of 3)`. The Linux leg's is the name it had while the
+name read `matrix.os`; under that expression the three macOS legs would
+share one name, and a red one would not say which shard's tests failed.
+
+No check reads these names. Branch protection requires the aggregate's
+context alone ([`REQUIRED_CONTEXT`]), and the picker selects the guest's job
+and the pickers by theirs ([`PICK_WINDOWS_HOME_SCRIPT`]); its fixtures in
+`super` list a `test (ubuntu-latest)` among another run's jobs as one it
+passes over. Code `test-job-name`. Measured,
+`MUT-TEST-LEGS-NAMED-BY-RUNNER`.
+
+## `pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;`
+
+The `test` job's limit: 30 minutes for every leg, on every lane, and an
+integer in `ci.yml`.
+
+While the macOS suite ran whole the limit was an expression, 45 minutes on
+the macOS leg and 30 on ubuntu. In two merge-queue entries of one head on
+2026-10-29, runs 40834103792 and 40838006947, `test (macos-latest)` exceeded
+the 30 minutes it then had and was cancelled; the second job log contains
+every closing test summary, each ok, and printed summaries are not a
+successful exit. The 45 minutes named no cause for either cancellation and
+repaired no test. Under them `test (macos-latest)` was the slowest job of
+every run that does not wait for the guest: 32m 23s of run 43705001427's
+32m 32s on 2026-11-15, the harness 1,777 s for 3,888 tests on three
+processors, 72% of that limit.
+
+The three shards of [`MACOS_SHARD_FILTERS`] ran on macOS in draft pull
+request #339 on 2026-10-18, run 39146387106: 10m 13s, 12m 10s and 12m 17s a
+leg. The whole leg has taken 27 to 37 minutes since. No shard was timed at
+the suite the shards landed on; the CI run of the pull request that landed
+them is that measurement. 30 minutes is about twice the slowest shard
+expected, and the limit the Linux leg already had. Code `test-job-timeout`.
+Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`.
+
+## `pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [`
+
+The `test` job's legs, as data: each runner that hosts its platform's tests
+there, with the ordered filters that divide its suite. `ubuntu-latest` has
+none and runs the suite whole, as one leg. `macos-latest` has
+[`MACOS_SHARD_FILTERS`] and runs it as three.
+
+The matrix is derived from this table rather than written beside it.
+`test_legs` in `super::workflow` makes one leg for each string
+`shard_selections` makes of a runner's filters, four today, and
+`test_leg_matrix_complaints` requires the `include:` list of `ci.yml` to be
+those legs, entry for entry and in order: each entry's `os:` the runner, its
+`leg:` the label [`TEST_JOB_NAME`] reads, and its `tests:` the string
+[`TEST_SHARD_COMMAND`] hands to libtest.
+
+A filter list for each runner, not one for the job. What divides a suite is
+how long it takes on that runner, and the Linux leg, whole, was never the
+slow one ([`TEST_TIMEOUT_MINUTES`]). Giving `ubuntu-latest` filters is an
+edit to this table and to `ci.yml`, and nothing else.
+
+The runners here must be the [`CI_TARGETS`] runners that host tests, in
+order and once each; the same function refuses any other list. Without that
+the table and the workflow could lose a platform together with the equality
+between them still holding. Windows is absent for the reason it is absent
+from the matrix: its suite runs in [`TEST_WINDOWS_JOB`] or
+[`TEST_WINDOWS_HOSTED_JOB`]. Measured rows and the two measurements made by
+hand are under `test_leg_matrix_complaints` in the workflow notes.
 
 ## `pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";`
 
@@ -645,27 +1058,57 @@ checkout beside a token that reads other runs. Measured,
 The shell the script is written for, declared on the step and checked as
 resolved, the way the aggregate's is.
 
-## `pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 3] = [`
+## `pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 4] = [`
 
-The step's environment, whole: the job's token for `gh`, and the two
+The step's environment, whole: the job's token for `gh`, and the three
 repository variables. They reach the script as environment, never spliced
 into its text, and each name reads its own variable. Measured,
-`MUT-PICK-WINDOWS-HOME-ENV-CROSSED`.
+`MUT-PICK-WINDOWS-HOME-ENV-CROSSED` and
+`MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED`.
+
+The event the script tests is not here. `GITHUB_EVENT_NAME` is set by the
+runner for every step, like `GITHUB_RUN_ID` and `GITHUB_REPOSITORY`, which
+the script also reads, and needs no `env:` entry.
 
 ## `pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_queue() {`
 
 The picker's script, character for character. It answers `hosted` when
-`WINGUEST_BUSY` is exactly `1`; otherwise, when `WINGUEST_QUEUE_LIMIT` is a
+`WINGUEST_BUSY` is exactly `1`; otherwise, when the run is a pull request's
+and `WINGUEST_PR_HOSTED` is exactly `1`; otherwise, when
+`WINGUEST_QUEUE_LIMIT` is a
 whole number from 1 to 999999, when the guest's queue, as the script reads it in the
 other runs of this workflow, has reached that limit; otherwise `guest`.
 It answers `guest` whenever the API cannot be read, because a failed question
 must not move a run off the machine every lane has run on, and it prints what
 it found: the variables, the limit, the two counts, the answer.
 
+Routing pull requests is opt-in, and only a pull request's run takes it. One
+`elif`, after the `WINGUEST_BUSY` test and before the limit check, tests that
+`GITHUB_EVENT_NAME` is `pull_request` and that `WINGUEST_PR_HOSTED` is `1`.
+This workflow's events are `push`, `pull_request` and `merge_group`, so a
+merge-queue entry and a push are never moved by the variable, and with it
+unset, empty or anything but `1` every run is answered as before the rule. A
+run the rule sends to the hosted shards counts nothing and calls no API,
+whatever the limit and whether or not the API can be read.
+
+The rule is for the guest's time: 26 of the last 30 CI runs on 2026-11-15
+were pull-request runs, and all of them wait for the one guest. Sent to the
+hosted shards they use no guest time, and queue entries and pushes keep the
+guest. It is off by default because of what the sharding measurement showed
+([`TEST_WINDOWS_HOSTED_JOB`]): one of three whole hosted runs failed a
+kill-timing test that an open finding already lists, and one shard did not
+end after its tests passed. The owner sets the variable when hosted runs are
+trusted and clears it again without a workflow change.
+`the_windows_home_is_picked_by_the_one_job_the_contract_pins` holds the one
+`elif` and its place, and `the_windows_home_picker_answers_from_canned_api_pages`
+executes it for all three events. Measured,
+`MUT-PICK-WINDOWS-HOME-ROUTES-PULL-REQUESTS-BY-DEFAULT` and
+`MUT-PICK-WINDOWS-HOME-ROUTES-EVERY-EVENT`.
+
 Routing on the queue is opt-in. With `WINGUEST_QUEUE_LIMIT` unset, empty or
 anything but a whole number from 1 to 999999 the script counts nothing, calls no API
-and answers `guest`, so with neither variable set every run goes to the guest
-as it did before the twin. The first review of this job (#375, head
+and answers `guest`, so with none of the three variables set every run goes to
+the guest as it did before the twin. The first review of this job (#375, head
 `873ff8c7`) found the default limit of 2 it then had would be reached by one
 build and one queue entry, sending runs -- merge-queue entries among them --
 to a hosted suite whose October 2026 queue runs were cancelled at their
@@ -890,7 +1333,9 @@ runs on.
 
 The whole `env:` map of the hosted step that runs the suite, as an equality.
 The value is an expression over the matrix -- `1` on `macos-latest`, empty on
-`ubuntu-latest` -- so one step declares for both legs. Pinned whole, the way
+`ubuntu-latest` -- so one step declares for every leg: it reads `matrix.os`,
+which each `include:` entry carries, the three macOS shards' alike
+([`TEST_LEGS`]). Pinned whole, the way
 [`WORKFLOW_ENV`] and the aggregate's map are: a dropped binding makes the leg
 observe the casefold branch instead of requiring it, so a temporary directory
 that stopped folding case would pass unreported (undeclared on ext4 the alias
@@ -917,9 +1362,10 @@ runs it in the leg's environment unchanged: no `DOCKER_*` selector and no
 
 ## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
 
-The same declaration on the Windows suite steps, `1` outright: each Windows
-suite job is one job with no matrix, and both the guest's NTFS and the
-hosted runner's fold case. The twin's three steps carry the same map under
+The same declaration on the Windows suite steps, `1` outright: the guest's
+job has no matrix, the twin's matrix varies the shard and not the runner,
+and both the guest's NTFS and the hosted runner's fold case. The twin's
+three steps carry the same map under
 codes of their own (`test-windows-hosted-step-env`,
 `test-windows-hosted-capture-step-env`,
 `test-windows-hosted-capability-step-env`); measured there,
@@ -954,18 +1400,32 @@ leaves the required context missing rather than red.
 
 ## `pub(super) const TEST_JOB_FIELDS: [&str; 5] =`
 
-The fields the job that runs these fixtures declares.
+The fields the job that runs these fixtures declares. Each is pinned by
+value as well: `name` by [`TEST_JOB_NAME`], `runs-on` as `${{ matrix.os }}`,
+`timeout-minutes` by [`TEST_TIMEOUT_MINUTES`], `strategy`, whole, by the
+legs [`TEST_LEGS`] derives, and the steps' scripts by [`TEST_SCRIPTS`].
 
 ## `pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =`
 
-The fields both Windows suite jobs declare, the guest's and its hosted twin:
-the `test` job's set without a `strategy:`, since one job on one machine
-needs no matrix, plus `needs:` and `if:`, which tie each to the picker's
-answer. Both are required, and their values are pinned exactly
-([`TEST_WINDOWS_CONDITION`], [`TEST_WINDOWS_HOSTED_CONDITION`]), so an `if:`
-is admitted only as the one condition each job runs under; before the twin
-existed the guest's job had no `if:` at all. `continue-on-error:` is absent
-by construction, as everywhere in this contract.
+The fields the guest's Windows suite job declares: the `test` job's set
+without a `strategy:`, since one job on one machine needs no matrix, plus
+`needs:` and `if:`, which tie it to the picker's answer. Both are required,
+and their values are pinned exactly ([`TEST_WINDOWS_CONDITION`]), so an
+`if:` is admitted only as the one condition the job runs under; before the
+twin existed the guest's job had no `if:` at all. `continue-on-error:` is
+absent by construction, as everywhere in this contract. The twin declared
+this same set until it became a matrix.
+
+## `pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 7] = [`
+
+The fields the hosted twin declares: [`TEST_WINDOWS_JOB_FIELDS`] plus
+`strategy`, which carries its five legs. `strategy` is required, not
+admitted: without it the job is one leg whose `matrix` expressions are
+empty. Its contents are pinned whole by `windows_shard_matrix_complaints`
+in `super::workflow`, and `needs:` and `if:` are pinned as the guest's are
+([`TEST_WINDOWS_HOSTED_CONDITION`]). A second list rather than an optional
+field on the first, so that a `strategy:` on the guest's job is still
+refused: a matrix there would queue more than one job for the one guest.
 
 ## `pub(super) const MSRV_JOB_FIELDS: [&str; 5] =`
 

@@ -1058,9 +1058,12 @@ impl EventSite {
 /// coordinator's read-only ingestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AnswerSite {
-    /// `answers/<qid>.json.partial`, writer-owned staging residue.
+    /// `answers/<qid>.json.<pid>-<ulid>.partial`, a file of the publisher's
+    /// own, created exclusively: writer-owned staging residue.
     StageWrite,
-    /// The atomic rename publishing `answers/<qid>.json`.
+    /// The create-once hard link publishing `answers/<qid>.json` from the
+    /// staged file, which never replaces a published answer, then the
+    /// staged name's removal.
     PublishRename,
     /// Reading a published answer. No effect; a file for a closed or void
     /// question is inert.

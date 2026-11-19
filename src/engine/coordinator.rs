@@ -10,7 +10,9 @@ use std::fs;
 use std::time::Duration;
 
 use crate::agent::proc::NoHooks;
-use crate::agent::{AdapterSource, BuiltinAdapters, Caps};
+use crate::agent::{
+    AdapterSource, BuiltinAdapters, Caps, claude, names_a_quota_limit, reset_at_from_limit_message,
+};
 use crate::capacity;
 use crate::config::{self, OnTaskFailure};
 use crate::error::UpstrokeError;
@@ -280,7 +282,7 @@ pub(super) fn run_harness_inner_with_id(
         branch,
         warnings,
         unanswerable: Vec::new(),
-        exhausted_pools: std::collections::BTreeSet::new(),
+        exhausted_pools: BTreeMap::new(),
         #[cfg(test)]
         after_candidate_capture: opts.after_candidate_capture,
     };
@@ -356,7 +358,7 @@ pub(super) struct Run<'a> {
     pub(super) branch: String,
     pub(super) warnings: Vec<String>,
     pub(super) unanswerable: Vec<QuestionId>,
-    pub(super) exhausted_pools: std::collections::BTreeSet<String>,
+    pub(super) exhausted_pools: BTreeMap<String, Option<String>>,
     #[cfg(test)]
     pub(super) after_candidate_capture: Option<AfterCandidateCapture>,
 }
@@ -478,13 +480,21 @@ impl Run<'_> {
         })
     }
 
+    #[deny(clippy::indexing_slicing)]
     fn step_task(&mut self, index: usize) -> Result<bool, UpstrokeError> {
         let analysis = self.analysis;
         let adapters = self.adapters;
         let workspace = self.workspace;
-        let task = &analysis.plan.tasks[index];
+        let task = analysis
+            .plan
+            .tasks
+            .get(index)
+            .ok_or_else(|| unscheduled_position(index, "plan", analysis.plan.tasks.len()))?;
         let task_id = task.id.to_string();
-        let chain = &analysis.chains[index];
+        let chain = analysis
+            .chains
+            .get(index)
+            .ok_or_else(|| unscheduled_position(index, "resolved chains", analysis.chains.len()))?;
         let policy = LadderPolicy {
             attempts_per: chain.attempts_per,
             rungs: chain.rungs.len(),
@@ -493,7 +503,7 @@ impl Run<'_> {
         let stem = format!("{index:02}-{}", util::filename_component(task.id.as_str()));
 
         loop {
-            let rung_index = self.state.progress[index].rung;
+            let rung_index = self.progress_of(index)?.rung;
             let Some(rung) = chain.rungs.get(rung_index) else {
                 self.fail_task(
                     index,
@@ -526,10 +536,13 @@ impl Run<'_> {
                     message: format!("no adapter registered for agent `{}`", profile.agent),
                 })?;
 
-            let attempt = self.state.progress[index].attempts + 1;
-            let resume = self.state.progress[index]
+            let progress = self.progress_of(index)?;
+            let Some(attempt) = progress.attempts.checked_add(1) else {
+                return Err(attempts_exhausted(&task_id, progress.attempts));
+            };
+            let resume = progress
                 .resume_next
-                .then(|| self.state.progress[index].session.clone())
+                .then(|| progress.session.clone())
                 .flatten();
 
             let rung_number = u32::try_from(rung_index).unwrap_or(u32::MAX);
@@ -558,10 +571,11 @@ impl Run<'_> {
                 },
             })?;
 
+            let progress = self.progress_of(index)?;
             let result = {
                 let retry = (attempt > 1).then(|| RetryBrief {
                     resumed: resume.is_some(),
-                    feedback: self.state.progress[index].feedback.clone(),
+                    feedback: progress.feedback.clone(),
                 });
                 let attempt_cx = AttemptCx {
                     task,
@@ -578,7 +592,7 @@ impl Run<'_> {
                     timeout: self.attempt_timeout,
                     review_pass_timeout: self.review_pass_timeout,
                     retry,
-                    decisions: self.state.progress[index]
+                    decisions: progress
                         .feedback
                         .iter()
                         .filter(|entry| entry.human)
@@ -651,9 +665,9 @@ impl Run<'_> {
                 ladder::next_step(
                     failure,
                     &LadderState {
-                        rung: self.state.progress[index].rung,
-                        attempts_on_rung: self.state.progress[index].attempts_on_rung,
-                        defers: self.state.progress[index].defers,
+                        rung: progress.rung,
+                        attempts_on_rung: progress.attempts_on_rung,
+                        defers: progress.defers,
                         resumable,
                     },
                     &policy,
@@ -714,16 +728,13 @@ impl Run<'_> {
                         transition = Some(Box::new(events::AttemptTransition::Defer(
                             events::TaskDeferred {
                                 reason: failure.reason.clone(),
-                                defers: self.state.progress[index].defers.saturating_add(1),
+                                defers: progress.defers.saturating_add(1),
                             },
                         )));
                     }
                     Next::AskHuman(kind) => {
-                        let context = question_context(
-                            ParkSubject::of(task, &self.state.progress[index]),
-                            kind,
-                            failure,
-                        );
+                        let context =
+                            question_context(ParkSubject::of(task, progress), kind, failure);
                         let question = self.build_question(index, kind, context);
                         parking = Some(Box::new(events::AttemptParking {
                             question: question.clone(),
@@ -800,6 +811,19 @@ impl Run<'_> {
                 None
             };
 
+            let record = super::classify::attempt_record(
+                attempt,
+                super::classify::AttemptFacts {
+                    tier: rung.tier,
+                    model: &profile.model,
+                    pool: pool_option(&profile.pool),
+                    resumed: resume.is_some(),
+                    outcome: &result.outcome,
+                    reviews: &result.reviews,
+                    failure: result.failure.as_ref(),
+                    feedback: super::classify::FeedbackCarrier::LadderEvent,
+                },
+            );
             let settlement = self.emit(EventBody::AttemptFinished {
                 task: task_id.clone(),
                 attempt,
@@ -808,19 +832,7 @@ impl Run<'_> {
                 parking,
                 transition,
                 prepared_commit: prepared_commit.clone().map(Box::new),
-                data: Box::new(super::classify::attempt_record(
-                    attempt,
-                    super::classify::AttemptFacts {
-                        tier: rung.tier,
-                        model: &profile.model,
-                        pool: pool_option(&profile.pool),
-                        resumed: resume.is_some(),
-                        outcome: &result.outcome,
-                        reviews: &result.reviews,
-                        failure: result.failure.as_ref(),
-                        feedback: super::classify::FeedbackCarrier::LadderEvent,
-                    },
-                )),
+                data: Box::new(record.clone()),
             });
             if let Err(error) = settlement {
                 if prepared_commit.is_some() {
@@ -841,6 +853,7 @@ impl Run<'_> {
                 }
                 return Err(error);
             }
+            capacity::retire_served_pools(&mut self.exhausted_pools, &record);
             if let Some(question) = parking_question.as_ref() {
                 if let Err(error) = self.materialize_question(question) {
                     if let Err(cleanup) = self.workspace.discard_uncommitted() {
@@ -874,19 +887,6 @@ impl Run<'_> {
                 return Ok(false);
             };
 
-            if failure.kind != FailureKind::Interrupted
-                && !(failure.kind == FailureKind::RateLimited
-                    && failure.origin == FailureOrigin::Worker)
-            {
-                self.exhausted_pools.remove(&profile.pool);
-            }
-            for review in &result.reviews {
-                if review.outcome != events::ReviewPassOutcome::Unavailable {
-                    if let Some(pool) = &review.pool {
-                        self.exhausted_pools.remove(pool);
-                    }
-                }
-            }
             if failure.kind == FailureKind::RateLimited {
                 self.record_pool_exhausted(&task_id, &profile, &result.reviews, &failure)?;
             }
@@ -986,6 +986,13 @@ impl Run<'_> {
         capacity::pool_for(agent, &self.analysis.config.pools).map(|pool| pool.name.clone())
     }
 
+    fn progress_of(&self, index: usize) -> Result<&Progress, UpstrokeError> {
+        self.state
+            .progress
+            .get(index)
+            .ok_or_else(|| unscheduled_position(index, "state", self.state.progress.len()))
+    }
+
     fn reported_spend(&self, task: Option<usize>) -> f64 {
         let indices: Vec<usize> = match task {
             Some(index) => vec![index],
@@ -1055,15 +1062,31 @@ impl Run<'_> {
             FailureOrigin::Worker => (pool_option(&implementer.pool), implementer.agent.clone()),
         };
         let Some(pool) = pool else { return Ok(()) };
-        if !self.exhausted_pools.insert(pool.clone()) {
+        let reset_at = if agent == claude::ADAPTER_ID {
+            let now = util::unix_seconds_now();
+            failure
+                .limit_message()
+                .into_iter()
+                .chain(std::iter::once(failure.reason.as_str()))
+                .find(|text| names_a_quota_limit(text))
+                .and_then(|text| reset_at_from_limit_message(text, now))
+        } else {
+            None
+        };
+        let already_recorded = self
+            .exhausted_pools
+            .get(&pool)
+            .is_some_and(|recorded| reset_at.is_none() || *recorded == reset_at);
+        if already_recorded {
             return Ok(());
         }
+        self.exhausted_pools.insert(pool.clone(), reset_at.clone());
         self.emit(EventBody::PoolExhausted {
             task: task.to_owned(),
             data: events::PoolExhausted {
                 pool,
                 agent,
-                reset_at: None,
+                reset_at,
                 detail: util::head(&failure.reason, 400),
             },
         })
@@ -1289,6 +1312,24 @@ impl Run<'_> {
             &self.analysis.plan,
             &self.state,
         )
+    }
+}
+
+fn unscheduled_position(index: usize, table: &str, held: usize) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "the scheduler picked task position {index}, which this run's {table} does not hold \
+             (it holds {held})"
+        ),
+    }
+}
+
+fn attempts_exhausted(task_id: &str, last: u32) -> UpstrokeError {
+    UpstrokeError::Refused {
+        message: format!(
+            "task `{task_id}` has exhausted its attempt numbers: attempt {last} was the last one \
+             a u32 can number, so upstroke refuses to start another rather than reuse it"
+        ),
     }
 }
 

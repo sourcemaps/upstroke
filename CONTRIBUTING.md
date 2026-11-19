@@ -4,12 +4,9 @@ Contributions are welcome. Please open an issue before starting anything substan
 order in `DESIGN.md` §21 is deliberate, and it is worth checking that a change fits where the
 project currently is.
 
-Every change enters `master` the same way: a draft pull request opened early, the deterministic CI
-and PR-policy gates green, one independent frontier-model review of the exact green head, findings
-triaged (serious P1s fixed and re-reviewed; `MUST` deviations in touched code and evidence-backed
-findings fixed whatever their label; the rest fixed or logged as tech debt), and the owner's merge
-as the attestation. [`MAINTAINING.md`](MAINTAINING.md) has the full lifecycle, trust boundary
-and release contract. Contributions from external forks are provisional: the required checks are
+Every change enters `master` through a draft pull request, green CI and PR-policy gates, an
+independent review and the owner's merge. [`MAINTAINING.md`](MAINTAINING.md) has the full
+lifecycle. Contributions from external forks are provisional: the required checks are
 candidate-controlled, so a fork's entire diff, workflow edits included, is reviewed before merge.
 
 ## Before you send a PR
@@ -29,21 +26,15 @@ bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
 ```
 
-`CODING_STANDARDS.md` §2 is the normative statement of this baseline and says how CI splits it
-across jobs. `test-release-record.sh` needs `jq`, and so does `cargo test` on Linux, which runs the
-workflow's own scripts and fails, saying so, where `jq` is missing; `test-pr-policy.sh` only works
-from the root.
+`test-release-record.sh` and `cargo test` on Linux need `jq` and fail, saying so, without it;
+`test-pr-policy.sh` is run by path, as above: by bare name from inside `.github/scripts/` it fails.
 
 Use the pull-request template to record the exact commands, implementation provenance, reviewed
 SHA, review model and effort, evidence link, risk and rollback. Resolve every review conversation;
 merge commits are the only accepted merge method.
 
-[`CODING_STANDARDS.md`](CODING_STANDARDS.md) indexes the implementation standards; read the
-sections a change touches before changing Rust. Among the hard requirements: edition 2024 with MSRV
-1.85, no `.unwrap()` or `.expect()` in production, `anyhow` only at the binary edge (libraries
-return typed `thiserror` errors), paths through `std::path` types, and no shared ownership, locks
-or clones without a stated reason. Windows, macOS and Linux are supported targets. The ten
-commands above are the automated baseline, not the whole standard.
+Before changing Rust, read the sections of [`CODING_STANDARDS.md`](CODING_STANDARDS.md) the change
+touches: the ten commands above are the automated baseline, not the whole standard.
 
 ## Contributor Licence Agreement
 

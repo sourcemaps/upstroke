@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # lane.sh: the branch prefix -> lane -> (review effort, must-fix severities) table, defined once.
 #
-# SOURCE THIS FILE; DO NOT RUN IT. It defines five functions and does nothing else: no `set`, no
+# SOURCE THIS FILE; DO NOT RUN IT. It defines six functions and does nothing else: no `set`, no
 # `trap`, no work at load. A caller's `set -e`, `set -u` and `pipefail` are whatever the caller
 # chose, and sourcing this changes none of them.
 #
@@ -107,6 +107,32 @@ must_fix_for() {
   case "${1:-}" in
     feature|refactor|ci|gate|docs|findings|fix-p0p1) echo "P0 P1" ;;
     standards|fix-p2|bulk-fix-p2|fix-p3)             echo "P0 P1 P2" ;;
+    *) return 1 ;;
+  esac
+}
+
+# may_accept_for <lane>: the severities that may be recorded as `accepted-risk` and accepted with
+# no manual read -- each still filed under findings/ like every open finding, and accepted only
+# when its ledger row records the review's severity -- as a space-separated list, tested by the
+# caller the way `must_fix_for`'s is: `[[ " $may_accept " == *" $sev "* ]]`.
+#
+# THE OWNER'S RULING OF 2026-11-13: a P3, in every lane, filed with `disposition: accepted-risk`,
+# is accepted without the owner's read when its row records the review's severity. A P2 or higher
+# recorded as `accepted-risk` is still the owner's call and is not in this answer, and a `rejected`
+# row is never answered here at all.
+#
+# THE TWO HARD RULES ARE APPLIED BEFORE THIS, and this answer does not reach past them: a finding
+# carrying a failing test, reproduction or mutation witness, and a `MUST` deviation, are fixed
+# whatever their severity (MAINTAINING.md step 5). scripts/pr-ready-audit.sh blocks both, and moves
+# on to the next finding, before it ever asks this -- so a witnessed or `MUST` P3 is never accepted
+# here, and a caller that consulted this first would be accepting what step 5 says is fixed.
+#
+# A LANE THIS DOES NOT KNOW IS REFUSED, for `must_fix_for`'s reason turned round: an answer invented
+# for a caller that cannot be answered is an acceptance nobody ruled on. Every lane `lane_for`
+# returns is answered below; anything else is non-zero, and the audit blocks on it.
+may_accept_for() {
+  case "${1:-}" in
+    feature|refactor|ci|gate|standards|docs|findings|fix-p0p1|fix-p2|bulk-fix-p2|fix-p3) echo "P3" ;;
     *) return 1 ;;
   esac
 }

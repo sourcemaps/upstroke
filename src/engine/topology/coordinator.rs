@@ -20740,7 +20740,11 @@ git cat-file -e 'HEAD^{tree}'
                     })
                     .unwrap_or_else(|| crate::ir::QuestionId("q-after-the-end".to_owned()));
                 let published = crate::interaction::answer_path(&answers, &question);
-                let partial = answers.join("q-another.json.partial");
+                let partial = answers.join(format!(
+                    "q-another.json.{}-{}.partial",
+                    std::process::id(),
+                    crate::ulid::ulid()
+                ));
                 crate::workspace_manager::fixture::write_file(
                     &published,
                     b"{\"answer\":\"answered\",\"text\":\"go ahead\"}",
@@ -25655,6 +25659,7 @@ git cat-file -e 'HEAD^{tree}'
                     FAnswer::Unavailable => crate::review::ReviewResult::Unavailable {
                         status: crate::ir::OutcomeStatus::AgentError,
                         detail: "the stub reviewer is unavailable".to_owned(),
+                        limit_message: None,
                     },
                     FAnswer::Pass | FAnswer::MiscountedPass => {
                         crate::review::ReviewResult::Judged(crate::ir::Verdict {
