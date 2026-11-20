@@ -1280,12 +1280,59 @@ fn the_process_funnel_fires_both_hook_phases_of_spawn_and_terminate_under_the_pr
     assert_eq!(seen.count(spawn, HookPhase::After), 2);
 }
 
+#[cfg(windows)]
+const SPAWNED_GRANDCHILD_PID: &str = "spawned-grandchild.pid";
+
+/// The production adapter's hooks, recording the grandchild the kill child
+/// spawns in its kill directory as `"{pid} {creation_time}"`. Windows only:
+/// the parent's gone-check reads it there.
+#[cfg(windows)]
+struct RecordsTheGrandchild {
+    inner: crate::runner::HarnessHooks,
+    pid_file: PathBuf,
+}
+
+#[cfg(windows)]
+impl crate::agent::proc::SpawnHooks for RecordsTheGrandchild {
+    fn point(&mut self, point: SubEffectPoint) -> crate::topology::effects::Injection {
+        self.inner.point(point)
+    }
+
+    fn point_mode(
+        &mut self,
+        point: SubEffectPoint,
+        mode: InjectionMode,
+    ) -> crate::topology::effects::Injection {
+        self.inner.point_mode(point, mode)
+    }
+
+    fn phase(
+        &mut self,
+        site: ProcessSite,
+        phase: HookPhase,
+    ) -> crate::topology::effects::Injection {
+        self.inner.phase(site, phase)
+    }
+
+    /// A missing creation time panics here, so the kill child ends by a
+    /// panic rather than the abort the parent asserts: it fails, closed.
+    fn child_created(&mut self, pid: u32) {
+        self.inner.child_created(pid);
+        let creation_time = crate::agent::proc::process_creation_time(pid)
+            .expect("the created grandchild's creation time");
+        let record = format!("{pid} {creation_time}");
+        crate::workspace_manager::fixture::write_file(&self.pid_file, record.as_bytes());
+    }
+}
+
 /// The child of `every_kill_point_of_the_process_funnel_kills_the_child_on_this_host`:
 /// arms one `Process.Spawn` point in kill mode on the production adapter and
 /// runs one command through the host runner, which consults the point on the
 /// parent side and dies there. The ambient-job point is consulted by the
 /// containment step rather than the spawn, so that one is driven through
-/// `contain_write_command`.
+/// `contain_write_command`. On Windows the hooks also record the grandchild
+/// the spawn creates, for the parent's gone-check; elsewhere nothing is
+/// recorded.
 #[test]
 #[ignore = "spawned as a subprocess by the process kill-point witness"]
 fn spawn_kill_child() {
@@ -1303,6 +1350,13 @@ fn spawn_kill_child() {
         let outcome = crate::runner::host::contain_write_command(&mut hooks);
         panic!("the kill at `{site}`/{point} did not take this process: {outcome:?}");
     }
+    crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+        .expect("the kill child is contained, as every write command is before it spawns");
+    #[cfg(windows)]
+    let hooks = RecordsTheGrandchild {
+        inner: hooks,
+        pid_file: dir.join(SPAWNED_GRANDCHILD_PID),
+    };
     let runner = crate::runner::host::HostRunner::new().with_hooks(Box::new(hooks));
     let outcome = crate::runner::Runner::run_blocking(&runner, &trivial_request(&dir));
     panic!("the kill at `{site}`/{point} did not take this process: {outcome:?}");
@@ -1310,7 +1364,9 @@ fn spawn_kill_child() {
 
 /// Every parent-side point of `Process.Spawn` this host requires, in kill
 /// mode: a child arms it on the production adapter, spawns one command
-/// through the host runner and dies by abort at the point.
+/// through the host runner and dies by abort at the point. On Windows the
+/// ambient-job kill, which comes before any spawn, recorded no grandchild,
+/// and every other kill's recorded grandchild is gone within 20 s.
 #[test]
 fn every_kill_point_of_the_process_funnel_kills_the_child_on_this_host() {
     use crate::workspace_manager::fixture;
@@ -1342,7 +1398,225 @@ fn every_kill_point_of_the_process_funnel_kills_the_child_on_this_host() {
             fixture::died_by_abort(&status),
             "`{site}`/{point}: the child did not die by the kill: {status:?}"
         );
+        #[cfg(windows)]
+        if point == SubEffectPoint::AmbientJobJoined {
+            assert!(
+                !dir.join(SPAWNED_GRANDCHILD_PID).exists(),
+                "`{site}`/{point}: this kill comes in the containment step, before any spawn, \
+                 yet a grandchild was recorded"
+            );
+        } else {
+            let unrecorded = format!(
+                "`{site}`/{point}: the kill comes after the grandchild is created, so the dead \
+                 child recorded it"
+            );
+            let record =
+                std::fs::read_to_string(dir.join(SPAWNED_GRANDCHILD_PID)).expect(&unrecorded);
+            let mut fields = record.split_whitespace();
+            let pid: u32 = fields
+                .next()
+                .and_then(|field| field.parse().ok())
+                .expect("the recorded pid");
+            let created: u64 = fields
+                .next()
+                .and_then(|field| field.parse().ok())
+                .expect("the recorded creation time");
+            assert_ne!(
+                created, 0,
+                "`{site}`/{point}: the grandchild's recorded creation time is 0, which no \
+                 process has, so the gone-check below would pass without looking"
+            );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while crate::agent::proc::process_alive(pid, created) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "`{site}`/{point}: the grandchild the dead child spawned is still \
+                     alive (pid {pid})"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
     }
+}
+
+/// The containment `spawn_kill_child` must execute before it spawns: the
+/// statement, `.expect(` included, so a mention of the call is not it.
+const CONTAINED: &str =
+    "crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks).expect(";
+
+/// `source` as code only, so a search over it finds what executes: `//`
+/// comments and (nested) `/* … */` comments are removed, and every ordinary
+/// string literal (`"…"`, honouring its `\"` and `\\` escapes) and char
+/// literal (`'"'`, `'\''`) keeps its quotes and loses its contents. A `'`
+/// that opens no char literal, a lifetime's or a label's, is code. Raw
+/// strings (`r"…"`, `r#"…"#`) are not handled -- their `\` is no escape and
+/// their `"#` no ordinary close -- and `spawn_kill_child` has none.
+fn code_only(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let at = |index: usize| chars.get(index).copied();
+    let mut code = String::with_capacity(source.len());
+    let mut index = 0;
+    while let Some(c) = at(index) {
+        match (c, at(index + 1)) {
+            ('/', Some('/')) => {
+                while at(index).is_some_and(|c| c != '\n') {
+                    index += 1;
+                }
+            }
+            ('/', Some('*')) => {
+                let mut depth = 0_usize;
+                while let Some(c) = at(index) {
+                    match (c, at(index + 1)) {
+                        ('/', Some('*')) => {
+                            depth += 1;
+                            index += 2;
+                        }
+                        ('*', Some('/')) => {
+                            depth -= 1;
+                            index += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => index += 1,
+                    }
+                }
+                code.push(' ');
+            }
+            ('"', _) => {
+                index += 1;
+                while let Some(c) = at(index) {
+                    index += if c == '\\' { 2 } else { 1 };
+                    if c == '"' {
+                        break;
+                    }
+                }
+                code.push_str("\"\"");
+            }
+            ('\'', Some('\\')) => {
+                index += 3;
+                while at(index).is_some_and(|c| c != '\'') {
+                    index += 1;
+                }
+                index += 1;
+                code.push_str("''");
+            }
+            ('\'', Some(_)) if at(index + 2) == Some('\'') => {
+                index += 3;
+                code.push_str("''");
+            }
+            _ => {
+                code.push(c);
+                index += 1;
+            }
+        }
+    }
+    code
+}
+
+/// `text` without its whitespace, so a statement split across lines reads
+/// as the one line it is.
+fn without_whitespace(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// `code_only` finds a real call, and neither one commented out (the way a
+/// reviewer's mutation comments it out) nor one inside a string.
+#[test]
+fn code_only_finds_a_real_call_and_not_a_commented_out_one_or_one_in_a_string() {
+    let contained = without_whitespace(CONTAINED);
+    let found = |source: &str| without_whitespace(&code_only(source)).contains(&contained);
+    let real = r#"
+    crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+        .expect("contained");
+"#;
+    let line_commented = r#"
+    // crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+    //     .expect("contained");
+"#;
+    let block_commented = r#"
+    /* crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks)
+        .expect("contained"); /* nested */ still the comment */
+"#;
+    let in_a_string = r#"
+    let _ = "crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks).expect(";
+"#;
+    let past_an_escaped_quote = r#"
+    let _ = "\" crate::runner::host::contain_write_command(&mut crate::agent::proc::NoHooks).expect(";
+"#;
+    assert!(found(real), "the real call is found");
+    assert!(!found(line_commented), "a line-commented call is not");
+    assert!(!found(block_commented), "a block-commented call is not");
+    assert!(!found(in_a_string), "a call inside a string is not");
+    assert!(
+        !found(past_an_escaped_quote),
+        "a `\\\"` does not close the string the call is inside"
+    );
+    assert!(
+        found(&format!(r#"let _ = "\\";{real}"#)),
+        "a `\\\\` does not escape the quote that closes its string"
+    );
+    assert!(
+        found(&format!(r#"let _ = '"';{real}"#)),
+        "a `'\"'` opens no string"
+    );
+    assert_eq!(
+        code_only(r#"f("a\"b", '"', '\'', 'x') /* c */ // d"#),
+        r#"f("", '', '', '')   "#
+    );
+    assert_eq!(
+        code_only("fn g<'a>(s: &'a str) -> &'a str { s }"),
+        "fn g<'a>(s: &'a str) -> &'a str { s }"
+    );
+}
+
+#[test]
+fn the_spawn_kill_child_is_contained_before_it_spawns() {
+    let body = include_str!("tests.rs")
+        .lines()
+        .skip_while(|line| *line != "fn spawn_kill_child() {")
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    let code = without_whitespace(&code_only(&body));
+    let Some(at) = code.find(&without_whitespace(CONTAINED)) else {
+        panic!(
+            "`spawn_kill_child` must contain itself before it spawns, by executing \
+             `{CONTAINED}…)` rather than naming it in a comment or a string: a kill at \
+             `CreatedSuspended` otherwise strands a suspended grandchild on Windows"
+        );
+    };
+    let ambient_if = without_whitespace("if point == SubEffectPoint::AmbientJobJoined {");
+    let ambient = code
+        .find(&ambient_if)
+        .expect("`spawn_kill_child` drives the `AmbientJobJoined` point itself");
+    let opened = ambient + ambient_if.len();
+    let mut depth = 1_usize;
+    let ambient_closed = opened
+        + code[opened..]
+            .find(|c: char| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            })
+            .expect("the `AmbientJobJoined` block closes");
+    let runner = code
+        .find("HostRunner::new()")
+        .expect("`spawn_kill_child` builds a host runner");
+    assert!(
+        at > ambient_closed,
+        "`spawn_kill_child` must contain itself after the `AmbientJobJoined` block, which \
+         dies in the containment step: a kill at `CreatedSuspended` otherwise strands a \
+         suspended grandchild on Windows"
+    );
+    assert!(
+        at < runner,
+        "`spawn_kill_child` must contain itself before it builds the host runner: a kill at \
+         `CreatedSuspended` otherwise strands a suspended grandchild on Windows"
+    );
 }
 
 /// `Process.Spawn`'s one error-return point, `ambient_job_joined`, exists on
