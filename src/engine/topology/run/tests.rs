@@ -1535,6 +1535,21 @@ fn step_answered_by(
     wide.run.step(&seams, hooks).expect("a step")
 }
 
+fn rate_limited_step_past_any_wait(
+    wide: &mut crate::engine::topology::scaffold::Wide,
+    hooks: &mut dyn TopologyHooks,
+) -> Progress {
+    use crate::engine::topology::scaffold::ScaffoldAdapters;
+
+    for _ in 0..64 {
+        let progress = step_answered_by(wide, ScaffoldAdapters::rate_limiting(), hooks);
+        if !matches!(progress, Progress::Waiting { .. }) {
+            return progress;
+        }
+    }
+    panic!("the run never came back from its wait toward the reset");
+}
+
 fn pools_exhausted(
     wide: &crate::engine::topology::scaffold::Wide,
 ) -> Vec<(String, Option<String>)> {
@@ -1570,7 +1585,7 @@ fn signal(reset_at: &str) -> (String, Option<String>) {
 
 #[test]
 fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {
-    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+    use crate::engine::topology::scaffold::WideTask;
     use crate::ladder::FailureKind;
 
     let mut wide = on_claude_max(
@@ -1584,7 +1599,7 @@ fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {
     );
     let mut hooks = wide.env.hooks();
     let progress: Vec<Progress> = (0..3)
-        .map(|_| step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks))
+        .map(|_| rate_limited_step_past_any_wait(&mut wide, &mut hooks))
         .collect();
     assert!(
         matches!(
@@ -1619,7 +1634,7 @@ fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {
 
 #[test]
 fn a_second_rate_limit_naming_a_different_reset_writes_one_more_pool_exhausted() {
-    use crate::engine::topology::scaffold::{ScaffoldAdapters, WideTask};
+    use crate::engine::topology::scaffold::WideTask;
     use crate::ladder::FailureKind;
 
     let mut wide = on_claude_max(
@@ -1633,7 +1648,7 @@ fn a_second_rate_limit_naming_a_different_reset_writes_one_more_pool_exhausted()
     );
     let mut hooks = wide.env.hooks();
     let progress: Vec<Progress> = (0..3)
-        .map(|_| step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks))
+        .map(|_| rate_limited_step_past_any_wait(&mut wide, &mut hooks))
         .collect();
     assert!(
         matches!(
@@ -2012,6 +2027,656 @@ fn a_run_whose_log_ends_with_pool_exhausted_resumes_with_that_pool_exhausted_at_
         [signal("2026-11-11T05:30:00Z")],
         "the resumed run holds the pool exhausted at the reset the cut log recorded, so the same \
          limit writes no second signal: {progress:?}"
+    );
+}
+
+#[derive(Default)]
+struct RecordingSleeper(std::cell::RefCell<Vec<std::time::Duration>>);
+
+impl RecordingSleeper {
+    fn slept(&self) -> Vec<std::time::Duration> {
+        self.0.borrow().clone()
+    }
+}
+
+impl Sleeper for RecordingSleeper {
+    fn sleep(&self, duration: std::time::Duration) {
+        self.0.borrow_mut().push(duration);
+    }
+}
+
+fn defer_waits(wide: &crate::engine::topology::scaffold::Wide) -> Vec<(u64, u32)> {
+    wide.env
+        .durable_events()
+        .into_iter()
+        .filter_map(|event| match event.body {
+            TopologyEventBody::DeferWaitElapsed { data } => Some((data.waited_ms, data.round)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct Stepped {
+    progress: Progress,
+    defer_waits: Vec<(u64, u32)>,
+    slices: usize,
+}
+
+fn stepped_until_waited(
+    wide: &mut crate::engine::topology::scaffold::Wide,
+    clock: &dyn TimeSource,
+    sleeper: &RecordingSleeper,
+    answers: Option<&dyn crate::interaction::AnswerSource>,
+    hooks: &mut dyn TopologyHooks,
+) -> Vec<Stepped> {
+    let mut steps: Vec<Stepped> = Vec::new();
+    while !matches!(
+        steps.last(),
+        Some(Stepped {
+            progress: Progress::Waited { .. },
+            ..
+        })
+    ) {
+        assert!(
+            steps.len() < 64,
+            "the run never came back from its back-off: {steps:?}"
+        );
+        let defaults = wide.env.seams();
+        let seams = RunSeams {
+            clock,
+            sleeper,
+            answers: answers.unwrap_or(defaults.answers),
+            ..defaults
+        };
+        let progress = wide.run.step(&seams, hooks).expect("a step");
+        steps.push(Stepped {
+            progress,
+            defer_waits: defer_waits(wide),
+            slices: sleeper.slept().len(),
+        });
+    }
+    steps
+}
+
+fn deferred_on_claude_max(
+    tag: &str,
+    tasks: &[crate::engine::topology::scaffold::WideTask],
+    limit: &'static str,
+) -> crate::engine::topology::scaffold::Wide {
+    use crate::engine::topology::scaffold::ScaffoldAdapters;
+
+    let mut wide = on_claude_max(tag, tasks, &[(TaskKey(0), GenerationId(0), limit)], &[]);
+    let mut hooks = wide.env.hooks();
+    let settled = step_answered_by(&mut wide, ScaffoldAdapters::rate_limiting(), &mut hooks);
+    assert!(
+        matches!(
+            settled,
+            Progress::Settled {
+                key: TaskKey(0),
+                accepted: false,
+                ..
+            }
+        ),
+        "{tag}: {settled:?}"
+    );
+    assert_eq!(
+        wide.run.fold().task(TaskKey(0)).map(|task| task.state),
+        Some(crate::topology::fold::TaskState::Deferred),
+        "{tag}: the rate limit defers the task"
+    );
+    wide
+}
+
+#[test]
+fn a_deferred_rate_limit_naming_a_reset_is_waited_out_to_two_minutes_past_it() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-five-hour",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T05:30:00Z")]);
+    let mut hooks = wide.env.hooks();
+
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+
+    let slept = sleeper.slept();
+    assert!(
+        slept
+            .iter()
+            .all(|slice| *slice <= std::time::Duration::from_secs(600)),
+        "every slice is at most ten minutes: {slept:?}"
+    );
+    assert_eq!(
+        slept.iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "the run sleeps from 03:00:00 to 05:32:00, two minutes past the 05:30 reset: {slept:?}"
+    );
+    let (last, before) = steps.split_last().expect("at least one step");
+    assert_eq!(
+        last.defer_waits,
+        [(9_120_000, 1)],
+        "exactly one `defer_wait_elapsed`, for the whole wait, in the first round: {last:?}"
+    );
+    for step in before {
+        assert!(
+            step.defer_waits.is_empty(),
+            "no `defer_wait_elapsed` before the last slice: {step:?}"
+        );
+    }
+}
+
+fn assert_backs_off_as_before(tag: &str, steps: &[Stepped], sleeper: &RecordingSleeper) {
+    assert_eq!(
+        sleeper.slept(),
+        [std::time::Duration::from_secs(60)],
+        "{tag}: one minute, the first round of the doubling backoff"
+    );
+    let [step] = steps else {
+        panic!("{tag}: one step, which waited: {steps:?}");
+    };
+    assert_eq!(
+        step.progress,
+        Progress::Waited {
+            waited_ms: 60_000,
+            round: 1
+        },
+        "{tag}"
+    );
+    assert_eq!(step.defer_waits, [(60_000, 1)], "{tag}");
+}
+
+#[test]
+fn a_limit_naming_a_reset_past_the_bound_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-weekly",
+        &[WideTask::independent("alpha")],
+        WEEKLY_LIMIT,
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [signal("2026-11-14T17:00:00Z")],
+        "the weekly reset is three and a half days past the run's clock"
+    );
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("weekly", &steps, &sleeper);
+}
+
+const UNREAD_LIMIT: &str = "429 Too Many Requests";
+
+#[test]
+fn a_rate_limit_whose_reset_is_not_read_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-unread",
+        &[WideTask::independent("alpha")],
+        UNREAD_LIMIT,
+    );
+    assert_eq!(
+        pools_exhausted(&wide),
+        [("claude-max".to_owned(), None)],
+        "the pool is recorded exhausted, and no reset with it"
+    );
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("unread", &steps, &sleeper);
+}
+
+struct AfterTheReset;
+
+impl TimeSource for AfterTheReset {
+    fn now_rfc3339(&self) -> String {
+        "2026-11-11T06:00:00Z".to_owned()
+    }
+}
+
+#[test]
+fn a_recorded_reset_already_passed_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-passed",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T05:30:00Z")]);
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &AfterTheReset, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("passed", &steps, &sleeper);
+}
+
+#[test]
+fn a_reset_on_a_day_its_month_lacks_is_not_read() {
+    for reading in [
+        "2026-02-31T01:00:00Z",
+        "2026-02-29T01:00:00Z",
+        "2026-04-31T00:00:00Z",
+    ] {
+        assert_eq!(
+            unix_seconds_of(reading),
+            None,
+            "{reading} names a day its month lacks, so it is no instant at all"
+        );
+    }
+    let leap_day = u64::try_from(crate::util::days_from_civil(2028, 2, 29) * 86_400 + 3_600)
+        .expect("29 February 2028 is after the epoch");
+    assert_eq!(
+        unix_seconds_of("2028-02-29T01:00:00Z"),
+        Some(leap_day),
+        "2028 is a leap year, so its 29 February is read"
+    );
+    assert_eq!(
+        unix_seconds_of("2026-11-11T05:30:00Z"),
+        Some(1_794_375_000),
+        "the five-hour limit's reset reads as it always did"
+    );
+}
+
+struct OnMarchThird;
+
+impl TimeSource for OnMarchThird {
+    fn now_rfc3339(&self) -> String {
+        "2026-03-03T00:00:00Z".to_owned()
+    }
+}
+
+#[test]
+fn a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-no-such-day",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    wide.run.exhausted_pools = [signal("2026-02-31T01:00:00Z")].into_iter().collect();
+    let mut hooks = wide.env.hooks();
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(&mut wide, &OnMarchThird, &sleeper, None, &mut hooks);
+    assert_backs_off_as_before("no such day", &steps, &sleeper);
+}
+
+#[test]
+fn a_reset_reading_outside_the_writers_shape_is_not_read() {
+    for reading in [
+        "9223372036854775807-11-11T05:30:00Z",
+        "10000-11-11T05:30:00Z",
+        "2026-1-11T05:30:00Z",
+        "2026-11-11T05:30:+0Z",
+        "2026-11-11T05:30:00.not-a-fractionZ",
+        "2026-11-11T05:30:00.Z",
+        "2026-11-11t05:30:00Z",
+        "2026-11-11T05:30:00z",
+        "2026-11-11T05:30:00+00:00",
+        "2026-11-11T05:30:60Z",
+        "２０２６-11-11T05:30:00Z",
+        "",
+    ] {
+        assert_eq!(
+            unix_seconds_of(reading),
+            None,
+            "{reading:?} is not what `util::rfc3339_utc` writes, so it is not read"
+        );
+    }
+    assert_eq!(
+        unix_seconds_of("2026-11-11T05:30:00.123Z"),
+        Some(1_794_375_000),
+        "a fraction of digits is read, and its second is the whole second before it"
+    );
+    assert_eq!(
+        unix_seconds_of("1970-01-01T00:00:00Z"),
+        Some(0),
+        "the epoch reads as zero"
+    );
+    assert_eq!(
+        unix_seconds_of("9999-12-31T23:59:59Z"),
+        Some(253_402_300_799),
+        "the last second a four-digit year holds reads"
+    );
+}
+
+#[test]
+fn whatever_reads_is_what_the_writer_writes() {
+    use crate::util::rfc3339_utc;
+
+    const LAST: u64 = 253_402_300_799;
+    let edges = [1, 59, 86_399, 951_782_400, 1_794_375_000, LAST];
+    let spread = (0..=9_973_u64).map(|step| step * (LAST / 9_973));
+    for instant in spread.chain(edges) {
+        let written = rfc3339_utc(instant);
+        assert_eq!(
+            unix_seconds_of(&written),
+            Some(instant),
+            "{written} is what the writer writes for {instant}"
+        );
+    }
+
+    let less_its_fraction = |text: &str| -> String {
+        let Some((whole, rest)) = text.split_once('.') else {
+            return text.to_owned();
+        };
+        match rest.strip_suffix('Z') {
+            Some(fraction)
+                if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                format!("{whole}Z")
+            }
+            _ => text.to_owned(),
+        }
+    };
+    let alphabet = ['0', '9', '+', '-', '.', ':', 'T', 'Z', 'é', '２', ' '];
+    for reading in ["2026-11-11T05:30:00Z", "2028-02-29T23:59:59.5Z"] {
+        let chars: Vec<char> = reading.chars().collect();
+        let mut variants: Vec<String> = Vec::new();
+        for at in 0..=chars.len() {
+            let (before, from) = (chars.iter().take(at), chars.iter().skip(at));
+            for with in alphabet {
+                let inserted = before.clone().chain([&with]).chain(from.clone());
+                variants.push(inserted.collect());
+            }
+        }
+        for at in 0..chars.len() {
+            let (before, after) = (chars.iter().take(at), chars.iter().skip(at + 1));
+            variants.push(before.clone().chain(after.clone()).collect());
+            for with in alphabet {
+                let substituted = before.clone().chain([&with]).chain(after.clone());
+                variants.push(substituted.collect());
+            }
+        }
+        for variant in variants {
+            if let Some(instant) = unix_seconds_of(&variant) {
+                assert_eq!(
+                    rfc3339_utc(instant),
+                    less_its_fraction(&variant),
+                    "{variant:?}, one character from {reading:?}, reads as {instant}, \
+                     which the writer writes otherwise"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_recorded_reset_outside_the_writers_shape_backs_off_as_before() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    for (tag, reset_at) in [
+        (
+            "reset-wait-oversized-year",
+            "9223372036854775807-11-11T05:30:00Z",
+        ),
+        (
+            "reset-wait-not-a-fraction",
+            "2026-11-11T05:30:00.not-a-fractionZ",
+        ),
+    ] {
+        let mut wide =
+            deferred_on_claude_max(tag, &[WideTask::independent("alpha")], FIVE_HOUR_LIMIT);
+        wide.run.exhausted_pools = [signal(reset_at)].into_iter().collect();
+        let mut hooks = wide.env.hooks();
+        let sleeper = RecordingSleeper::default();
+        let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, None, &mut hooks);
+        assert_backs_off_as_before(tag, &steps, &sleeper);
+    }
+}
+
+struct AnsweredAfterSlices<'a> {
+    sleeper: &'a RecordingSleeper,
+    slices: usize,
+    answer: Answer,
+}
+
+impl crate::interaction::AnswerSource for AnsweredAfterSlices<'_> {
+    fn id(&self) -> &'static str {
+        "after-slices"
+    }
+
+    fn resolve(&self, question: &Question) -> Result<Answer, UpstrokeError> {
+        self.poll(question)
+    }
+
+    fn poll(&self, _question: &Question) -> Result<Answer, UpstrokeError> {
+        Ok(if self.sleeper.slept().len() >= self.slices {
+            self.answer.clone()
+        } else {
+            Answer::Unanswered
+        })
+    }
+}
+
+struct WaitingLines(std::sync::Mutex<Vec<String>>);
+
+impl WaitingLines {
+    fn lines(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Notifier for WaitingLines {
+    fn id(&self) -> &'static str {
+        "waiting-lines"
+    }
+
+    fn ask(&self, _question: &Question) -> Result<(), UpstrokeError> {
+        Ok(())
+    }
+
+    fn waiting(&self, line: &str) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(line.to_owned());
+    }
+}
+
+static WAITING_LINES: WaitingLines = WaitingLines(std::sync::Mutex::new(Vec::new()));
+
+#[test]
+fn an_answer_published_between_two_slices_is_ingested_before_the_wait_continues() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-answered",
+        &[
+            WideTask::independent("alpha"),
+            WideTask::independent("beta"),
+        ],
+        FIVE_HOUR_LIMIT,
+    );
+    let mut hooks = wide.env.hooks();
+    wide.run.approve_spend_over = Some(0.0);
+    let asked = {
+        let seams = RunSeams {
+            clock: &RunClock,
+            ..wide.env.seams()
+        };
+        wide.run
+            .ask_to_approve_spend(TaskKey(1), &seams, &mut hooks)
+            .expect("beta's question is raised")
+    };
+    assert!(
+        matches!(
+            asked,
+            Progress::Asked {
+                key: TaskKey(1),
+                ..
+            }
+        ),
+        "{asked:?}"
+    );
+    wide.run.notifiers = vec![&WAITING_LINES];
+
+    let sleeper = RecordingSleeper::default();
+    let answers = AnsweredAfterSlices {
+        sleeper: &sleeper,
+        slices: 2,
+        answer: Answer::Declined,
+    };
+    let steps = stepped_until_waited(&mut wide, &RunClock, &sleeper, Some(&answers), &mut hooks);
+
+    let answered = steps
+        .iter()
+        .position(|step| matches!(step.progress, Progress::Answered { .. }))
+        .unwrap_or_else(|| panic!("the answer was ingested: {steps:?}"));
+    assert_eq!(
+        answered, 2,
+        "two slices, then the answer published after the second: {steps:?}"
+    );
+    assert_eq!(
+        steps[answered].progress,
+        Progress::Answered {
+            key: TaskKey(1),
+            question: match &asked {
+                Progress::Asked { question, .. } => question.clone(),
+                other => panic!("{other:?}"),
+            },
+            declined: true,
+        }
+    );
+    assert_eq!(
+        steps[answered].slices, 2,
+        "the step that ingested the answer slept no slice of its own"
+    );
+    for (at, step) in steps.iter().enumerate() {
+        if at != answered && at + 1 != steps.len() {
+            assert!(
+                matches!(step.progress, Progress::Waiting { until_unix, slept_ms }
+                    if until_unix == 1_794_375_120 && slept_ms <= 600_000),
+                "every other step but the last sleeps one slice toward 05:32: {step:?}"
+            );
+        }
+        assert!(
+            at + 1 == steps.len() || step.defer_waits.is_empty(),
+            "no `defer_wait_elapsed` before the last slice: {step:?}"
+        );
+    }
+    assert_eq!(
+        sleeper.slept().iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "the wait continued after the answer rather than starting again: {:?}",
+        sleeper.slept()
+    );
+    assert_eq!(
+        steps.last().map(|step| step.defer_waits.clone()),
+        Some(vec![(9_120_000, 1)]),
+        "one `defer_wait_elapsed`, for the whole wait"
+    );
+    assert_eq!(
+        WAITING_LINES.lines(),
+        [crate::interaction::reset_wait_line(
+            "claude-max",
+            "2026-11-11T05:30:00Z",
+            std::time::Duration::from_secs(9_120),
+        )],
+        "the wait is announced once, when it starts, and not again when it continues"
+    );
+}
+
+struct MovingClock<'a>(&'a RecordingSleeper);
+
+impl TimeSource for MovingClock<'_> {
+    fn now_rfc3339(&self) -> String {
+        let from = unix_seconds_of(&RunClock.now_rfc3339()).expect("`RunClock` reads as UTC");
+        let slept: std::time::Duration = self.0.slept().iter().sum();
+        crate::util::rfc3339_utc(from + slept.as_secs())
+    }
+}
+
+#[test]
+fn a_held_reset_wait_runs_through_its_margin_on_a_moving_clock() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-moving-clock",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    assert_eq!(pools_exhausted(&wide), [signal("2026-11-11T05:30:00Z")]);
+    let mut hooks = wide.env.hooks();
+
+    let sleeper = RecordingSleeper::default();
+    let clock = MovingClock(&sleeper);
+    let steps = stepped_until_waited(&mut wide, &clock, &sleeper, None, &mut hooks);
+
+    let slept = sleeper.slept();
+    assert_eq!(
+        slept.iter().sum::<std::time::Duration>(),
+        std::time::Duration::from_secs(9_120),
+        "the run sleeps from 03:00:00 to 05:32:00, through the margin past the 05:30 reset: \
+         {slept:?}"
+    );
+    assert!(
+        slept
+            .iter()
+            .all(|slice| *slice <= std::time::Duration::from_secs(600)),
+        "every slice is at most ten minutes: {slept:?}"
+    );
+    assert_eq!(
+        clock.now_rfc3339(),
+        "2026-11-11T05:32:00Z",
+        "the task wakes two minutes past the reset, not before"
+    );
+    assert_eq!(
+        steps.last().map(|step| step.defer_waits.clone()),
+        Some(vec![(9_120_000, 1)]),
+        "exactly one `defer_wait_elapsed`, for the whole wait, in the first round: {steps:?}"
+    );
+}
+
+#[test]
+fn every_elapsed_wait_records_all_of_its_sleeps() {
+    use crate::engine::topology::scaffold::WideTask;
+
+    let mut wide = deferred_on_claude_max(
+        "reset-wait-every-sleep",
+        &[WideTask::independent("alpha")],
+        FIVE_HOUR_LIMIT,
+    );
+    let mut hooks = wide.env.hooks();
+    let mut recorded = defer_waits(&wide).len();
+
+    let sleeper = RecordingSleeper::default();
+    let steps = stepped_until_waited(
+        &mut wide,
+        &MovingClock(&sleeper),
+        &sleeper,
+        None,
+        &mut hooks,
+    );
+
+    let slept = sleeper.slept();
+    let mut since = 0;
+    let mut checked = 0;
+    for step in &steps {
+        for (waited_ms, round) in &step.defer_waits[recorded..] {
+            let sleeps = &slept[since..step.slices];
+            assert_eq!(
+                std::time::Duration::from_millis(*waited_ms),
+                sleeps.iter().sum::<std::time::Duration>(),
+                "the `defer_wait_elapsed` of round {round} records every sleep since the one \
+                 before it: {sleeps:?}"
+            );
+            since = step.slices;
+            checked += 1;
+        }
+        recorded = step.defer_waits.len();
+    }
+    assert!(
+        checked > 0,
+        "the step that answered `Waited` appended a `defer_wait_elapsed`: {steps:?}"
     );
 }
 

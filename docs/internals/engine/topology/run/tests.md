@@ -489,18 +489,27 @@ A runner that answers the way `wide_responder` does, except for the worker of ea
 stderr. `on_claude_max` starts a run with it, and the resume tests hand a fresh one to the next
 process.
 
+## `fn rate_limited_step_past_any_wait(`
+
+`step_answered_by` with the rate-limiting adapters, repeated while the step answers
+`Progress::Waiting`. A five-hour limit read at 03:00 names a reset the back-off waits out, in
+sixteen slices on this fixed clock, and a test about what the limit writes is about the step
+after them.
+
 ## `fn a_second_rate_limit_naming_the_same_reset_writes_no_second_pool_exhausted() {`
 
 `TopologyRun` writes `pool_exhausted` once for each pool and reset, as the sequential engine
 does. A rate limit is an outage, so the ladder defers the task: its generation closes, the
-backoff wakes it, and it is dispatched again under the next generation. The second attempt hits
-the same five-hour limit, and the log keeps its single `pool_exhausted`.
+backoff wakes it, and it is dispatched again under the next generation. The backoff waits out
+the 05:30 reset the first limit recorded, in the slices `rate_limited_step_past_any_wait` steps
+through, before it wakes the task. The second attempt hits the same five-hour limit, and the log
+keeps its single `pool_exhausted`.
 
 ## `fn a_second_rate_limit_naming_a_different_reset_writes_one_more_pool_exhausted() {`
 
-The same deferral, with a second limit that names a different reset: the weekly one, at 17:00 UTC
-on 14 November. A pool still marked exhausted gets one more `pool_exhausted` when the reset
-moves, so the log holds both, in order.
+The same deferral, waited out to 05:32 the same way, with a second limit that names a different
+reset: the weekly one, at 17:00 UTC on 14 November. A pool still marked exhausted gets one more
+`pool_exhausted` when the reset moves, so the log holds both, in order.
 
 ## `fn a_rate_limit_after_an_attempt_the_pool_served_writes_pool_exhausted_again() {`
 
@@ -550,6 +559,206 @@ interrupted, which carries no record and retires nothing. When `alpha` runs agai
 five-hour limit, the log still holds a single `pool_exhausted`. So the resumed run held the pool
 exhausted at 05:30, the reset the cut log recorded. Had it held the pool with no reset, the 05:30
 limit would have counted as a new reset and been written again.
+
+## `struct RecordingSleeper(std::cell::RefCell<Vec<std::time::Duration>>);`
+
+A sleeper that sleeps nothing and keeps every duration it was asked for, in order, so a test reads
+the whole of a wait as the slices it was slept in.
+
+## `fn defer_waits(wide: &crate::engine::topology::scaffold::Wide) -> Vec<(u64, u32)> {`
+
+Every `defer_wait_elapsed` the log holds, as its `waited_ms` and `round`.
+
+## `struct Stepped {`
+
+One step of `stepped_until_waited`: what it answered, every `defer_wait_elapsed` durable after
+it, and how many slices the sleeper had slept by then.
+
+## `fn stepped_until_waited(`
+
+Step the run on `clock` and `sleeper` until a step answers `Progress::Waited`, keeping each step.
+It reads the log after every step, so a test can say that no `defer_wait_elapsed` was appended
+before the last slice and not only that one was appended in the end. `answers` replaces the
+scaffold's unattended answer source when a test needs an answer to arrive. The bound of 64 steps
+is four times the sixteen slices the wait from 03:00 to 05:32 takes.
+
+## `fn deferred_on_claude_max(`
+
+`on_claude_max` with `alpha`'s first generation limited by `limit`, stepped once at `RunClock`:
+the attempt settles rate limited and the task is `Deferred`. Every reset-wait test starts here,
+at 03:00 UTC on 11 November 2026, with one deferred task.
+
+## `fn a_deferred_rate_limit_naming_a_reset_is_waited_out_to_two_minutes_past_it() {`
+
+The witness. Claude Code's five-hour limit, read at 03:00, names a 05:30 reset, and the run waits
+until two minutes past it, at 05:32. The sleeper records slices of at most ten minutes that come
+to 9,120 seconds, which is 05:32:00 less 03:00:00. The log holds exactly one `defer_wait_elapsed`,
+with `waited_ms` 9,120,000 and `round` 1, and no step before the last appended one.
+
+Before `back_off` waited toward a reset, the first back-off slept the default sixty seconds and
+appended a `defer_wait_elapsed` of 60,000. The task woke after a minute, met the same limit, and
+spent one of its `max_defers` on each wake, so the fixture's allowance of two was gone within
+minutes, hours before the window cleared.
+
+## `fn assert_backs_off_as_before(tag: &str, steps: &[Stepped], sleeper: &RecordingSleeper) {`
+
+The back-off when no known reset is waited for: one step, which sleeps the doubling backoff's
+first minute and appends a `defer_wait_elapsed` of 60,000 in round 1.
+
+## `fn a_limit_naming_a_reset_past_the_bound_backs_off_as_before() {`
+
+Claude Code's weekly limit, read at 03:00 on 11 November, names 17:00 on 14 November. That is
+more than `interaction::RESET_WAIT_BOUND` (five hours and a quarter) ahead, so
+`reset_wait_until` waits for nothing and the run backs off as it did before.
+
+## `const UNREAD_LIMIT: &str = "429 Too Many Requests";`
+
+A rate-limit message that names no reset.
+
+## `fn a_rate_limit_whose_reset_is_not_read_backs_off_as_before() {`
+
+The pool is recorded exhausted with no reset, so there is nothing to wait for and the run backs
+off as before.
+
+The task names an agent whose reset is not read, which is any agent but Claude Code
+(`capacity::pool_exhausted_to_record`). This scaffold's ladder runs Claude Code on every rung,
+so the test gets the same record another way: a Claude Code limit whose message names no reset.
+`back_off` reads only the `exhausted_pools` entry, and either way that entry is
+`("claude-max", None)`, which the test asserts before it steps.
+
+## `struct AfterTheReset;`
+
+The run's clock at 06:00 UTC on 11 November 2026, half an hour after the reset `RunClock` reads
+from the five-hour limit.
+
+## `fn a_recorded_reset_already_passed_backs_off_as_before() {`
+
+The five-hour limit is read at 03:00, so the pool is recorded exhausted until 05:30. The run then
+backs off at 06:00. A reset already behind the clock is not waited for (`reset_wait_until`), so
+the back-off is the plain one.
+
+## `fn a_reset_on_a_day_its_month_lacks_is_not_read() {`
+
+`PR390-INVALID-RESET-DRIVES-WAIT` (P2): the witness. `unix_seconds_of` checked a day only against
+1 to 31, so 31 February 2026 read as 3 March, 29 February 2026 (not a leap year) as 1 March, and
+31 April as 1 May. Each of the three now reads as `None`. 29 February 2028 is a leap day and still
+reads, at one hour past `util::days_from_civil`'s count for that date. The five-hour limit's
+`2026-11-11T05:30:00Z` reads as it always did. On the code before the repair the test fails on its
+first reading: `Some(1772499600)`, 01:00 on 3 March 2026, where it expects `None`.
+
+## `struct OnMarchThird;`
+
+The run's clock at midnight UTC on 3 March 2026. The old parser read `2026-02-31T01:00:00Z` as an
+hour after this, well inside `interaction::RESET_WAIT_BOUND`.
+
+## `fn a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before() {`
+
+The same defect at the level of the run. The pool's recorded reset is replaced with
+`2026-02-31T01:00:00Z`, as a corrupted or hand-edited log would leave it, and the run backs off on
+`OnMarchThird`. A reset that does not read is no known reset, so the back-off is the plain one.
+On the code before the repair the run instead waited toward 01:02 on 3 March, in slices of
+600 seconds six times and then 120, 3,720 seconds where the plain back-off sleeps 60.
+
+The test sets `exhausted_pools` directly. It does not resume from a log that holds the reset,
+because a resume wakes the deferred task and runs it again before any back-off. A resumed run
+reaches `back_off` only after a second limit, and that limit records its own reset over the one
+under test. Either way, `exhausted_pools` is what `back_off` reads.
+
+## `fn a_reset_reading_outside_the_writers_shape_is_not_read() {`
+
+`PR390-RESET-YEAR-OVERFLOW-PANIC` and `PR390-MALFORMED-RESET-SUFFIX-WAITS`: the witness. Each
+reading is the five-hour limit's `2026-11-11T05:30:00Z` with one thing changed, and each is `None`:
+a year of `9223372036854775807` or of `10000`, a month of `1`, seconds of `+0`, `.not-a-fraction`
+or a bare `.` before the `Z`, a lowercase `t` or `z`, `+00:00` in place of the `Z`, a 60th second,
+and the year in full-width digits. The empty string is `None` too. A fraction of digits still
+reads, as the whole second before it, and so do the epoch and the last second of 9999, the two ends
+of what four digits of year can write.
+
+On the code before the repair the test panics on its first reading, `attempt to multiply with
+overflow` in `util::days_from_civil` (`era * 146_097`). With it set aside, six of the other eleven
+read:
+`10000` as 253,429,536,600, the one-digit month as 11 January 2026, `+0`, `.not-a-fraction` and
+the bare `.` as 05:30, and the 60th second as 05:31.
+
+## `fn whatever_reads_is_what_the_writer_writes() {`
+
+The parser's grammar is the writer's, from both sides. Every instant of a spread from the epoch to
+the last second of 9999, and of a few edges among them (29 February 2000, the five-hour limit's
+reset), reads back from what `util::rfc3339_utc` writes for it. Then every one-character
+insertion, deletion and substitution in `2026-11-11T05:30:00Z` and in `2028-02-29T23:59:59.5Z`,
+drawn from `0 9 + - . : T Z é ２` and a space, either does not read or reads as an instant whose
+`rfc3339_utc` is the edited text less its fraction. A fraction here is `.` and one or more digits
+just before the final `Z`, and anything else after a `.` stays in the text, so a reading the
+parser takes too loosely cannot match. The leap day puts the calendar under the edits too: one that
+moves it into `2029` or `2098` names a day those years lack, and does not read.
+
+On the code before the repair the test fails at `02026-11-11T05:30:00Z`, a `0` inserted before the
+year, which read as 1,794,375,000, written `2026-11-11T05:30:00Z`.
+
+## `fn a_recorded_reset_outside_the_writers_shape_backs_off_as_before() {`
+
+The two defects at the level of the run, as in
+`a_recorded_reset_on_a_day_its_month_lacks_backs_off_as_before` but on `RunClock`. The pool's
+recorded reset is replaced once with the five-hour limit's reset in the year
+`9223372036854775807`, and once with `2026-11-11T05:30:00.not-a-fractionZ`. Neither reads, so each
+is no known reset and the run backs off the plain minute. On the code before the repair the first
+case panicked in `util::days_from_civil` inside `TopologyRun::awaited_reset`. The second read as
+05:30 and waited toward 05:32, in fifteen slices of 600 seconds and one of 120, 9,120 seconds where
+the plain back-off sleeps 60.
+
+## `struct AnsweredAfterSlices<'a> {`
+
+An answer source that has nothing to say until the sleeper has slept `slices` slices, and then
+answers `answer`: an answer published between two slices of the wait.
+
+## `struct WaitingLines(std::sync::Mutex<Vec<String>>);`
+
+A notifier that keeps every waiting line it is given. It is a `static` because a run holds its
+notifiers as `&'static dyn Notifier`. Only the one test below hands it to a run, so no other test
+writes to it.
+
+## `fn an_answer_published_between_two_slices_is_ingested_before_the_wait_continues() {`
+
+`alpha` is rate limited and deferred until 05:32, and `beta` waits for an answer to a spend
+approval, raised through `ask_to_approve_spend`. The answer source declines it once two slices
+have been slept. The step after the second slice ingests the decline, and sleeps nothing. Every
+other step sleeps one slice toward 05:32. The run selects before it sleeps, so an answer that
+arrives during the wait is taken in at most one slice late.
+
+The decline fails `beta` and leaves `alpha` deferred, so the next step backs off again. It
+continues the wait it held, which ingesting an answer does not drop: the slices still come to
+9,120 seconds in all, and the log holds one `defer_wait_elapsed`, at the end. The notifier is
+told about the wait once, when it starts, and not again when it continues after the answer.
+
+## `struct MovingClock<'a>(&'a RecordingSleeper);`
+
+`RunClock`'s 03:00, moved on by every slice the sleeper has slept, read back as RFC 3339 UTC
+(`util::rfc3339_utc`). The clock and the sleeper share one count, the sleeper's record, so the
+clock reads 05:30 once the slices come to two and a half hours, as a real run's clock would, and
+the two cannot drift apart. `RunClock` stays at 03:00 however long the run sleeps, which is why
+the tests above never reached the reset and never saw a held wait lose it.
+
+## `fn a_held_reset_wait_runs_through_its_margin_on_a_moving_clock() {`
+
+`PR390-HELD-RESET-LOSES-MARGIN` (P1): the witness's run, on a clock that moves. Fifteen
+ten-minute slices bring the clock from 03:00 to 05:30, the reset itself. `back_off` used to
+choose its reset again before every slice, and at 05:30 `reset_wait_until` chose none, because
+the reset was no longer ahead. The run then slept the plain backoff's minute, appended a
+`defer_wait_elapsed` of 60,000 in round 1, and woke the task at 05:31, before the 05:32 it had
+announced, with 9,000 seconds of completed sleep missing from the log.
+
+A held wait is now continued before any reset is chosen, so it runs on through its two-minute
+margin. The slices come to 9,120 seconds, none longer than ten minutes, the clock ends at 05:32,
+and the log holds exactly one `defer_wait_elapsed`, of 9,120,000 in round 1. On the code before
+the repair the test fails on its first assertion, 9,060 seconds slept against 9,120.
+
+## `fn every_elapsed_wait_records_all_of_its_sleeps() {`
+
+The same run on the same moving clock, stepped until `Progress::Waited`. Each
+`defer_wait_elapsed` appended must record, in `waited_ms`, the sum of the slices slept since the
+one before it, or since stepping began. A back-off that drops a held wait for the plain one
+records only its own minute: on the code before the repair, the one `defer_wait_elapsed` said
+60 seconds where 9,060 had been slept.
 
 ## `fn escalated_log(interrupted_first: bool) -> (TopologyFold, Vec<TopologyEvent>) {`
 

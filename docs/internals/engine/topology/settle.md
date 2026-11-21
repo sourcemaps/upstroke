@@ -308,6 +308,70 @@ The first wait, doubled per round and capped.
 
 Consecutive waits where deferred work was the only runnable work.
 
+A wait toward a target counts **once**, when it elapses, however many
+slices [`Deferral::wait_toward`] slept it in. A slice is not a deferral:
+counting slices would make a five-hour wait read, in
+`DeferWaitElapsed4.round`, as thirty consecutive backoffs.
+
+## `pub struct Deferral` › `toward: Option<HeldWait>,`
+
+The target being waited toward, if a wait toward one is in progress.
+
+`None` before the first [`Deferral::wait_toward`], after a wait toward a
+target elapses, and after [`Deferral::progressed`]. [`Deferral::wait`]
+neither reads nor writes it. [`Deferral::held_until`] reads its target.
+
+## `struct HeldWait {`
+
+One wait toward an absolute target, held across the slices it is slept in.
+
+## `struct HeldWait` › `until_unix: u64,`
+
+The target, in Unix seconds. A call naming a different target starts a
+new wait rather than continuing this one.
+
+## `struct HeldWait` › `started_unix: u64,`
+
+The Unix second the caller passed when this wait started. The wait's whole
+length is `until_unix - started_unix`, fixed when it starts.
+
+## `struct HeldWait` › `slept: Duration,`
+
+The time slept toward this target so far.
+
+**The clock and the sleeps are both evidence, and the greater one wins.**
+The elapsed part of the wait is `max(now - started, slept)`. The clock alone
+would never finish in a test, whose clock does not move. The sleeps alone
+would oversleep in a run, where the clock also moves while the coordinator
+works between slices, or while the host is suspended. Taking the greater of
+the two finishes when either says the target has been reached.
+
+## `pub enum ResetWaited {`
+
+What one call of [`Deferral::wait_toward`] did.
+
+**Only `Elapsed` is an event.** A `Slept` is one slice of a wait still in
+progress, and nothing in it is durable: appending a `defer_wait_elapsed` per
+slice would wake the deferred task, through the fold, after the first slice
+rather than at the target.
+
+The driver's caller is `TopologyRun::back_off`. It answers a `Slept` as
+`Progress::Waiting` and appends nothing, and appends the `Elapsed` event as
+the plain backoff's is appended. Until that caller landed, the method carried
+`#[cfg_attr(not(test), expect(dead_code, …))]` and this enum an `allow`, and
+both went with it.
+
+## `pub enum ResetWaited` › `Slept { slept: Duration },`
+
+One slice was slept and the target is still ahead. `slept` is this slice,
+not the total.
+
+## `pub enum ResetWaited` › `Elapsed(DeferWaitElapsed4),`
+
+The target is reached. This is the event that records the wait: `waited_ms`
+is everything slept toward the target, and `round` is the deferral this wait
+was, one-based as with [`Deferral::wait`].
+
 ## `impl Deferral` › `pub const fn new(base: Duration) -> Self {`
 
 A backoff starting from `base`.
@@ -324,9 +388,65 @@ The sleep happens first because the event is the *record of a wait that
 elapsed*: appending it before sleeping would put a claim in the log
 that a kill during the sleep would make false.
 
+It does not touch a wait held by [`Deferral::wait_toward`]: the backoff
+and a wait toward a target share `round` and nothing else. Nor is it
+called while one is held: `TopologyRun::back_off` continues a held wait
+([`Deferral::held_until`]) before it considers the plain backoff.
+
+## `impl Deferral` › `pub fn wait_toward(`
+
+Sleep one slice of a wait toward `until_unix`, and return the event once
+the target is reached.
+
+`now_unix` is the caller's clock. The first call, or one naming a different
+target, starts a wait at `now_unix` with nothing slept. Each call then:
+
+1. takes the elapsed part as the greater of `now_unix - started` and the
+   time slept so far, and the remaining part as the wait's length minus that,
+   never negative;
+2. sleeps `min(remaining, MAX_DEFER_BACKOFF)` and adds it to the time slept.
+   Nothing is slept when nothing remains;
+3. answers `Slept` with that slice if time still remains, and otherwise
+   drops the held wait, adds one to `round`, and answers `Elapsed` with the
+   total slept.
+
+**One deferral, however many slices.** A slice is capped at the backoff's
+own ceiling, so no single sleep is longer than the longest one
+[`Deferral::wait`] takes, and the caller gets control back between slices.
+The wait is still recorded once, by the call that reaches the target, and
+that record's `waited_ms` is every slice slept toward it, from every call
+that continued it.
+
+The sleep comes before the answer for the reason `wait` gives: `Elapsed` is
+the record of a wait that has elapsed.
+
+## `impl Deferral` › `pub fn held_until(&self) -> Option<u64> {`
+
+The target of the wait in progress, if one is held: what the next
+[`Deferral::wait_toward`] must be given to continue it rather than start
+another.
+
+`TopologyRun::back_off` asks this before anything else. With a target
+held, it passes that target to `wait_toward` and chooses no reset. Only
+with none held does it choose one, and it says once, when it starts a
+wait, that the run is waiting for a reset. A held wait therefore runs
+through its margin to the target it started toward, and its `Elapsed`
+records every slice it took, whatever the clock reads between slices.
+
+It replaced `holds_wait_toward(until_unix)`, which said whether the held
+wait was toward a target the caller had already chosen. Asking after
+choosing let a choice of no target, made when the moving clock reached the
+reset itself, abandon the held wait for the plain backoff. The task then
+woke before the margin, and the log recorded only the backoff's minute,
+none of the slices already slept (`PR390-HELD-RESET-LOSES-MARGIN`).
+
 ## `impl Deferral` › `pub fn progressed(&mut self) {`
 
 Reset the doubling: work other than a wait made progress.
+
+It also drops a held wait toward a target. Progress means the deferred
+work may now have something else to do, and the next wait toward a target,
+even the same one, starts again from the clock.
 
 ## `impl Deferral` › `pub const fn round(&self) -> u32 {`
 

@@ -21,3 +21,19 @@ Pipe setup failures identify the affected stream and native operation. If
 supervision fails and cleanup also fails, the original typed failure remains
 primary and the additional cleanup failures are reported alongside it. A
 successful cleanup does not change the original error category.
+
+**Waiting out a known reset (schema 4, as built).** When nothing is left to
+run but deferred work, and the pool that refused a deferred task has a
+recorded reset at most 5 h 15 min ahead, the run waits until two minutes past
+the earliest such reset, as one deferral, and prints once the pool, the reset
+and how long it will wait. It sleeps in slices of at most ten minutes and
+chooses its next step again between them, so an answer that arrives meanwhile
+is taken first, and it records one `defer_wait_elapsed`, for the whole wait,
+when the wait ends. Otherwise the back-off is unchanged: 60 s, doubling to at
+most 600 s while nothing progresses between waits. A dispatch counts as
+progress, so when the limit refuses the same task after each wait, every wait
+is 60 s, and after three deferrals its next refusal asks a question. A run of
+schemas 1–3, resumed by the legacy coordinator, does not wait. A resume
+before the reset starts the wait again, and the deferral it spends is counted
+again: every resume wakes the deferred tasks, so the task meets the limit
+once more and is deferred once more.

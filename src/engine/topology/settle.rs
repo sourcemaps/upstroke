@@ -117,12 +117,30 @@ pub fn rematerialize_question(finished: &AttemptFinished4) -> Option<&FrozenQues
 pub struct Deferral {
     base: Duration,
     round: u32,
+    toward: Option<HeldWait>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HeldWait {
+    until_unix: u64,
+    started_unix: u64,
+    slept: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResetWaited {
+    Slept { slept: Duration },
+    Elapsed(DeferWaitElapsed4),
 }
 
 impl Deferral {
     #[must_use]
     pub const fn new(base: Duration) -> Self {
-        Self { base, round: 0 }
+        Self {
+            base,
+            round: 0,
+            toward: None,
+        }
     }
 
     #[must_use]
@@ -140,8 +158,50 @@ impl Deferral {
         }
     }
 
+    pub fn wait_toward(
+        &mut self,
+        sleeper: &dyn Sleeper,
+        now_unix: u64,
+        until_unix: u64,
+    ) -> ResetWaited {
+        let held = match self.toward {
+            Some(held) if held.until_unix == until_unix => held,
+            Some(_) | None => HeldWait {
+                until_unix,
+                started_unix: now_unix,
+                slept: Duration::ZERO,
+            },
+        };
+        let elapsed =
+            Duration::from_secs(now_unix.saturating_sub(held.started_unix)).max(held.slept);
+        let remaining = Duration::from_secs(until_unix.saturating_sub(held.started_unix))
+            .saturating_sub(elapsed);
+        let slice = remaining.min(interaction::MAX_DEFER_BACKOFF);
+        if !slice.is_zero() {
+            sleeper.sleep(slice);
+        }
+        let slept = held.slept.saturating_add(slice);
+
+        if remaining > slice {
+            self.toward = Some(HeldWait { slept, ..held });
+            return ResetWaited::Slept { slept: slice };
+        }
+        self.toward = None;
+        self.round = self.round.saturating_add(1);
+        ResetWaited::Elapsed(DeferWaitElapsed4 {
+            waited_ms: u64::try_from(slept.as_millis()).unwrap_or(u64::MAX),
+            round: self.round,
+        })
+    }
+
+    #[must_use]
+    pub fn held_until(&self) -> Option<u64> {
+        self.toward.map(|held| held.until_unix)
+    }
+
     pub fn progressed(&mut self) {
         self.round = 0;
+        self.toward = None;
     }
 
     #[must_use]

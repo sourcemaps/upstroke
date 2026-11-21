@@ -388,7 +388,9 @@ measured the reservation ledger at 0 there and read it as a release).
 `Deferral::wait` sleeps the backoff and returns the event;
 `TopologyRun::step` appends it. In that order — the event records
 a wait that *elapsed*, so appending it first would put a claim in
-the log a kill during the sleep would make false.
+the log a kill during the sleep would make false. A wait toward a
+known reset is slept in slices by `Deferral::wait_toward`, and only
+its last slice returns the event (`TopologyRun::back_off`).
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::ReadyDispatch => Disposition::Performed,`
 
@@ -1032,6 +1034,22 @@ How long this round slept.
 
 Which wait it was.
 
+## `pub enum Progress` › `Waiting {`
+
+One slice of a wait toward a known reset was slept, and the wait's
+target, two minutes past the reset, is still ahead. Nothing was
+appended: the wait is recorded once, by the
+`defer_wait_elapsed` of the slice that reaches it (`Waited`). See
+`back_off`.
+
+## `pub enum Progress` › `slept_ms: u64,`
+
+How long this slice slept, at most ten minutes.
+
+## `pub enum Progress` › `until_unix: u64,`
+
+The Unix second the wait ends: two minutes past the reset.
+
 ## `pub enum Progress` › `BudgetExceeded,`
 
 A ceiling refused the next spawn and `budget_exceeded` is durable.
@@ -1443,6 +1461,110 @@ first would put a claim in the log that a kill during the sleep
 would make false. The coordinator takes this arm only when no pipeline
 is live (R-AB), so a `defer_wait_elapsed` is never placed among in-flight
 settlements.
+
+**A known reset is waited out, not backed off.** When a deferred task's
+limit named a reset ([`Self::awaited_reset`]), the run waits until two
+minutes past the earliest one, in slices of at most ten minutes
+(`Deferral::wait_toward`). The doubling backoff would otherwise wake the
+task after a minute, run it into the same limit, and spend one of its
+`max_defers` on each wake, long before a five-hour window clears. Each
+slice that leaves the target ahead appends nothing and answers
+`Progress::Waiting`. The next step selects again, so an answer, a task made
+ready or the end of the run comes before the next slice, and a later
+`Backoff` continues the same wait. The slice that reaches the target
+appends its `defer_wait_elapsed`, for the whole wait, in the order and form
+the plain backoff appends one ([`Self::wait_elapsed`]), and answers
+`Progress::Waited`.
+
+**A held wait is continued before any reset is chosen.** The arm first
+asks the deferral for the target of the wait it holds
+(`Deferral::held_until`). With one held, it sleeps the next slice toward
+that target and does not call [`Self::awaited_reset`] at all. Only with no
+wait held does it choose: if [`Self::awaited_reset`] picks a reset, a wait
+toward it starts, and if it picks none, the arm is the plain backoff
+below. The order matters because the clock moves while the wait is
+slept. Fifteen ten-minute slices from 03:00 bring it to 05:30, the reset
+itself, and `interaction::reset_wait_until` waits only for a reset still
+ahead. When the arm chose before every slice, that choice found nothing
+at 05:30. The arm then slept the plain backoff's minute, recorded 60,000
+ms after 9,060 seconds of sleep, and woke the task at 05:31, before the
+05:32 it had announced (`PR390-HELD-RESET-LOSES-MARGIN`). Continued, the wait runs through its
+two-minute margin, and its `defer_wait_elapsed` records every slice
+(`Deferral::wait_toward`'s `Elapsed`).
+
+The run says once that it is waiting, when the wait starts
+([`Self::announce_reset_wait`]). A step that continues a held wait
+chooses nothing and says nothing.
+
+With no wait held and no known reset in range, the arm is the plain
+backoff, unchanged. That covers a limit naming a reset more than
+`interaction::RESET_WAIT_BOUND` ahead (the weekly one, usually), a pool
+exhausted with no reset recorded, a recorded reset that does not read as
+a date ([`unix_seconds_of`]), a recorded reset the clock had already
+passed when the back-off began, and a deferred queue verification, which
+names no pool. A reset the clock passes during a held wait is not one of
+these: that wait is continued to its target.
+
+## `impl TopologyRun` › `fn wait_elapsed(`
+
+Append a wait's `defer_wait_elapsed` and answer `Progress::Waited`. Both of
+`back_off`'s waits end here, so the record of a wait that elapsed has one
+shape whichever wait it was.
+
+## `impl TopologyRun` › `fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {`
+
+The reset a back-off starts a wait toward. It is asked only when the
+deferral holds no wait (`Deferral::held_until`), so a held wait is never
+chosen again, and a reset that has fallen behind the clock during the
+wait cannot end it early. It chooses from the log and the run's memory
+of exhausted pools:
+
+1. each task the fold holds `Deferred`;
+2. its last `attempt_finished` ([`last_settled_record`]);
+3. the pool that attempt's failure names, as `capacity::retire_signals`
+   chooses it (`capacity::limited_pool`);
+4. that pool's recorded reset in `exhausted_pools`, read as Unix seconds
+   by [`unix_seconds_of`]. A reset that does not read, such as one on a
+   day its month lacks, is no known reset and is dropped here;
+5. the earliest of those resets that is ahead of the run's clock by at
+   most `interaction::RESET_WAIT_BOUND`, the one
+   `interaction::reset_wait_until` waits for. With none ahead within the
+   bound it answers `None`.
+
+The pool and reset text come back with the target, for the line
+[`Self::announce_reset_wait`] prints. A pool a later attempt proved serving
+is no longer in `exhausted_pools`, so its old reset is not waited for.
+
+## `impl TopologyRun` › `fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {`
+
+Hand each notifier [`interaction::reset_wait_line`] once, for the wait
+from now to the target. The CLI notifier prints it to standard error, and a
+production run always holds that notifier (`interaction::notifiers_for`).
+A notifier named twice in `[interaction] notify` is told once.
+
+## `struct AwaitedReset {`
+
+What [`TopologyRun::awaited_reset`] chose.
+
+## `struct AwaitedReset` › `pool: String,`
+
+The pool whose limit named the reset.
+
+## `struct AwaitedReset` › `reset_at: String,`
+
+The reset as the pool's `pool_exhausted` recorded it.
+
+## `struct AwaitedReset` › `until_unix: u64,`
+
+The Unix second the wait ends, two minutes past the reset: the target
+`Deferral::wait_toward` is given when the wait starts. The deferral then
+holds it (`Deferral::held_until`), later slices are slept toward it, and
+`Progress::Waiting` reports it.
+
+## `fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&AttemptRecord> {`
+
+The record of `key`'s latest settled attempt: its last `attempt_finished`.
+A deferred task's latest settlement is the one that deferred it.
 
 ## `pub(super) fn begin_dispatch<O: Operator + ?Sized>(`
 
@@ -2062,8 +2184,50 @@ falls back to the host clock, which is what the sequential engine reads.
 
 ## `fn unix_seconds_of(reading: &str) -> Option<u64> {`
 
-`YYYY-MM-DDTHH:MM:SS[.fraction]Z` in Unix seconds, or `None` for
-anything else.
+The reading in Unix seconds when it is, byte for byte,
+`YYYY-MM-DDTHH:MM:SS`, then optionally `.` and one or more ASCII digits,
+then `Z`, and `None` for anything else. Each letter is one ASCII digit.
+The month is 01 to 12, the day one that month has, the hour 00 to 23,
+and the minute and second 00 to 59. A fraction is accepted and dropped.
+
+**Nothing reads but the writer's shape**
+(`PR390-RESET-YEAR-OVERFLOW-PANIC`, `PR390-MALFORMED-RESET-SUFFIX-WAITS`).
+The parser split the reading on `T`, `-` and `:` and handed each piece
+to `str::parse`, which takes any number of digits and a leading `+`. It
+read the seconds up to a `.` and never looked at what followed. So a
+persisted reset with the year `9223372036854775807` reached
+`util::days_from_civil`, whose `era * 146_097` overflows `i64`, and the
+back-off panicked reading it ([`TopologyRun::awaited_reset`]). And
+`2026-11-11T05:30:00.not-a-fractionZ` read as 05:30, so the run waited
+toward a reset no writer had written. A bare `.`, seconds of `+0`, a
+one-digit month, a five-digit year and a 60th second read the same way.
+Every reset the engine records and every reading of `SystemClock` comes
+from `util::rfc3339_utc` (through
+`agent::adapter::reset_at_from_limit_message` and
+`util::rfc3339_utc_now`), which writes four digits of year, two of every
+other field and `Z`. The parser now matches that shape with a slice
+pattern over the bytes, plus the one widening the old grammar promised,
+a fraction of digits. Four digits keep the year far below anything
+`days_from_civil` can overflow on. What reads is what the writer writes
+for the value read, less any fraction.
+
+**A day its month lacks is no date** (`PR390-INVALID-RESET-DRIVES-WAIT`).
+The range checks admit a day from 1 to 31 in any month, and
+`util::days_from_civil` counts a day past the month's end on into the
+next month, so `2026-02-31T01:00:00Z` read as 01:00 on 3 March. A reset
+read back from the log comes through here ([`TopologyRun::awaited_reset`]),
+and no fold validates `pool_exhausted.reset_at`, because the field is
+informational. So a corrupted or hand-edited log could start a wait of
+hours toward a reset no limit named. The parser now keeps a date only when
+`util::civil_from_days` gives the same year, month and day back, which is
+the check `agent::adapter` makes on a date it reads from a limit message.
+29 February reads in a leap year and in no other.
+
+A reset that does not read is no known reset, so a deferred task whose
+pool records one backs off as if no reset were recorded. The run's own
+clock goes through the same parser ([`unix_seconds`]), and a reading
+refused here falls back to the host clock, as any other unreadable
+reading does.
 
 ## `fn promote_candidate<O: Operator + ?Sized>(`
 

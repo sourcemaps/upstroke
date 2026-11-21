@@ -316,7 +316,7 @@ Events arrive in order, so a later signal re-marks a pool this retired —
 which is right: the pool went down again. The retiring half is
 `retire_served_pools`, which the live engine calls too.
 
-## `fn retire_signals` › `if let Some(failure) = &record.failure {`
+## `fn retire_signals` › `if let Some(pool) = limited_pool(record) {`
 
 In a legacy log the attempt settlement itself is the durable source of a
 rate-limit signal. The legacy writer, which runs only when a run of
@@ -342,6 +342,19 @@ and a resume's `capacity_snapshot` wrote `reset_at: null` beside an open
 signal that named one. A rate limit with no earlier signal still marks
 the pool, with no reset; a success or an available review still retires
 it first, in `retire_served_pools`.
+
+## `pub(crate) fn limited_pool(record: &AttemptRecord) -> Option<&String> {`
+
+The pool a rate-limited attempt names as refusing: the attempt's own pool
+for a worker failure, the last review's pool for a reviewer failure. Any
+other failure, or none, names no pool, and so does an attempt that ran on
+no pool.
+
+`retire_signals` marks this pool exhausted. The schema-4 run's
+`back_off` reads the same pool from each deferred task's last
+`attempt_finished`, to find the reset it waits toward, so the two cannot
+disagree about which subscription refused. It is effect-free in
+`effects/wrappers.toml`.
 
 ## `pub(crate) fn retire_served_pools(`
 
