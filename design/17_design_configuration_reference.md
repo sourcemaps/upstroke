@@ -54,8 +54,11 @@ pools, and `connect` itself on its next run — and it has this shape:
 **What `profile` does.** A pool's `profile` is the directory handed to the pool's agent as its
 credential location: `CLAUDE_CONFIG_DIR` for Claude Code, so the CLI runs on the account logged
 in there, and the engine handles no token. The host runner sets it from the pool a task attempt
-is bound to, which is the first pool in the file naming the attempt's agent. It applies to that
-agent's work, review and probe processes, and a gate gets no credential location. The value is
+is bound to, which is the first pool in the file naming the attempt's agent that the run's signals
+do not hold exhausted (with every one held, the first whose recorded reset is two minutes past, or
+else the first; a retry that resumes its session keeps its pool). It applies to that agent's work,
+review and probe processes, and a gate gets no credential location. Review and probe processes take
+the profile of the agent's first pool, whatever pool the attempt is bound to. The value is
 used as written, with no `~` expansion, so it must be an absolute path. A profile is supported
 for Claude Code on the host runner only. Before any agent CLI is started, the engine refuses a
 profile on the container runner, a profile for another agent, a relative path (`~/…` among them),

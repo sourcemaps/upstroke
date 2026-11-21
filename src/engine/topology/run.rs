@@ -402,10 +402,7 @@ pub(super) fn begin_retry<O: Operator + ?Sized>(
     key: TaskKey,
     generation: GenerationId,
 ) -> Result<Retrying, UpstrokeError> {
-    let request = {
-        let (run, seams, _) = operator.parts();
-        run.retry_request(key, generation, seams)?
-    };
+    let request = operator.driven().retry_request(key, generation)?;
     let begun = {
         let run = operator.parts().0;
         super::settle::retry_begin(&run.handle.fold, run.broker.halves().0, &request)?
@@ -1226,6 +1223,7 @@ struct RunAs {
     feedback: Vec<crate::events::Feedback>,
     attempt: AttemptNumber,
     rung: u32,
+    pool: Option<String>,
     resume_session: Option<SessionId>,
     announced: bool,
     materialized: Option<Materialization>,
@@ -1807,7 +1805,7 @@ impl TopologyRun {
         let now = unix_seconds(seams.clock);
         let until_unix = if let Some(until) = self.deferral.held_until() {
             until
-        } else if let Some(awaited) = self.awaited_reset(now) {
+        } else if let Some(awaited) = self.awaited_reset(now, seams.plans) {
             self.announce_reset_wait(&awaited, now);
             awaited.until_unix
         } else {
@@ -1838,23 +1836,14 @@ impl TopologyRun {
         Ok(Progress::Waited { waited_ms, round })
     }
 
-    fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {
-        let fold = &self.handle.fold;
-        let len = fold.registry().map_or(0, |registry| {
+    fn awaited_reset(&self, now_unix: u64, plans: &dyn AttemptPlans) -> Option<AwaitedReset> {
+        let len = self.handle.fold.registry().map_or(0, |registry| {
             u32::try_from(registry.len()).unwrap_or(u32::MAX)
         });
         let known: Vec<(u64, &String, &String)> = (0..len)
             .map(TaskKey)
-            .filter(|key| {
-                fold.task(*key)
-                    .is_some_and(|task| task.state == TaskState::Deferred)
-            })
-            .filter_map(|key| {
-                let record = last_settled_record(&self.handle.events, key)?;
-                let pool = crate::capacity::limited_pool(record)?;
-                let reset_at = self.exhausted_pools.get(pool)?.as_ref()?;
-                Some((unix_seconds_of(reset_at)?, pool, reset_at))
-            })
+            .filter_map(|key| self.resets_awaited_by(key, plans))
+            .flatten()
             .collect();
         let until_unix =
             interaction::reset_wait_until(now_unix, known.iter().map(|(reset, ..)| *reset))?;
@@ -1865,6 +1854,42 @@ impl TopologyRun {
             reset_at: (*reset_at).clone(),
             until_unix,
         })
+    }
+
+    fn resets_awaited_by(
+        &self,
+        key: TaskKey,
+        plans: &dyn AttemptPlans,
+    ) -> Option<Vec<(u64, &String, &String)>> {
+        let fold = &self.handle.fold;
+        let task = fold
+            .task(key)
+            .filter(|task| task.state == TaskState::Deferred)?;
+        let record = last_settled_record(&self.handle.events, key)?;
+        let failure = record.failure.as_ref()?;
+        if failure.kind != crate::ladder::FailureKind::RateLimited {
+            return None;
+        }
+        let candidates = match failure.origin {
+            crate::ladder::FailureOrigin::Worker => {
+                plans.pools_for(&fold.rung_binding(key, task.rung)?.agent)
+            }
+            crate::ladder::FailureOrigin::Reviewer => {
+                vec![crate::capacity::limited_pool(record)?.clone()]
+            }
+        };
+        let held = candidates
+            .iter()
+            .map(|pool| self.exhausted_pools.get_key_value(pool))
+            .collect::<Option<Vec<_>>>()?;
+        Some(
+            held.into_iter()
+                .filter_map(|(pool, reset_at)| {
+                    let reset_at = reset_at.as_ref()?;
+                    Some((unix_seconds_of(reset_at)?, pool, reset_at))
+                })
+                .collect(),
+        )
     }
 
     fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {
@@ -1889,6 +1914,7 @@ impl TopologyRun {
         let run_as = RunAs {
             attempt: Self::FIRST_ATTEMPT,
             rung: self.ladder_position(key)?.0,
+            pool: None,
             resume_session: None,
             feedback: self.brief.lines(key),
             announced: false,
@@ -2394,7 +2420,6 @@ impl TopologyRun {
         &self,
         key: TaskKey,
         generation: GenerationId,
-        seams: &RunSeams<'_>,
     ) -> Result<RetryRequest, UpstrokeError> {
         let position = self.ladder_position(key)?;
         let held = self
@@ -2421,7 +2446,8 @@ impl TopologyRun {
                     position.0
                 ),
             })?;
-        let pool = seams.plans.pool_for(&binding.agent);
+        let pool =
+            last_settled_record(&self.handle.events, key).and_then(|record| record.pool.clone());
         let materialization = self.retry_materialization(key);
         Ok(RetryRequest {
             key,
@@ -2446,6 +2472,7 @@ impl TopologyRun {
         let run_as = RunAs {
             attempt: started.attempt,
             rung: started.rung,
+            pool: started.pool.clone(),
             resume_session: started.resume_session.clone(),
             feedback: self.brief.lines(key),
             announced: true,
@@ -2550,12 +2577,24 @@ impl TopologyRun {
             })?
             .clone();
 
+        let pool = if run_as.announced {
+            run_as.pool
+        } else {
+            serving_pool(
+                &seams.plans.pools_for(&binding.agent),
+                &self.exhausted_pools,
+                unix_seconds(seams.clock),
+            )
+            .cloned()
+        };
+
         let plan = seams.plans.plan(&PlanRequest {
             key,
             entry: &entry,
             attempt: run_as.attempt,
             rung: run_as.rung,
             binding,
+            pool,
             workspace: site.worktree,
             resume_session: run_as.resume_session,
             feedback: run_as.feedback,
@@ -2646,6 +2685,19 @@ impl TopologyRun {
             },
             &policy,
         );
+        let next = match next {
+            crate::ladder::Next::Defer
+                if self.another_pool_can_serve(
+                    failure,
+                    &record,
+                    &plan.binding.agent,
+                    seams.plans,
+                ) =>
+            {
+                crate::ladder::Next::RetrySameRung { resume: false }
+            }
+            next => next,
+        };
         let question = match next {
             crate::ladder::Next::AskHuman(kind) => {
                 Some(self.park_question(site.key, attempts_on_rung, kind, failure, seams.ids)?)
@@ -2713,6 +2765,27 @@ impl TopologyRun {
             hooks,
         )?;
         Ok((closed, settled.spent_attempt))
+    }
+
+    fn another_pool_can_serve(
+        &self,
+        failure: &crate::ladder::AttemptFailure,
+        record: &AttemptRecord,
+        agent: &str,
+        plans: &dyn AttemptPlans,
+    ) -> bool {
+        if failure.kind != crate::ladder::FailureKind::RateLimited
+            || failure.origin != crate::ladder::FailureOrigin::Worker
+        {
+            return false;
+        }
+        let Some(refused) = &record.pool else {
+            return false;
+        };
+        plans
+            .pools_for(agent)
+            .iter()
+            .any(|pool| pool != refused && !self.exhausted_pools.contains_key(pool))
     }
 
     fn judged_tree(
@@ -3013,6 +3086,25 @@ fn last_settled_record(events: &[TopologyEvent], key: TaskKey) -> Option<&Attemp
         TopologyEventBody::AttemptFinished { data } if data.key == key => Some(&*data.record),
         _ => None,
     })
+}
+
+fn serving_pool<'a>(
+    candidates: &'a [String],
+    held: &BTreeMap<String, Option<String>>,
+    now_unix: u64,
+) -> Option<&'a String> {
+    let reset_passed = |pool: &&String| {
+        held.get(*pool)
+            .and_then(Option::as_deref)
+            .and_then(unix_seconds_of)
+            .and_then(|reset| reset.checked_add(interaction::RESET_WAIT_MARGIN.as_secs()))
+            .is_some_and(|serving_from| serving_from <= now_unix)
+    };
+    candidates
+        .iter()
+        .find(|pool| !held.contains_key(*pool))
+        .or_else(|| candidates.iter().find(reset_passed))
+        .or_else(|| candidates.first())
 }
 
 fn unix_seconds(clock: &dyn TimeSource) -> u64 {

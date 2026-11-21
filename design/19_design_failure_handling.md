@@ -22,18 +22,37 @@ supervision fails and cleanup also fails, the original typed failure remains
 primary and the additional cleanup failures are reported alongside it. A
 successful cleanup does not change the original error category.
 
+**Failing over to another pool (schema 4, as built).** When a worker's rate
+limit would defer its task, and another pool of the same agent, in pools-file
+order, is not held exhausted by the run's own signals, the attempt is settled
+for a retry instead and the task runs again at once, in a fresh session and a
+fresh worktree, with the same tier, agent, model and effort, on the first
+such pool and under its `profile`. A failover spends no deferral and no
+attempt. A pool stays held from its signal until an attempt it serves retires
+the signal: one whose worker ran on it and ended in neither a rate limit of
+its own nor an interruption, whatever the verdict on the code, or one with a
+review pass on it that reached a verdict. So while another pool of the agent
+is free, the run does not return to a refused pool on a reset it has only
+read; with every pool held, a new attempt binds the first whose recorded
+reset is two minutes past, or else the first in the file. A reviewer's limit,
+and a run with one pool for the agent, defer as before, and a task that has
+spent its deferrals asks its question as before. A run of schemas 1–3 does
+not fail over.
+
 **Waiting out a known reset (schema 4, as built).** When nothing is left to
-run but deferred work, and the pool that refused a deferred task has a
-recorded reset at most 5 h 15 min ahead, the run waits until two minutes past
-the earliest such reset, as one deferral, and prints once the pool, the reset
-and how long it will wait. It sleeps in slices of at most ten minutes and
-chooses its next step again between them, so an answer that arrives meanwhile
-is taken first, and it records one `defer_wait_elapsed`, for the whole wait,
-when the wait ends. Otherwise the back-off is unchanged: 60 s, doubling to at
-most 600 s while nothing progresses between waits. A dispatch counts as
-progress, so when the limit refuses the same task after each wait, every wait
-is 60 s, and after three deferrals its next refusal asks a question. A run of
-schemas 1–3, resumed by the legacy coordinator, does not wait. A resume
-before the reset starts the wait again, and the deferral it spends is counted
-again: every resume wakes the deferred tasks, so the task meets the limit
-once more and is deferred once more.
+run but deferred work, and a pool a deferred task waits on (the pool that
+refused it for a reviewer's limit; every pool of the worker's agent for a
+worker's limit, while all of them are held exhausted) has a recorded reset at
+most 5 h 15 min ahead, the run waits until two minutes past the earliest such
+reset, as one deferral, and prints once the pool, the reset and how long it
+will wait. It sleeps in slices of at most ten minutes and chooses its next
+step again between them, so an answer that arrives meanwhile is taken first,
+and it records one `defer_wait_elapsed`, for the whole wait, when the wait
+ends. Otherwise the back-off is unchanged: 60 s, doubling to at most 600 s
+while nothing progresses between waits. A dispatch counts as progress, so
+when the limit refuses the same task after each wait, every wait is 60 s, and
+after three deferrals its next refusal asks a question. A run of schemas 1–3,
+resumed by the legacy coordinator, does not wait. A resume before the reset
+starts the wait again, and the deferral it spends is counted again: every
+resume wakes the deferred tasks, so the task meets the limit once more and is
+deferred once more.

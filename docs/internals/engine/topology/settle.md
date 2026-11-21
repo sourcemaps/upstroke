@@ -596,7 +596,10 @@ Which rung of the frozen ladder that is.
 
 ## `pub struct RetryRequest` › `pub pool: Option<String>,`
 
-The capacity pool the attempt draws on, where its agent names one.
+The capacity pool the retry is announced on, where its agent names one. It is
+the retained attempt's own pool, which the driver reads from that attempt's
+record (`run::TopologyRun::retry_request`): the retry resumes the attempt's
+session, and a session stays on the pool it ran on.
 
 ## `pub struct RetryRequest` › `pub materialization: Option<Materialization>,`
 

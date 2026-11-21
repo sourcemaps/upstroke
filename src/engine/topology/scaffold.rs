@@ -1286,6 +1286,16 @@ impl ScaffoldAdapters {
         }
     }
 
+    pub(super) const fn rate_limiting_the_second_reviewer() -> Self {
+        Self {
+            primary: AnsweringAdapter::passing(AGENT),
+            second: AnsweringAdapter {
+                verdict: "429 Too Many Requests",
+                ..AnsweringAdapter::rate_limited(REVIEW_AGENT)
+            },
+        }
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             primary: AnsweringAdapter::passing(AGENT),
@@ -2125,6 +2135,7 @@ impl Run {
             rung: 0,
             binding: self.binding(key, 0),
             pool: Some("scaffold-pool".to_owned()),
+            credential_profile: None,
             resume_session: None,
             materialization_observed: None,
             agent: AgentId::new(AGENT),
@@ -2487,6 +2498,14 @@ impl super::attempt::AttemptPlans for WidePlans {
         self.pool_of(agent)
     }
 
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        let mut named = self.pools.iter().filter(|(of, _)| *of == agent).peekable();
+        if named.peek().is_none() {
+            return self.pool.iter().cloned().collect();
+        }
+        named.filter_map(|(_, pool)| pool.clone()).collect()
+    }
+
     fn plan(
         &self,
         request: &super::attempt::PlanRequest<'_>,
@@ -2503,7 +2522,8 @@ impl super::attempt::AttemptPlans for WidePlans {
             attempt: request.attempt,
             rung: request.rung,
             binding: request.binding.clone(),
-            pool: self.pool_of(&request.binding.agent),
+            pool: request.pool.clone(),
+            credential_profile: None,
             resume_session: request.resume_session.clone(),
             materialization_observed: request.materialization_observed,
             agent: AgentId::new(&request.binding.agent),

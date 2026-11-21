@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
+  that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
+  session under its `profile`, instead of waiting for the reset; with every pool of the agent
+  exhausted, the run waits for the earliest reset among them.
 - A schema-4 run whose remaining tasks are deferred on a usage limit now waits until two minutes
   past the reset Claude Code reported, if that is at most 5 h 15 min away, instead of three short
   back-offs and a question; it prints what it is waiting for and records the wait as one deferral.

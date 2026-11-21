@@ -200,6 +200,17 @@ Index into the frozen ladder.
 
 The binding that rung resolved to, effort included.
 
+## `pub struct PlanRequest<'a>` › `pub pool: Option<String>,`
+
+The capacity pool this attempt binds, or `None` for an agent no pool names.
+The driver chooses it and the assembler takes it as given: the plan's `pool`,
+the worker's pool-scoped slot and the pool's credential profile all follow
+this one name. An agent may have several pools, and which one serves an
+attempt depends on the run's memory of exhausted pools and, for a retry, on
+the pool the retained session ran on. Only the driver holds either
+(`run::TopologyRun::prepare_attempt`), so the choice is its to make, among the
+pools [`AttemptPlans::pools_for`] lists.
+
 ## `pub struct PlanRequest<'a>` › `pub workspace: &'a std::path::Path,`
 
 The task worktree the worker runs in.
@@ -274,20 +285,37 @@ Whatever the assembler returns.
 
 ## `pub trait AttemptPlans` › `fn pool_for(&self, agent: &str) -> Option<String>;`
 
-The capacity pool `agent` drains, where the run's table names one.
+The capacity pool `agent` drains, where the run's table names one: the first
+pool of the agent in file order. A reviewer's pass is planned on it. An
+implementer's attempt is not planned from it any longer: the driver chooses
+among [`Self::pools_for`] and hands the plan its choice
+([`PlanRequest::pool`]).
 
-**Here rather than in the driver because the pool rule has one
-production implementation** and this seam owns the frozen table it reads.
-The dispatch arm gets the pool from the plan (`plan.pool`); the retry arm
-appends `attempt_started` **before** its plan exists — `settle::retry`
-produces the event and the plan is built after — so it needs the same
-answer one step earlier. Resolving it in the driver would be a second
-place that decides which pool an attempt drains, which is what
-`a_reviewers_profile_is_accounted_for_at_both_callers` exists to forbid.
+**Here rather than in the driver because the pool table has one owner**, and
+this seam is it. The driver decides which of an agent's pools serves an
+attempt, from what the run remembers of each; which pools an agent has, and
+in what order, is read here and nowhere else.
 
-Sol's `R3-SEAMS-001`: the retry passed `pool: None`, so a resumed run's
-`attempt_started` recorded no pool while the plan it then built resolved
-one — the ledger and the plan disagreeing about the same attempt.
+**What this section used to say, and why it no longer holds.** It said the
+retry arm asked this method for its pool, "the same answer one step earlier"
+than the plan, because `settle::retry` appends `attempt_started` before the
+retry's plan exists. That was Sol's `R3-SEAMS-001`: the retry had passed
+`pool: None`, so a resumed run's `attempt_started` recorded no pool while the
+plan it then built resolved one. The retry still appends first and still
+names a pool, and it is now the retained attempt's own
+(`run::TopologyRun::retry_request`), because a resumed session must stay on
+the pool it ran on and the first pool in file order need not be that one.
+
+## `pub trait AttemptPlans` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
+
+Every pool of `agent`, in file order: the candidates the driver chooses an
+attempt's pool from (`run::serving_pool`). Empty for an agent no pool names.
+
+The provided body answers [`Self::pool_for`]'s one pool, or none. It is
+right for any implementation whose agents have at most one pool each, which
+is every test-only one, so those needed no change when this method arrived.
+`assembly::FrozenPlans` and the scaffold's `WidePlans` hold a table that can
+name several pools for one agent, and both override it.
 
 ## `pub trait AttemptPlans` › `fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError>;`
 
@@ -409,6 +437,18 @@ The binding this attempt used.
 ## `pub struct AttemptPlan` › `pub pool: Option<String>,`
 
 The capacity pool, where the agent names one.
+
+## `pub struct AttemptPlan` › `pub credential_profile: Option<std::path::PathBuf>,`
+
+The credential directory the worker runs under: the `profile` of the pool
+this plan is on. `None` when that pool names no profile, or the plan has no
+pool, and the worker then runs with the coordinator's own credentials.
+
+It is on the plan so that the pool an attempt is planned on decides its
+worker's credentials. The runner wrapper that stamps reviewers and probes
+(`engine::topology::profiled`) knows only the first pool for an agent, and
+leaves a worker's request alone for that reason. [`Judge::run_worker`] is the
+one reader.
 
 ## `pub struct AttemptPlan` › `pub resume_session: Option<SessionId>,`
 
@@ -1726,6 +1766,18 @@ announce then [`Self::run_worker`], for the callers that do both at once.
 
 The worker's request, built from the plan and the site, executed through the
 registrar. Shared by [`AttemptContext::run_worker`] and [`attempt_body`].
+
+## `impl Judge<'_> {` › `let request = match &plan.credential_profile {`
+
+When the plan names a credential profile, the request carries it
+(`RunnerRequest::with_credential_profile`). When it names none, the request
+is the one [`worker_request`] built, with no profile. Nothing after this
+changes it: the `profiled` wrapper passes a worker's request through as it
+arrives, so the plan's answer is the runner's.
+
+The profile is set before the request is executed and before
+`composed_common_dir` is asked about it, so both see the request the worker
+ran as.
 
 ## `impl Judge<'_> {` › `pub fn judge_attempt(`
 

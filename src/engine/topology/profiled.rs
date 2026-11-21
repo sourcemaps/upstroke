@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::capacity::{Pool, pool_for};
-use crate::runner::{CallParts, RunFuture, Runner, RunnerCall, RunnerRequest};
+use crate::runner::{CallParts, ExecutionRole, RunFuture, Runner, RunnerCall, RunnerRequest};
 use crate::workspace_manager::ComposedCommonDir;
 
 pub(super) fn profiled(inner: Arc<dyn Runner>, pools: &[Pool]) -> Arc<dyn Runner> {
@@ -34,6 +34,9 @@ struct Profiled {
 
 impl Profiled {
     fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {
+        if request.role == ExecutionRole::Implement {
+            return None;
+        }
         let agent = request.agent.as_ref()?;
         let profile = self.profiles.get(agent.as_str())?;
         Some(request.clone().with_credential_profile(profile.clone()))
@@ -141,6 +144,16 @@ mod tests {
         )
     }
 
+    fn reviewer(agent: &str) -> RunnerRequest {
+        review_request(
+            CommandSpec::new(agent).arg("--review"),
+            PathBuf::from("/tmp/ws"),
+            AgentId::new(agent),
+            Duration::from_secs(30),
+            invocation(AttemptRole::ReviewPass(0)),
+        )
+    }
+
     fn through(pools: &[Pool], request: &RunnerRequest) -> RunnerRequest {
         let recording = Arc::new(Recording::default());
         let runner = profiled(Arc::clone(&recording) as Arc<dyn Runner>, pools);
@@ -162,14 +175,14 @@ mod tests {
             pool("max", "claude-code", Some("/profiles/personal")),
             pool("work", "codex", Some("/profiles/work")),
         ];
-        let request = worker("claude-code");
+        let request = reviewer("claude-code");
 
         let seen = through(&pools, &request);
 
         assert_eq!(
             seen.credential_profile.as_deref(),
             Some(Path::new("/profiles/personal")),
-            "the worker ran without the profile its agent's pool is bound to"
+            "the reviewer ran without the profile its agent's pool is bound to"
         );
         let unstamped = RunnerRequest {
             credential_profile: None,
@@ -180,15 +193,10 @@ mod tests {
             "the wrapper changed more than the credential profile: {seen:?}"
         );
 
-        let review = review_request(
-            CommandSpec::new("codex").arg("--review"),
-            PathBuf::from("/tmp/ws"),
-            AgentId::new("codex"),
-            Duration::from_secs(30),
-            invocation(AttemptRole::ReviewPass(0)),
-        );
         assert_eq!(
-            through(&pools, &review).credential_profile.as_deref(),
+            through(&pools, &reviewer("codex"))
+                .credential_profile
+                .as_deref(),
             Some(Path::new("/profiles/work")),
             "a reviewer takes its own agent's profile, not the first one in the file"
         );
@@ -200,7 +208,7 @@ mod tests {
             pool("max", "claude-code", None),
             pool("work", "codex", Some("/profiles/work")),
         ];
-        let request = worker("claude-code");
+        let request = reviewer("claude-code");
 
         let seen = through(&pools, &request);
 
@@ -217,7 +225,7 @@ mod tests {
             pool("max", "claude-code", None),
             pool("spare", "claude-code", Some("/profiles/spare")),
         ];
-        let request = worker("claude-code");
+        let request = reviewer("claude-code");
 
         let seen = through(&pools, &request);
 
@@ -225,6 +233,35 @@ mod tests {
             seen.credential_profile, None,
             "`capacity::pool_for` binds an agent to its first pool; a later pool's \
              profile was applied to it"
+        );
+    }
+
+    #[test]
+    fn a_worker_request_keeps_the_credentials_its_attempt_was_planned_with() {
+        let pools = [
+            pool("max", "claude-code", Some("/profiles/personal")),
+            pool("spare", "claude-code", Some("/profiles/spare")),
+        ];
+        let unprofiled = worker("claude-code");
+        let on_spare =
+            worker("claude-code").with_credential_profile(PathBuf::from("/profiles/spare"));
+
+        let seen_unprofiled = through(&pools, &unprofiled);
+        let seen_on_spare = through(&pools, &on_spare);
+
+        assert_eq!(
+            (
+                seen_unprofiled.credential_profile.clone(),
+                seen_on_spare.credential_profile.clone(),
+            ),
+            (None, Some(PathBuf::from("/profiles/spare"))),
+            "a worker planned with no profile, then one planned on `spare`: the wrapper \
+             put its agent's first pool's profile over what the attempt's plan decided"
+        );
+        assert!(
+            same(&seen_unprofiled, &unprofiled) && same(&seen_on_spare, &on_spare),
+            "a worker request was changed on its way through: {seen_unprofiled:?}, \
+             {seen_on_spare:?}"
         );
     }
 
@@ -269,7 +306,7 @@ mod tests {
     fn a_profile_is_the_configured_string_used_as_a_path() {
         let pools = [pool("max", "claude-code", Some("~/profiles/personal"))];
 
-        let seen = through(&pools, &worker("claude-code"));
+        let seen = through(&pools, &reviewer("claude-code"));
 
         assert_eq!(
             seen.credential_profile,
