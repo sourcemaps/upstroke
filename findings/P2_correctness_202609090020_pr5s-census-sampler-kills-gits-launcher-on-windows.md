@@ -134,3 +134,4 @@ the code and not run: on Windows the kill reaches only the direct child
 and `await_group_end` returns at once (near lines 3636-3639), so the children `git worktree add`
 itself starts are neither killed nor waited for, and routing the spawn through
 `fixture::sampled_git`, the change prescribed above, is not shown to cure this fingerprint.
+
