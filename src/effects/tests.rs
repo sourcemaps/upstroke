@@ -7164,7 +7164,7 @@ fn the_shard_tables_run_every_test_in_exactly_one_shard() {
             1,
         ),
         (
-            "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+            "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect",
             3,
             1,
         ),

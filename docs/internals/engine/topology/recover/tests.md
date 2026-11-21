@@ -1075,8 +1075,10 @@ behaviour: that the step runs after the prepared pins and before the candidates 
 or a kill inside it converges on the next resume, and that no pin of either family is pruned
 before the report is durable. The exact constructions of `Ref.DeleteCandidatePin` before and after
 are the two kills inside the promotion
-(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`), which the cited test runs
-at both phases as its two cells of the site.
+(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`), which the two cited tests
+run as their cells of the site: `kill_after_report_before_each_cleanup_step_before_the_effect`
+the kill before the deletion, and `kill_after_report_before_each_cleanup_step_after_the_effect`
+both, the kill after it being the construction it is cited for.
 
 Measured over the 570 topology tests at `ae673768`, one process per test
 (`~/orch-pr10/clause2-evidence-r2/census/at-ae673768/`): the loop's own `close_run` reached
@@ -4950,9 +4952,17 @@ pair of cells, over a pin no crash leaves (`with_a_candidate_pin_no_crash_leaves
 audit's own note on row 41 reads that cell as built "not in the candidate-promotion transaction
 that t_cand_ref names". Since the third repair round of #311
 `kill_after_report_before_each_cleanup_step`, the test the sequential registry and `coverage.rs`
-cite for rows 41 and 42, runs this witness at both phases as its two cells of the site, so the
-citation's observation record holds this construction and no finalization cell over a planted
-pin; the two tests below run it on its own.
+cited for rows 41 and 42, ran this witness at both phases as its two cells of the site, so the
+citation's observation record held this construction and no finalization cell over a planted
+pin. That test is two since 2026-11-20, one per hook phase, and each row cites the part for its
+phase: `kill_after_report_before_each_cleanup_step_before_the_effect` runs the witness at the
+before phase for row 41, and `kill_after_report_before_each_cleanup_step_after_the_effect` runs
+it at both for row 42. The after part runs the before phase too because an observation record is
+kept per test and per process: the kill child's entry of the site is recorded under the child's
+name, and of the two resumes only the one from the before prefix enters the site in the test's
+own process, at both phases, where the one from the after prefix enters it at neither. With the
+after phase's witness alone, row 42's cited record would not hold `Ref.DeleteCandidatePin` after,
+and the merge check reads exactly that. The two tests below run the witness on its own.
 
 ## `fn a_kill_before_the_candidate_pin_is_deleted_is_finished_by_the_next_resume_which_deletes_it_once()`
 
@@ -5632,7 +5642,9 @@ no cell of either matrix, whose plantings declare nothing and which skip the sit
 ## `fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectS…`
 
 Every cell of the finalization matrix: both hook phases of every effect's
-site, in effect order.
+site, in effect order. Each site yields its before cell and then its after cell, and no site
+yields one alone, so a matrix that runs the cells of one phase runs exactly half of them. Both
+matrices are split that way, and each part asserts half of the outcome's count.
 
 ## `fn assert_finalization_order(`
 
@@ -5655,7 +5667,7 @@ site's own two cells are driven by the declared-pin tests, whose plantings hold 
 One cell of the error-return finalization matrix, over a planting the caller made: the fault
 injected at the cell, the faulted resume's refusal and what it left (`assert_finalization_order`),
 the next resume finalizing and refusing (`assert_finalized`), and the third resume's fresh branch,
-as the section on `kill_after_report_before_each_cleanup_step` describes cell by cell. The
+as the section on `fault_at_every_finalization_cell` describes cell by cell. The
 candidate-prepared pin's two readings follow the planting's own declaration
 (`surplus_candidate_pin`): Git lists one before the fault, and the next resume enters
 `Ref.DeleteCandidatePin` once when the fault came before its deletion, only where the planting
@@ -5663,19 +5675,28 @@ declared the damage; over the matrix's plantings both read zero at every cell. S
 matrix in the third repair round of #311 so the sweep's own cells could move to a test nothing
 cites without a second copy of the cell.
 
-## `fn kill_after_report_before_each_cleanup_step() {`
+## `fn fault_at_every_finalization_cell(part: HookPhase) {`
 
-`kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
-every finalization site but the candidate-prepared pin's, before and after the effect, for
-Complete and for Halted — 24 and 22 cells, the report's two sites among them, counted by the
-test — each driven by `fault_at_a_finalization_cell_and_converge` over a planting that declares
-no damage. Since the second repair round of #311 the finished run's planting completes alpha's
-promotion, and since the third round the test asserts at every cell that no candidate-prepared
+The error-return finalization matrix (T-FINALIZE), one hook phase of it: a fault at
+every finalization site but the candidate-prepared pin's, at the phase the argument names, for
+Halted and then for Complete, each cell driven by `fault_at_a_finalization_cell_and_converge`
+over a planting that declares no damage. The matrix is both phases of every such site, 24 cells
+at Complete and 22 at Halted, the report's two sites among them. Until 2026-11-20 one test,
+`kill_after_report_before_each_cleanup_step`, ran all of them and counted 24 and 22; it is two
+tests now, one per phase, so the two halves run in parallel, and this is the body they share.
+Each part counts its own cells and asserts half, 12 and 11: `finalization_sites` yields both
+phases of every site, so the cells of one phase are half of the matrix and the two parts together
+are the 24 and the 22. The planted directories carry the phase in their names, and each cell's
+tag names its phase as it always did.
+
+Since the second repair round of #311 the finished run's planting completes alpha's
+promotion, and since the third round the matrix asserts at every cell that no candidate-prepared
 pin stands before the fault and that the next resume enters `Ref.DeleteCandidatePin` at no cell.
 Its two cells of that site are the two kills inside the promotion,
-`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume` at both phases, run under
-this test's name because `coverage.rs` and the sequential registry (rows 41 and 42, `fault_row:
-t_cand_ref`) cite it for both phases of the site: what its observation record holds for the site
+`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`, which the two tests run
+after this matrix under their own names because `coverage.rs` and the sequential registry (rows
+41 and 42, `fault_row: t_cand_ref`) cite them for the two phases of the site: what a cited
+observation record holds for the site
 is the promotion's own crash, resumed by the next incarnation, and no cell over a planted pin.
 (The second round drove the two cells here over a pin planted as declared damage; the third
 review graded that a credited construction carrying damage no crash leaves, so those cells moved
@@ -5722,6 +5743,31 @@ inside the removal's site: a rollback of a synced deletion is not a shape
 the fault model admits, and the order is
 `a_checkouts_deletion_is_made_durable_before_its_intent_is_removed`'s to
 guard.
+
+## `fn kill_after_report_before_each_cleanup_step_before_the_effect() {`
+
+The before part of the error-return matrix (`fault_at_every_finalization_cell`): the fault before
+each effect, 11 cells at Halted and 12 at Complete, then the kill before the candidate-prepared
+pin's deletion inside the promotion
+(`a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume`). `coverage.rs` and the
+sequential registry cite this test for the before phase of every site the matrix covers and of
+`Ref.DeleteCandidatePin` (row 41). The resume after that kill deletes the pin once, so this test's
+observation record holds the site's before phase from the promotion's own crash.
+
+## `fn kill_after_report_before_each_cleanup_step_after_the_effect() {`
+
+The after part: the fault after each effect, 11 cells at Halted and 12 at Complete, then both
+kills inside the promotion, the one before the candidate-prepared pin's deletion and the one after
+it. `coverage.rs` and the sequential registry cite this test for the after phase of every site the
+matrix covers and of `Ref.DeleteCandidatePin` (row 42). The kill after the deletion is the
+construction row 42 names. The kill before it runs here as well, and not only in the before part,
+because of what the merge check reads
+(`st07_the_sequential_range_is_a_bijection_over_the_exported_observations`): the cited test's own
+observation record has to hold the site at the cited phase. The resume after the kill past the
+deletion adopts the deletion and enters the site at neither phase, and the kill child's own entry
+is recorded under the child's name. The resume after the kill before the deletion deletes the pin
+in this test's process and passes the site's after phase, which is what the undivided test's
+record held for row 42 as well.
 
 ## `fn a_fault_inside_the_candidate_pin_sweep_over_a_declared_pin_stops_finalization_and_the_next_resume_converges()`
 
@@ -6122,12 +6168,16 @@ follow the planting's declaration as in `fault_at_a_finalization_cell_and_conver
 count read from the resume child's report (`candidate_pin_deletions_of_the_fresh_resume`). Split
 out of the matrix in the third repair round of #311, for the same reason as its error-return twin.
 
-## `fn kill_at_every_finalization_cell(outcome: &RunOutcome) {`
+## `fn kill_at_every_finalization_cell(outcome: &RunOutcome, part: HookPhase) {`
 
-The ST-18 matrix executed as kills. The child is killed at every cell of
-`finalization_sites(outcome)` but the candidate-prepared pin's two: both hook phases of every
-other effect's site, in effect order, 24 at Complete and 22 at Halted asserted as exact counts,
-the cells `kill_after_report_before_each_cleanup_step` drives with error returns. Each cell
+The ST-18 matrix executed as kills, one hook phase of one outcome at a time. The matrix is every
+cell of `finalization_sites(outcome)` but the candidate-prepared pin's two: both hook phases of
+every other effect's site, in effect order, 24 at Complete and 22 at Halted, the cells
+`fault_at_every_finalization_cell` drives with error returns. Since 2026-11-20 the second
+argument names the phase whose cells a call runs and the cells of the other phase are skipped, so
+each outcome's matrix is two tests that run in parallel. A call asserts its own count as an exact
+one, half of the outcome's: 12 at Complete and 11 at Halted, because `finalization_sites` yields
+both phases of every site. The planted directories carry the phase in their names. Each cell
 plants a finished run with every kind of residue a crash leaves finalization and no
 candidate-prepared pin, which the matrix asserts at every cell (Gate 5's audit selected this test
 for rows 41 and 42, and until the third repair round of #311 its two cells of that site ran over a
@@ -6167,10 +6217,10 @@ reading does not name: its faulted resume and its next resume share a
 process, so a convergence that depends on what the interrupted attempt held
 in memory passes it. The recipe `finalize-remembers-the-report-attempt-in-memory`
 lets the fresh branch trust a current report only when this process
-attempted the write, and otherwise return without pruning. It passes
-`kill_after_report_before_each_cleanup_step` and the single real kill, and
-fails this matrix at `Halted/RunDir.WriteReport/after` and
-`Complete/RunDir.WriteReport/after`.
+attempted the write, and otherwise return without pruning. It passed
+`kill_after_report_before_each_cleanup_step`, the error-return matrix as one test, and the single
+real kill, and failed this matrix at `Halted/RunDir.WriteReport/after` and
+`Complete/RunDir.WriteReport/after`, cells of the two after parts now.
 
 Until round 1 of #291 the next resume ran in the parent, one process for
 every cell of an outcome, and that left the same blind spot one step
@@ -6229,15 +6279,26 @@ before the sweep leaves the pin standing and the fresh resume deletes it once; k
 the pin is gone and the fresh resume deletes nothing. Cited by nothing, for the reason the
 error-return twin gives.
 
-## `fn a_kill_at_every_cell_of_a_complete_finalization_converge…`
+## `fn a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume_before_the_effect()`
 
-The Complete half of the kill matrix: 24 cells, the candidates ref's
-deletion among them.
+The Complete half of the kill matrix is 24 cells, the candidates ref's deletion among them. This
+is its before part: the 12 kills before an effect.
 
-## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_…`
+## `fn a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume_after_the_effect() {`
 
-The Halted half: 22 cells. One test per outcome, so the two halves run in
-parallel.
+The Complete half's after part: the 12 kills after an effect.
+
+## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume_before_the_effect() {`
+
+The Halted half is 22 cells. This is its before part: the 11 kills before an effect.
+
+## `fn a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume_after_the_effect() {`
+
+The Halted half's after part: the 11 kills after an effect. One test per outcome and phase, so
+the four parts run in parallel. Until 2026-11-20 there was one test per outcome,
+`a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume` and
+`a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume`, each running both
+phases, and the timings and recipe results recorded above were taken on those.
 
 ## `fn kill_after_run_finished_before_report() {`
 

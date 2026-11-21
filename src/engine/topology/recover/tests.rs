@@ -21950,22 +21950,25 @@ fn fault_at_a_finalization_cell_and_converge(
     assert_objects_kept(planted, &format!("{tag}: after the repeated finalization"));
 }
 
-#[test]
-fn kill_after_report_before_each_cleanup_step() {
+fn fault_at_every_finalization_cell(part: HookPhase) {
     for outcome in [RunOutcome::Halted, RunOutcome::Complete] {
         let mut cells = 0;
         for (site, phase) in finalization_sites(&outcome) {
+            if phase != part {
+                continue;
+            }
             if site == EffectSiteId::Ref(RefSite::DeleteCandidatePin) {
                 // Not a cell of this matrix. A finished run's planting completes alpha's
                 // promotion, so finalization finds no candidate-prepared pin to sweep, and a
                 // cell that faults the sweep has to plant a pin no crash leaves: the declared-pin
                 // test below does, by name, and claims no prefix by it. This site's two cells
-                // are the two kills inside the promotion, after the loop.
+                // are the two kills inside the promotion, which the two tests that run this
+                // matrix's parts run after it.
                 continue;
             }
             let tag = format!("{outcome:?}/{site}/{phase}");
             let planted = plant_finished_run_with(
-                &format!("finalize-kill-{}-{}", cells, outcome_short(&outcome)),
+                &format!("finalize-kill-{phase}-{cells}-{}", outcome_short(&outcome)),
                 outcome.clone(),
                 if outcome == RunOutcome::Complete {
                     AlphaEnd::Published
@@ -21990,19 +21993,40 @@ fn kill_after_report_before_each_cleanup_step() {
         assert_eq!(
             cells,
             if outcome == RunOutcome::Complete {
-                24
+                24 / 2
             } else {
-                22
+                22 / 2
             },
-            "{outcome:?}: both phases of every effect's site but the candidate-prepared pin's, \
-             the report's two sites among them"
+            "{outcome:?}/{part}: both phases of every effect's site but the candidate-prepared \
+             pin's, the report's two sites among them, are 24 cells at Complete and 22 at \
+             Halted; `finalization_sites` yields both phases of every site, so this phase's \
+             part runs half of them and the other phase's part the other half"
         );
     }
-    // `Ref.DeleteCandidatePin` before and after, registry rows 41 and 42 (`fault_row:
-    // t_cand_ref`), constructed where a candidate-prepared pin stands by production's own hand:
-    // a real kill inside `reclaim_after_creation` during a real `promote_candidate`, resumed by
-    // the next incarnation. `coverage.rs` and the registry cite this test for both phases of
-    // the site, so both run under its name.
+}
+
+#[test]
+fn kill_after_report_before_each_cleanup_step_before_the_effect() {
+    fault_at_every_finalization_cell(HookPhase::Before);
+    // `Ref.DeleteCandidatePin` before, registry row 41 (`fault_row: t_cand_ref`), constructed
+    // where a candidate-prepared pin stands by production's own hand: a real kill inside
+    // `reclaim_after_creation` during a real `promote_candidate`, resumed by the next
+    // incarnation. `coverage.rs` and the registry cite this test for the site's before phase,
+    // so it runs under its name.
+    a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::Before);
+}
+
+#[test]
+fn kill_after_report_before_each_cleanup_step_after_the_effect() {
+    fault_at_every_finalization_cell(HookPhase::After);
+    // `Ref.DeleteCandidatePin` after, registry row 42 (`fault_row: t_cand_ref`), constructed
+    // where a candidate-prepared pin stands by production's own hand: a real kill inside
+    // `reclaim_after_creation` during a real `promote_candidate`, resumed by the next
+    // incarnation. `coverage.rs` and the registry cite this test for the site's after phase,
+    // so it runs under its name. The kill before the deletion runs under it too: the resume
+    // after that kill is the one that enters the site in this process, at both phases, where
+    // the resume after the kill past the deletion enters it at neither, and the merge check
+    // reads the after phase from this test's own observation record.
     a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::Before);
     a_kill_at_the_candidate_pins_deletion_converges_on_the_next_resume(HookPhase::After);
 }
@@ -23796,9 +23820,12 @@ fn kill_at_a_finalization_cell_and_converge(
     );
 }
 
-fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
+fn kill_at_every_finalization_cell(outcome: &RunOutcome, part: HookPhase) {
     let mut cells = 0;
     for (site, phase) in finalization_sites(outcome) {
+        if phase != part {
+            continue;
+        }
         if site == EffectSiteId::Ref(RefSite::DeleteCandidatePin) {
             // Not a cell of this matrix, for the reason the error-return matrix gives: the
             // planting leaves no candidate-prepared pin, and a kill inside the sweep is driven
@@ -23807,7 +23834,7 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
         }
         let tag = format!("{outcome:?}/{site}/{phase}");
         let planted = plant_finished_run_with(
-            &format!("finalize-killed-{cells}-{}", outcome_short(outcome)),
+            &format!("finalize-killed-{phase}-{cells}-{}", outcome_short(outcome)),
             outcome.clone(),
             if *outcome == RunOutcome::Complete {
                 AlphaEnd::Published
@@ -23831,12 +23858,14 @@ fn kill_at_every_finalization_cell(outcome: &RunOutcome) {
     assert_eq!(
         cells,
         if *outcome == RunOutcome::Complete {
-            24
+            24 / 2
         } else {
-            22
+            22 / 2
         },
-        "{outcome:?}: both phases of every effect's site but the candidate-prepared pin's, the \
-         report's two sites among them"
+        "{outcome:?}/{part}: both phases of every effect's site but the candidate-prepared \
+         pin's, the report's two sites among them, are 24 cells at Complete and 22 at Halted; \
+         `finalization_sites` yields both phases of every site, so this phase's part runs half \
+         of them and the other phase's part the other half"
     );
 }
 
@@ -23869,13 +23898,24 @@ fn a_kill_inside_the_candidate_pin_sweep_over_a_declared_pin_converges_on_the_ne
 }
 
 #[test]
-fn a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume() {
-    kill_at_every_finalization_cell(&RunOutcome::Complete);
+fn a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume_before_the_effect()
+{
+    kill_at_every_finalization_cell(&RunOutcome::Complete, HookPhase::Before);
 }
 
 #[test]
-fn a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume() {
-    kill_at_every_finalization_cell(&RunOutcome::Halted);
+fn a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume_after_the_effect() {
+    kill_at_every_finalization_cell(&RunOutcome::Complete, HookPhase::After);
+}
+
+#[test]
+fn a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume_before_the_effect() {
+    kill_at_every_finalization_cell(&RunOutcome::Halted, HookPhase::Before);
+}
+
+#[test]
+fn a_kill_at_every_cell_of_a_halted_finalization_converges_on_the_next_resume_after_the_effect() {
+    kill_at_every_finalization_cell(&RunOutcome::Halted, HookPhase::After);
 }
 
 fn outcome_short(outcome: &RunOutcome) -> &'static str {
