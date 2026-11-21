@@ -26,13 +26,13 @@ source, documentation, workflows, release machinery and this file.
 
    **The Windows suite has two homes.** It runs on the guest unless the run's
    `pick-windows-home` job answers `hosted`; then `test-windows` is skipped and
-   `test-windows-hosted` runs the suite on `windows-latest` in five shards,
-   `test (windows-latest, k of 5)`. Each shard installs and asserts the guest image's compiler,
+   `test-windows-hosted` runs the suite on `windows-latest` in ten shards,
+   `test (windows-latest, k of 10)`. Each shard installs and asserts the guest image's compiler,
    runs the guest's suite step with that shard's test-name filter, and holds a share of the
-   guest's passing-test floor; the shares sum to it. A test runs in exactly one shard: each
+   guest's passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
    shard skips the filters of the shards before it, and the last takes what no filter names.
    `upstroke-ci` still requires exactly one of the two jobs to pass, and the hosted one passes
-   only when all five shards do. The answer is `hosted` in three cases: the repository variable
+   only when all ten shards do. The answer is `hosted` in three cases: the repository variable
    `WINGUEST_BUSY` is `1`; the run is a pull request's and the repository variable
    `WINGUEST_PR_HOSTED` is `1`; or the repository variable `WINGUEST_QUEUE_LIMIT` is a whole
    number from 1 to 999999 and the guest's queue reaches it: the guest's jobs queued or running in other
@@ -53,11 +53,37 @@ source, documentation, workflows, release machinery and this file.
    `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
    afterwards. A hosted run is not free: measured on 2026-11-15 (run 43719719561), the whole
    suite takes 59 to 76 minutes on `windows-latest` and three of its shards took 14m42s, 17m17s
-   and 22m53s (the fourth shard of that run never ended, and is now shards 2 and 3 of 5, which
-   have not run as separate jobs),
-   against the guest's 13 for the whole. Each shard runs under a 40-minute limit. In that run
-   one whole-suite job failed a kill-timing test, and one shard did not end after its tests had
-   passed; a leftover test process is inferred to have held its output. Neither followed a change.
+   and 22m53s (the fourth shard of that run never ended, and was divided in two, which made
+   five), against the guest's 13 for the whole. The five were measured on 2026-11-19 (run
+   44614925593): their test harnesses took 1201, 508, 976, 564 and 860 seconds and the slowest
+   job took 24.3 minutes, about 3.6 minutes of every leg being fixed. A run's slowest leg sets
+   its wall clock, so that day the suite was divided into ten shards by that measured time,
+   their slowest leg predicted at about 13 to 16 minutes. Run 44667503206 measured the ten for
+   the first time, and with them the Linux and macOS legs of the `test` matrix, divided by
+   measured time as well: the slowest Windows leg took 18.6 minutes against the 13 to 16
+   predicted, the slowest of the five macOS legs 15.8 against 14 to 15, and the slower of the
+   two Linux legs 8.2 against 8 to 9. The Linux split stands. The Windows and macOS suites
+   were divided again on 2026-11-20, from that run: each test's sequential Linux duration
+   scaled so that the leg it ran in sums to that leg's measured harness, blended half and half
+   with a uniform per-test model, and the filters chosen by a search for the slowest leg. The
+   ten shards are now `engine::topology::coordinator::tests::a_p`,
+   `engine::topology::coordinator::tests::a_r`, the rest of
+   `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::coordinator::`,
+   `engine::topology::recover::`, `engine::tests::a`, `runner::`, `workspace_manager::`, the
+   rest of `engine::tests::`, and everything else. The five macOS legs are
+   `engine::topology::coordinator::tests::a_`, the rest of `engine::topology::`, the rest of
+   `engine::`, `runner::`, and everything else. The slowest shard was predicted at about 14.4
+   minutes and the slowest macOS leg at about 11.8. Run 44736631711 measured both re-splits for
+   the first time: the slowest Windows leg took 18.1 minutes and the slowest macOS leg 16.0.
+   Single tests set the floor under the Windows prediction: a leg takes no less than its longest test
+   and the fixed minutes, and two tests are each estimated at about 9 minutes of their leg's
+   harness, neither changed by the re-split:
+   `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
+   and
+   `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+   Each shard runs under a 40-minute limit. In the 2026-11-15 run one whole-suite job failed a
+   kill-timing test, and one shard did not end after its tests had passed; a leftover test
+   process is inferred to have held its output. Neither followed a change.
 
    The two homes share the compiler and the suite, and the floor in sum. What still differs is the runner:
    GitHub's image against the curated guest's, their filesystems and temporary directories,

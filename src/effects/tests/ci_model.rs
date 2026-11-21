@@ -164,22 +164,34 @@ pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
     "needs.pick-windows-home.outputs.home == 'hosted'";
 
-pub(super) const WINDOWS_SHARD_FILTERS: [&str; 4] = [
-    "engine::topology::coordinator::tests::a",
+pub(super) const WINDOWS_SHARD_FILTERS: [&str; 9] = [
+    "engine::topology::coordinator::tests::a_p",
+    "engine::topology::coordinator::tests::a_r",
+    "engine::topology::coordinator::tests::a_",
     "engine::topology::coordinator::",
-    "engine::topology::",
-    "engine::",
+    "engine::topology::recover::",
+    "engine::tests::a",
+    "runner::",
+    "workspace_manager::",
+    "engine::tests::",
 ];
 
-pub(super) const WINDOWS_SHARD_FLOORS: [u32; 5] = [95, 30, 340, 150, 1085];
+pub(super) const WINDOWS_SHARD_FLOORS: [u32; 10] = [24, 13, 47, 36, 113, 93, 200, 152, 57, 965];
 
-pub(super) const MACOS_SHARD_FILTERS: [&str; 2] = ["engine::topology::", "engine::"];
+pub(super) const MACOS_SHARD_FILTERS: [&str; 4] = [
+    "engine::topology::coordinator::tests::a_",
+    "engine::topology::",
+    "engine::",
+    "runner::",
+];
+
+pub(super) const LINUX_SHARD_FILTERS: [&str; 1] = ["engine::"];
 
 pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";
 pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
 
 pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [
-    ("ubuntu-latest", &[]),
+    ("ubuntu-latest", &LINUX_SHARD_FILTERS),
     ("macos-latest", &MACOS_SHARD_FILTERS),
 ];
 

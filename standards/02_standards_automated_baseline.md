@@ -16,12 +16,13 @@ bash .github/scripts/test-pr-ready-audit.sh
 ```
 
 CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test` runs
-the suite on Linux whole and on macOS in three shards, `test (macos-latest, k of 3)`, each leg
+the suite on Linux in two shards, `test (ubuntu-latest, k of 2)`, and on macOS in five,
+`test (macos-latest, k of 5)`, each leg
 under 30 minutes, and `test-windows` runs it on Windows, on a self-hosted ephemeral
 runner for a pull request, a push and a merge-queue entry alike -- unless `pick-windows-home`
 sends the run to the hosted twin `test-windows-hosted`, which runs the guest's suite step on
-`windows-latest` on the guest image's compiler in five shards, `test (windows-latest, k of 5)`,
-by the same rule as the macOS three, a test running in exactly one shard, and only when
+`windows-latest` on the guest image's compiler in ten shards, `test (windows-latest, k of 10)`,
+by the same rule as the Linux and macOS shards, a test running in exactly one shard, and only when
 `WINGUEST_BUSY` is `1`, or the run is a pull request's and `WINGUEST_PR_HOSTED` is `1`, or a
 `WINGUEST_QUEUE_LIMIT` is set and the guest's queue has reached it (`MAINTAINING.md`
 step 3); `msrv` runs the locked check on all three; `lint (windows)` runs Clippy natively and builds
