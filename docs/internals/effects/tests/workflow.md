@@ -299,9 +299,9 @@ matrix -- every platform but the one whose suite runs in its own job.
 
 One leg of the `test` job's matrix as the oracle compares it: the runner,
 the leg's label, and the libtest arguments. The expected legs and the legs
-read from `ci.yml` are both made of it, as the twin's are of [`ShardLeg`], so
-the comparison is one equality and a refusal prints both sides field by
-field.
+read from `ci.yml` are both made of it, as the Windows shards' are of
+[`ShardLeg`], so the comparison is one equality and a refusal prints both
+sides field by field.
 
 ## `fn test_legs() -> Vec<TestLeg> {`
 
@@ -355,8 +355,8 @@ Five things, each its own complaint:
    and none of the others'.
 4. `matrix:` declares exactly `include`. An axis beside the list changes
    what the list means, by the rule [`windows_shard_matrix_complaints`]
-   records for the twin, and `exclude:` removes combinations of an axis. The
-   legs are the list and nothing else.
+   records for the Windows shards, and `exclude:` removes combinations of an
+   axis. The legs are the list and nothing else.
 5. `include:` is, in order, exactly [`test_legs`]' entries, each read by
    [`test_leg`].
 
@@ -372,8 +372,8 @@ order is the shard table's, each leg skipping the filters of the legs before
 it, and an equality over an ordered list is the plain way to hold every leg
 to its own row.
 
-These legs hold no count of passing tests to a floor, where each of the
-twin's does, and the fifth check is what stands in for one here. A shard's
+These legs hold no count of passing tests to a floor, where each Windows
+shard does, and the fifth check is what stands in for one here. A shard's
 floor refuses a leg whose filter matched almost nothing; in this job such a
 leg is green, and the tests its filter no longer matches are run by a later
 leg, since every later leg only skips that filter. That holds while every
@@ -424,148 +424,144 @@ other.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
-Whether a step is the toolchain action, by its `uses:` prefix: the one
-kind of step the Windows job may not carry at all.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {`
-
-Every way the Windows test job fails its contract.
-
-The same shape as [`ci_test_job_complaints`] without the matrix, and with
-the one thing that job cannot say: which machine. The job runs on the
-curated guest on every lane -- a pull request, a push and a merge-queue
-entry alike -- whenever the picker answers `guest`, and `runs-on:` is
-compared as a label set: a scalar is a
-hosted runner, an expression routes some event to a machine this contract
-cannot name, and a subset of the labels admits every Windows machine the
-account registers.
-
-The guest's image carries the compiler and `clippy-driver` for the
-fixtures, and re-curation is bound to that claim, which a document parser
-cannot check. The job installs nothing, and an install is refused; the
-suite step asks which compiler it is about to run.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `&STEP_FIELDS`
-
-No step of this job may carry an `if:`. The suite step keeps
-[`TEST_STEP_FIELDS`] and every other step [`STEP_FIELDS`], and neither
-admits one: on the step that runs the suite a condition is a job that
-reports success having run nothing for the events it excludes, and on any
-other step it is a script or an action one event executes and the
-pull-request build -- the one a reviewer watches -- never shows. Both are
-refused by the field set before their values are read. Measured,
-`MUT-TEST-WINDOWS-DISABLED`, `MUT-TEST-WINDOWS-SUITE-ON-ONE-LANE` and
-`MUT-TEST-WINDOWS-QUEUE-ONLY-RETARGET`.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `if installs_a_toolchain(step) {`
-
-No toolchain install, at any step. The guest's image carries
-[`GOLDEN_IMAGE_TOOLCHAIN`] and re-curation moves it; an install here selects
-the compiler from the workflow instead, `rustup` over a frozen image on
-every build. At the image's own version the suite script's compiler
-questions still pass, so this refusal, not the witness, is what holds the
-claim that the image chose. While the merge queue ran on `windows-latest`
-the job carried one install, under the queue condition and pinned whole --
-one step, right after the checkout, at the image's version, with `clippy`;
-it went with that lane, and the pins on it with it. Measured,
-`MUT-TEST-WINDOWS-INSTALL-UNCONDITIONAL` and
-`MUT-TEST-WINDOWS-HOSTED-INSTALL-RESTORED`.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let labels = field(job, "runs-on").and_then(scalar_set);`
-
-The whole `runs-on:`, as a set equality with [`TEST_WINDOWS_LABELS`]. A
-literal sequence cannot vary by event, so while this holds no lane of this
-job can be routed elsewhere: a scalar is a hosted runner, an expression --
-the merge queue's route to `windows-latest` from 2026-09-16 among them -- is
-something this contract cannot evaluate and refuses, and a subset admits any
-self-hosted Windows machine the account registers. A run does now leave the
-guest, but by another route this check does not govern: the picker answers
-`hosted`, this job is skipped by its pinned condition, and the hosted twin,
-pinned by [`ci_test_windows_hosted_job_complaints`], runs the suite on the
-guest image's compiler. Measured,
-`MUT-TEST-WINDOWS-REHOSTED`, `MUT-TEST-WINDOWS-LABEL-DROPPED` and
-`MUT-TEST-WINDOWS-QUEUE-REHOSTED`.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);`
-
-The same allowance as the `test` job's, pinned to [`TEST_WINDOWS_STEP_ENV`]:
-the guest's NTFS folds case, so the declaration is `1` outright. It applies
-to the suite-and-witness step and to the capture step after it
-([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`], under `test-windows-capture-step-env`).
-Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED` and
-`MUT-TEST-WINDOWS-CAPTURE-CASEFOLD-DROPPED`. The suite step's row anchors on
-its `name:` line together with the `env:` lines, for the reason the `test`
-job's rows do.
-
-The guest's container capability observation
-([`CAPABILITY_WINDOWS_OBSERVATION`]) takes the same map whole under
-`test-windows-capability-step-env`, the field set
-[`CAPABILITY_STEP_FIELDS`] and the same bound under
-`test-windows-capability-step`. Measured,
-`MUT-TEST-WINDOWS-CAPABILITY-CASEFOLD-DROPPED`,
-`MUT-TEST-WINDOWS-CAPABILITY-DOCKER-CONTEXT-INJECTED` and
-`MUT-TEST-WINDOWS-CAPABILITY-TIMEOUT-DROPPED`.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
-
-The whole step, not the command inside it. The command says which suite
-Cargo was asked for; the lines after it are what say the suite ran, and
-an equality over the step is what stops those lines being dropped, or
-their floor lowered to a number an unexecuted suite clears. Measured,
-`MUT-WINDOWS-WITNESS-COUNT-DROPPED` and `MUT-WINDOWS-WITNESS-FLOOR-DROPPED`.
-
-The same equality holds how the step runs the suite and what it does about a
-test process left running. `MUT-TEST-WINDOWS-SUITE-PIPED-AGAIN` makes line 4
-a pipeline into `Tee-Object` again, and `MUT-TEST-WINDOWS-SURVIVOR-ALLOWED`
-removes line 8, the throw for such a process. Each edits the workflow alone
-and is refused under `test-windows-command`. The same edit made to the
-workflow and to `WINDOWS_TEST_WITNESS` together is not this pin's to refuse:
-`windows_suite_wait_complaints` in `super` reads those relations from the
-constant.
-
-## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(windows_home_complaints(`
-
-The guest's job needs the picker, runs only when it answers `guest`, and
-keeps its 20 minutes. Every step, script, label and the timeout are what
-they were before the twin; these are the two fields the twin added.
-
-## `fn windows_home_complaints(`
-
-The three fields that tie a Windows suite job to the picker: `needs:` is
-exactly `pick-windows-home`, `if:` is exactly the job's own condition, and
-the timeout is exactly its own. A condition that admits both answers runs
-both jobs and one that admits neither skips both; the aggregate fails either
-run, but only after it has spent its time, and this refuses the workflow
-before it is pushed. Codes `<job>-needs`, `<job>-condition` and
-`<job>-timeout`. Measured, `MUT-TEST-WINDOWS-RUNS-BESIDE-THE-TWIN`,
-`MUT-TEST-WINDOWS-HOSTED-RUNS-BESIDE-THE-GUEST`,
-`MUT-TEST-WINDOWS-NEEDS-DROPPED`, `MUT-TEST-WINDOWS-HOSTED-NEEDS-DROPPED`,
-`MUT-TEST-WINDOWS-TIMEOUT-RAISED` and `MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED`.
+Whether a step is the toolchain action, by its `uses:` prefix.
+[`ci_test_windows_hosted_job_complaints`] reads the version and the
+components from the steps it selects. It was written for the guest's job,
+the one job that could carry no such step at all.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {`
 
-Every way the Windows suite's hosted twin fails its contract, pinned as
-strictly as the guest's job: field set ([`TEST_WINDOWS_HOSTED_JOB_FIELDS`],
-the guest's plus `strategy`), name, runner, timeout, `needs:` and condition;
-the shard matrix, whole ([`windows_shard_matrix_complaints`]); every step's
-fields, the case-fold map on the suite, capture and observation steps, and
-the observation's bound; the platform-default shell on every `run:` step;
-exactly one suite step running [`WINDOWS_SHARD_WITNESS`], the guest's
-compiler questions included, the capture immediately after it and the
-observation immediately after that; one input-free checkout at step 0;
-every script and action on the twin's pins,
-[`TEST_WINDOWS_HOSTED_SCRIPTS`]; and no cache step.
+Every way the job that runs the Windows suite fails its contract. It is the
+shape of [`ci_test_job_complaints`], on one runner and under PowerShell:
+
+- the field set, [`TEST_WINDOWS_HOSTED_JOB_FIELDS`]: the `test` job's five,
+  with no `needs:` and no `if:`;
+- the name, the runner and the timeout;
+- the shard matrix, whole ([`windows_shard_matrix_complaints`]);
+- every step's fields, the case-fold map on the suite, capture and
+  observation steps, and the observation's bound;
+- the platform-default shell on every `run:` step;
+- exactly one suite step running [`WINDOWS_SHARD_WITNESS`], the capture
+  immediately after it and the observation immediately after that;
+- one input-free checkout at step 0;
+- every script and action on the job's pins,
+  [`TEST_WINDOWS_HOSTED_SCRIPTS`];
+- one toolchain install, at step 1, of [`GOLDEN_IMAGE_TOOLCHAIN`], with
+  `clippy` among its components;
+- no cache step.
+
+The job is found by its id, [`TEST_WINDOWS_HOSTED_JOB`]. Every pin on the
+Windows suite hangs from that id, so a workflow without the job is refused
+under `test-windows-hosted-missing` before anything else here is read. A
+renamed job is not a false green, since the aggregate's derived `needs:`
+refuses the renamed workflow too; the code is there so that the contract
+notices the name going before it notices nothing else. Measured,
+`MUT-TEST-WINDOWS-HOSTED-RENAMED-AWAY`.
+
+The runner is [`TEST_WINDOWS_PLATFORM`], as a scalar, under
+`test-windows-hosted-runner`: the suite runs on GitHub's runner on every
+event. A label set names a self-hosted machine, and an expression a runner
+this contract cannot read. Measured, `MUT-TEST-WINDOWS-HOSTED-ON-THE-GUEST`:
+the ten legs put on the labels of the guest deleted on 2026-11-20, which no
+runner carries, so that every leg queues for a machine that does not exist.
+
+The timeout is exactly [`TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES`], an integer,
+under `test-windows-hosted-timeout`. 40 minutes a leg is 1.75 times the
+slowest leg that ended in run 43719719561 and inside the merge queue's 60. A
+leg that prints every result line and does not end holds the required
+check, and the queue entry behind it, until that limit
+([`TEST_WINDOWS_HOSTED_JOB`]). Measured,
+`MUT-TEST-WINDOWS-HOSTED-TIMEOUT-RAISED`.
+
+A `needs:` or an `if:` on the job is refused by the field set, under
+`unexpected-job-field`. Until 2026-11-20 both were required. Each of the two
+Windows suite jobs, the guest's and this one, needed the picker and ran for
+one of its two answers, and a helper the two checks shared,
+`windows_home_complaints`, held `needs:`, the condition and the timeout.
+With one job, an `if:` is a Windows suite some event does not run. Measured,
+`MUT-TEST-WINDOWS-HOSTED-CONDITIONED`, a condition that excludes the merge
+queue. It is not a false green either: on a queue entry the job is skipped,
+the aggregate reads `skipped` and fails, and no entry lands. The oracle
+refuses it before it is pushed, where the queue would refuse it one entry at
+a time.
+
+The toolchain action is required at step 1, by [`toolchain_complaints`]
+under `test-windows-hosted-toolchain`, so no step runs a compiler the runner
+preinstalled. Until 2026-11-20 the guest's job was held to the opposite
+rule, no install at any step, because the guest's image carried the
+compiler. No row moves this job's install off step 1;
+`MUT-TOOLCHAIN-NOT-FIRST` measures that position on `lint-windows`.
 
 The steps are one list that every leg runs, so they are read once: nothing
 in a step may vary by leg except through the three `matrix` expressions the
 pinned suite script carries, and what those evaluate to is the matrix
-check's to hold. The suite step is recognised by [`WINDOWS_SHARD_WITNESS`]
-wherever the guest's check uses [`WINDOWS_TEST_WITNESS`]: for the step's
-field set and case-fold map, for the count of suite steps, and for the
-capture's place after it. A twin step that carried the guest's script
-instead would be an unpinned script here, and the count of suite steps
-would be zero. So would one whose cargo line dropped the selection, or named
-a filter of its own where the pinned text reads `matrix.tests`. Measured,
+check's to hold.
+
+Measured, every row named `MUT-TEST-WINDOWS-HOSTED-*`, and three that mutate
+this job under other names: `MUT-STEP-USES-UNPINNED`,
+`MUT-DEFAULTS-WORKING-DIRECTORY` and
+`MUT-JOB-PERMISSIONS-ON-THE-HOSTED-SHARDS`.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_SHARD_WITNESS);`
+
+The suite step is the one whose `run:` is [`WINDOWS_SHARD_WITNESS`], and it
+is recognised by that text everywhere this function asks for it: for the
+step's field set and case-fold map here, for the count of suite steps, and
+for the capture's place after it.
+
+The suite step carries the same allowance as the `test` job's, pinned to
+[`TEST_WINDOWS_STEP_ENV`] under `test-windows-hosted-step-env`: the hosted
+runner's NTFS folds case, so the declaration is `1` outright. The capture
+step after it ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]) carries the same map
+under `test-windows-hosted-capture-step-env`. Measured,
+`MUT-TEST-WINDOWS-HOSTED-CASEFOLD-DECLARATION-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-CAPTURE-CASEFOLD-DROPPED`. Each row anchors on its
+step's `name:` line together with the `env:` lines, because the three steps
+repeat the same `env:` text and an anchor must occur once in the job.
+
+The container capability observation ([`CAPABILITY_WINDOWS_OBSERVATION`])
+takes the same map whole under `test-windows-hosted-capability-step-env`,
+the field set [`CAPABILITY_STEP_FIELDS`], and the bound
+[`CAPABILITY_STEP_TIMEOUT_MINUTES`] under
+`test-windows-hosted-capability-step`
+([`observation_step_complaints`]). Measured,
+`MUT-TEST-WINDOWS-HOSTED-CAPABILITY-CASEFOLD-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-CAPABILITY-TIMEOUT-DROPPED`. Those two anchor on
+the step's `timeout-minutes: 4` line, which occurs once in the job. A key
+put beside the declaration is measured on the `test` job's observation; the
+row that put one on a Windows observation mutated the guest's job and went
+with it on 2026-11-20.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `&STEP_FIELDS`
+
+No step of this job may carry an `if:`. The suite step and the capture keep
+[`TEST_STEP_FIELDS`], the observation [`CAPABILITY_STEP_FIELDS`] and every
+other step [`STEP_FIELDS`], and none admits one: on the step that runs the
+suite a condition is a job that reports success having run nothing for the
+events it excludes, and on any other step it is a script or an action one
+event executes and the pull-request build -- the one a reviewer watches --
+never shows. Both are refused by the field set before their values are
+read, under `unexpected-step-field`. Measured,
+`MUT-TEST-WINDOWS-HOSTED-SUITE-ON-ONE-LANE`: the suite step conditioned on
+the merge queue, so that the queue still runs the suite and every pull
+request is green on Windows having run none of its tests. The rows that
+measured this on the guest's job went with it on 2026-11-20.
+
+## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
+
+Exactly one suite step, under `test-windows-hosted-command`. The whole step,
+not the command inside it. The command says which suite Cargo was asked
+for; the lines before it are what say which compiler runs it, and the lines
+after it are what say the suite ran. An equality over the step is what
+stops those lines being dropped, or the floor lowered to a number an
+unexecuted shard clears. Measured,
+`MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
+`MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED` and
+`MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`.
+
+A step whose cargo line dropped the selection, or named a filter of its own
+where the pinned text reads `matrix.tests`, is an unpinned script here, and
+the count of suite steps is zero. Measured,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
 refuses: every leg runs the tests whose names contain `engine::`, and by the
@@ -575,52 +571,70 @@ above nine of the floors. The subset also holds the rest of
 `engine::topology::`, which no filter names since the re-split of 2026-11-20
 and which was 484 tests by the counts of 2026-11-19, and 1,286 is above the
 last leg's 965. Before the re-split the subset was the first seven shards'
-tests, 1,295 by those counts, against a last floor of 734. So, too, would
-one whose line 4 piped Cargo into `Tee-Object` again, or whose line 8, the
-throw for a test process left running, was gone:
-`MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` and
-`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED`, each refused under
-`test-windows-hosted-command`.
+tests, 1,295 by those counts, against a last floor of 734.
 
-Where the guest's job refuses a toolchain install, this one requires one:
-the toolchain action at step 1, with `clippy` among its components, since
-the suite's effect-denial fixtures run `clippy-driver`. The guest's rule
-against an install stays, and applies to the guest's job only. Measured,
-every row named `MUT-TEST-WINDOWS-HOSTED-*`.
+The same equality holds how the step runs the suite and what it does about a
+test process left running. `MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` makes
+line 4 a pipeline into `Tee-Object` again, and
+`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED` removes line 8, the throw for
+such a process. Each edits the workflow alone and is refused under
+`test-windows-hosted-command`. The same edit made to the workflow and to
+[`WINDOWS_SHARD_WITNESS`] together is not this pin's to refuse:
+`windows_suite_wait_complaints` in `super` reads those relations from the
+constant.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
 
-The install selects [`GOLDEN_IMAGE_TOOLCHAIN`], the guest's image's
-compiler, exactly: not `stable`, which floats ahead of the image, and not an
-older version, which omits what the image's compiler enables. The twin runs
-only when the guest is busy, so a second compiler would make a
-compiler-dependent test's result depend on the guest's load. With the suite
-step intact either drift throws at the compiler questions on every run sent
-to the twin; this refuses it before it is pushed, and edited together with
-the suite step the drift is refused there, as an unpinned script. The
-check is the twin's own rather than [`toolchain_complaints`]'s `expected`,
-whose complaint is written for the hosted jobs that pin `stable`. Measured,
+The install selects [`GOLDEN_IMAGE_TOOLCHAIN`], exactly: the compiler the
+guest's image carried when the guest was retired. Not `stable`, which
+floats ahead of it, and not an older version, which omits what the pinned
+compiler enables.
+
+The pin is kept so that the suite's compiler moves by an edit -- the
+install, the two lines of the suite step that refuse any other compiler and
+the model's constant, together -- and not with GitHub's stable. Under
+`stable` a test whose outcome depends on the compiler -- a version-gated
+test, a std behaviour change, a new lint in test code under `-D warnings`
+-- moves with GitHub's image, and `lint (windows)` already compiles,
+code-generates and links the tree on current stable on every event. While
+the guest also ran the suite, the reason was the guest: a second compiler
+here made such a test's result depend on which home the picker chose.
+
+With the suite step intact either drift throws at the compiler questions on
+every run. This refuses it before it is pushed, as the drift between the two
+places the workflow writes the version; edited together with the suite step
+the drift is refused there, as an unpinned script. The check is this job's
+own rather than [`toolchain_complaints`]'s `expected`, whose complaint is
+written for the jobs that pin `stable`. Measured,
 `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-FLOATS` and
 `MUT-TEST-WINDOWS-HOSTED-TOOLCHAIN-DOWNGRADED`.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "uses").is_some_and(|uses| uses.starts_with(CACHE_ACTION)) {`
 
-No cache step, at any position: a twin run's cache is one nothing later
-reads ([`CACHE_ACTION`]). The capture's placement rule already refuses a
-cache step between the suite and the capture; this refuses one anywhere,
-and names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
+No cache step, at any position. The job carries none, and the reason its
+cache step was taken out has gone: until 2026-11-20 `master` saved a cache for this
+job only on a push the picker sent here, so nearly every run would have
+uploaded a cache nothing later read. Every push to `master` now runs these
+legs, so `master` would save one that pull requests and queue entries could
+restore. Whether that pays inside a leg's 40 minutes is not measured, and
+adding a cache step is a change of its own, made together with this refusal
+([`CACHE_ACTION`]). The capture's placement rule already refuses a cache
+step between the suite and the capture; this refuses one anywhere, and
+names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
 
 The `clippy` component, read from the install step the way the `test` job's
-check reads it. Measured, `MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY`.
+check reads it: the suite's effect-denial fixtures run `clippy-driver`, and
+`dtolnay/rust-toolchain` installs the minimal profile. Measured,
+`MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY`.
 
 ## `struct ShardLeg {`
 
-One leg of the twin's matrix as the oracle compares it: the shard's label,
-the libtest arguments, and the floor. The expected legs and the legs read
-from `ci.yml` are both made of it, so the comparison is one equality and a
-refusal prints both sides field by field.
+One leg of the Windows shards' matrix as the oracle compares it: the shard's
+label, the libtest arguments, and the floor. The expected legs and the legs
+read from `ci.yml` are both made of it, so the comparison is one equality
+and a refusal prints both sides field by field.
 
 ## `pub(super) fn windows_shard_labels() -> Vec<String> {`
 
@@ -630,12 +644,13 @@ makes one more shard than it is given filters, so a filter added to the
 table renames every leg and no label is written down.
 
 The label is what GitHub puts in the leg's job name, in place of
-`${{ matrix.shard }}`, and what the suite step prints beside its count. The
-picker fixtures in `super` build the legs' listed names from it.
+`${{ matrix.shard }}`, and what the suite step prints beside its count.
+[`windows_shard_legs`] is its one reader now. Until 2026-11-20 the picker's
+fixtures in `super` built the legs' listed names from it as well.
 
 ## `fn windows_shard_legs() -> Vec<ShardLeg> {`
 
-The table the twin's matrix must equal, derived and never written out: leg
+The table the job's matrix must equal, derived and never written out: leg
 `k` has the `k`-th label, the `k`-th string [`shard_selections`] makes of
 [`WINDOWS_SHARD_FILTERS`], and the `k`-th of [`WINDOWS_SHARD_FLOORS`].
 `the_shard_tables_run_every_test_in_exactly_one_shard` holds the floors to
@@ -654,7 +669,7 @@ keeps the table to one spelling, a floor that can only be a number.
 
 ## `fn windows_shard_matrix_complaints(job: &Yaml) -> Vec<String> {`
 
-The twin's `strategy:`, whole, under the one code
+The `strategy:` of [`TEST_WINDOWS_HOSTED_JOB`], whole, under the one code
 `test-windows-hosted-matrix`. Four things, each its own complaint:
 
 1. `strategy:` declares exactly `fail-fast` and `matrix`.
@@ -735,7 +750,8 @@ entry's three lines removed, three tests of `super` failed, each with the
 fourth complaint and both tables printed --
 `the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
 clean-workflow check,
-`the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler` and
+`the_hosted_windows_shards_run_the_suite_on_the_compiler_they_install`
+under the name it then had, and
 `every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`.
 The same three failed the same way with the second leg's `--skip` naming
 `tests::b`.
@@ -745,7 +761,7 @@ The same three failed the same way with the second leg's `--skip` naming
 The native HOST acceptance record's step: exactly one step of the job runs the
 pinned capture script, and it is the step immediately after the one step that
 runs the pinned suite. Codes: `test-capture-command` and
-`test-windows-capture-command`.
+`test-windows-hosted-capture-command`.
 
 This check is what refuses an omitted capture. Without it, nothing in this
 contract asks for the record, and deleting the step leaves every other check
@@ -775,19 +791,19 @@ Measured, in the `test` job:
 - `MUT-TEST-CAPTURE-FRAMING-UNCHECKED`
 - `MUT-TEST-CAPTURE-SEPARATED-FROM-THE-SUITE`
 
-Measured, on the guest:
+Measured, on the Windows shards:
 
-- `MUT-TEST-WINDOWS-CAPTURE-STEP-DELETED`
-- `MUT-TEST-WINDOWS-CAPTURE-IGNORED-NOT-RUN`
-- `MUT-TEST-WINDOWS-CAPTURE-EXIT-SWALLOWED`
-- `MUT-TEST-WINDOWS-CAPTURE-ZERO-TESTS-ADMITTED`
-- `MUT-TEST-WINDOWS-CAPTURE-FRAMING-UNENFORCED`
-- `MUT-TEST-WINDOWS-CAPTURE-SEPARATED-FROM-THE-WITNESS`
+- `MUT-TEST-WINDOWS-HOSTED-CAPTURE-SEPARATED-FROM-THE-WITNESS`
+
+That row is the position guard, a pinned cache step between the witness and
+the capture. The rows that deleted the Windows capture or edited its script
+mutated the guest's job and went with it on 2026-11-20; no row deletes or
+edits the shards' capture.
 
 A field on the capture beyond the admitted set — `if:` or
 `continue-on-error:` — is refused as `unexpected-step-field`
-(`MUT-TEST-CAPTURE-STEP-DISABLED`, `MUT-TEST-CAPTURE-STEP-ABSOLVED`,
-`MUT-TEST-WINDOWS-CAPTURE-DISABLED`).
+(`MUT-TEST-CAPTURE-STEP-DISABLED` and `MUT-TEST-CAPTURE-STEP-ABSOLVED`, in
+the `test` job).
 
 Three controls each disabled one of the new checks; each check is
 load-bearing:
@@ -806,7 +822,7 @@ The container capability observation's step (G7, root direction `ecf15a9c`).
 Exactly one step of the job runs the pinned observation script, and it is the
 step immediately after the one step that runs the pinned host acceptance
 capture. Codes: `test-capability-command` and
-`test-windows-capability-command`.
+`test-windows-hosted-capability-command`.
 
 As with [`capture_complaints`], this check is what refuses an omitted
 observation, and an edited script counts as a missing one:
@@ -838,23 +854,20 @@ Measured, in the `test` job:
 match their pins and each runs once, in swapped order. Its anchor spans the
 capture step through the observation step.
 
-Measured, on the guest:
+Measured, on the Windows shards:
 
-- `MUT-TEST-WINDOWS-CAPABILITY-STEP-DELETED`
-- `MUT-TEST-WINDOWS-CAPABILITY-IGNORED-NOT-RUN`
-- `MUT-TEST-WINDOWS-CAPABILITY-FILTER-MOVED`
-- `MUT-TEST-WINDOWS-CAPABILITY-EXIT-SWALLOWED`
-- `MUT-TEST-WINDOWS-CAPABILITY-ZERO-TESTS-ADMITTED`
-- `MUT-TEST-WINDOWS-CAPABILITY-FRAMING-UNENFORCED`
-- `MUT-TEST-WINDOWS-CAPABILITY-SEPARATED-FROM-THE-CAPTURE`
+- `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-STEP-DELETED`
+
+The rows that edited the Windows observation's script, or put a step between
+it and the capture, mutated the guest's job and went with it on 2026-11-20;
+no row does either to the shards' observation.
 
 A conditional or failure-swallowing field on the observation, `if:` (a
 `!cancelled()` expression included) or `continue-on-error:`, is refused as
 `unexpected-step-field`. The rows are
 `MUT-TEST-CAPABILITY-STEP-DISABLED`,
-`MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED`,
-`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, `MUT-TEST-WINDOWS-CAPABILITY-DISABLED`
-and `MUT-TEST-WINDOWS-CAPABILITY-ABSOLVED`.
+`MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED` and
+`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, in the `test` job.
 
 No earlier check was removed or loosened. [`TEST_STEP_FIELDS`] and
 [`STEP_FIELDS`] are unchanged; the observation step alone may carry
@@ -866,7 +879,10 @@ The observation step's own fields. They are exactly [`CAPABILITY_STEP_FIELDS`],
 every one required, so a dropped `env:` or `timeout-minutes:` is refused
 here as well as by the env pin. The bound must read as the integer
 [`CAPABILITY_STEP_TIMEOUT_MINUTES`]. A string, another number or no bound is
-refused. Codes: `test-capability-step` and `test-windows-capability-step`.
+refused. Codes: `test-capability-step` and
+`test-windows-hosted-capability-step`. Measured,
+`MUT-TEST-CAPABILITY-TIMEOUT-DROPPED`, `MUT-TEST-CAPABILITY-TIMEOUT-WIDENED`
+and `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-TIMEOUT-DROPPED`.
 
 ## `fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {`
 
@@ -879,17 +895,22 @@ against an empty workspace, or one it prepared itself, and a second
 checkout later can replace the candidate while the first, input-free one
 still matches; both pass a reading that checks only the inputs of whatever
 checkouts it finds, and the position the toolchain check asserts for an
-install is only meaningful if the checkout is the step before it. Measured,
-`MUT-TEST-WINDOWS-CACHE-BEFORE-CHECKOUT` -- on a job that installs nothing,
-the shape only this pin refuses -- and `MUT-TEST-WINDOWS-SECOND-CHECKOUT`.
+install is only meaningful if the checkout is the step before it. Both were
+measured on the guest's job, by rows that went with it on 2026-11-20: a
+cache step above the checkout, on a job that installed nothing and so had no
+install whose position would refuse it, and a second checkout later. No row
+measures either now. Every job left that checks out installs a toolchain at
+step 1, so a step above the checkout is refused there as well as here; a
+second checkout is refused by this pin alone.
 
 `actions/checkout` with no inputs checks out the event's own ref: for a
 pull request, the candidate merged onto its base. Any input -- `ref:`,
 `repository:`, `path:` -- selects something else, and `ref: master` there
 tests `master` while every other leg reads the candidate. [`STEP_FIELDS`]
 admits `with:` because the toolchain and cache actions need it; on a
-checkout step it is refused whole. Measured, `MUT-TEST-WINDOWS-CHECKOUT-REF`
-and `MUT-TEST-CHECKOUT-REF`.
+checkout step it is refused whole. Measured,
+`MUT-TEST-WINDOWS-HOSTED-CHECKOUT-REF`, `MUT-TEST-CHECKOUT-REF` and
+`MUT-WITNESS-CHECKOUT-REF`.
 
 ## `fn step_env_complaints(`
 
@@ -907,9 +928,9 @@ The field and shell checks say how a step runs; this says what. A `run:`
 step whose script is not in the job's pinned set can move the checkout --
 `git fetch origin master && git checkout --detach FETCH_HEAD` -- before the
 pinned command runs, so that command runs against another tree while the
-labels, fields, shell and input-free checkout all still match. A `uses:`
+runner, fields, shell and input-free checkout all still match. A `uses:`
 step off [`PINNED_ACTIONS`] is code nobody here reviewed, with a checkout
-of its own. Measured, `MUT-TEST-WINDOWS-RUN-RETARGETED`,
+of its own. Measured, `MUT-TEST-WINDOWS-HOSTED-RUN-RETARGETED`,
 `MUT-TEST-RUN-RETARGETED`, `MUT-GATE-RUN-RETARGETED`,
 `MUT-MSRV-RUN-RETARGETED` and `MUT-STEP-USES-UNPINNED`.
 
@@ -933,18 +954,20 @@ Every way a job installs a compiler other than the pinned one.
 
 [`PINNED_ACTIONS`] pins the action by commit; this pins the input that
 decides which compiler it installs. A gate downgraded from `stable` to the
-version the golden image already carries leaves no leg compiling on current
-stable, and every other pin in this contract still matches. The MSRV leg is
-not checked here: it pins its own floor against the manifest, in
-[`ci_msrv_job_complaints`]. Nor is the Windows test job: it installs
-nothing, and [`ci_test_windows_job_complaints`] refuses an install there
-outright. Measured, `MUT-GATE-TOOLCHAIN-DOWNGRADED`.
+version the Windows shards pin leaves no leg compiling on current stable,
+and every other pin in this contract still matches. Two jobs are asked for
+the count and the position of their install and not for its version. The
+MSRV leg pins its own floor against the manifest, in
+[`ci_msrv_job_complaints`], and the Windows suite job its own compiler, in
+[`ci_test_windows_hosted_job_complaints`]. Measured,
+`MUT-GATE-TOOLCHAIN-DOWNGRADED`.
 
 ## `out.push(format!(`
 
 Zero installs is a job whose compiler something other than this workflow
-chose. Every job this helper is asked about installs one; the Windows test
-job, whose compiler the guest's image chooses, is not asked.
+chose. Every job this helper is asked about installs one. Until 2026-11-20
+one job that compiled was not asked: the guest's, whose compiler its image
+chose.
 
 ## `if *install != 1 {`
 
@@ -972,102 +995,39 @@ Every way the workflow's `permissions:` is not the pinned mapping.
 The whole map, as an equality, for the reason the `env:` map is pinned
 whole: the field's presence is not the property that matters, its value is.
 A widened token is available to every build script and test the candidate
-ships, with the checkout's credential still configured, and no guest
-teardown recalls what it pushed.
+ships, with the checkout's credential still configured, and discarding the
+runner after the job recalls nothing it pushed.
 Measured, `MUT-WORKFLOW-PERMISSIONS-WIDENED`.
 
-## `fn pinned_map(pinned: &[(&str, &str)]) -> BTreeMap<String, String> {`
+## `fn job_permissions_complaints(doc: &Yaml) -> Vec<String> {`
 
-A model's `(key, value)` pairs as the map a parsed mapping is compared with.
-
-## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {`
-
-Every way the job that picks the Windows suite's home fails its contract.
-
-The job is pinned whole: its field set, name, runner, timeout, permissions,
-output, its one step's fields, id, environment, resolved shell and script.
-The script is pinned as text, and what that text answers is executed
-elsewhere, by `the_windows_home_picker_answers_from_canned_api_pages` in
-`super`, against canned API pages; the pin is what makes those answers the
-workflow's.
-
-## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `for name in field_names(jobs) {`
-
-No other job declares `permissions:`. The picker is the one job that widens
-the workflow's token, by one read scope, and it checks out nothing; a block
-on any other job hands whatever it names to a job that runs the candidate's
+No job declares `permissions:`. A block on a job replaces the workflow's for
+that job, and hands whatever it names to a job that runs the candidate's
 build scripts and tests. Every modelled job's field set already refuses the
 key; this scan reaches a job added tomorrow that has no field set yet, and
-names the cause. Measured, `MUT-JOB-PERMISSIONS-ON-THE-GUEST-JOB`.
+names the cause. Code `job-permissions`.
 
-## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let counted = field(jobs, TEST_WINDOWS_JOB).and_then(|job| scalar(job, "name"));`
-
-The guest's job keeps the `name:` the picker counts. The API lists jobs by
-name, and nothing else pins that one, so a rename would leave the picker
-counting an empty queue. Measured, `MUT-PICK-WINDOWS-HOME-COUNTS-A-RENAMED-JOB`.
-
-## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(PICK_WINDOWS_HOME_NAME) {`
-
-The picker keeps the `name:` its own script reads in other runs. A run whose
-picker is listed and unfinished is one still choosing its home; under another
-name every run reads as having none, and runs that start together answer
-alike again (`PR375-QUEUE-PICKERS-RACE`). Measured,
-`MUT-PICK-WINDOWS-HOME-RENAMED`.
-
-## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let permissions = field(job, "permissions").and_then(scalar_map);`
-
-The token's scopes and the answer's name, each as a whole map. A wider
-`actions:` can cancel or re-run any run; another scope is a token the job
-never needed; an output under another name, or bound to another step, is an
-empty string to the jobs that read it. Measured,
-`MUT-PICK-WINDOWS-HOME-PERMISSION-WIDENED`,
-`MUT-PICK-WINDOWS-HOME-PERMISSION-ADDED` and
-`MUT-PICK-WINDOWS-HOME-OUTPUT-RENAMED`.
-
-## `pub(super) fn ci_pick_windows_home_complaints(doc: &Yaml) -> Vec<String> {` › `let steps = steps_of(job);`
-
-Exactly one step, a script: no checkout, no action. Then its id, its
-environment, its script and its resolved shell. Measured,
-`MUT-PICK-WINDOWS-HOME-SECOND-STEP`, `MUT-PICK-WINDOWS-HOME-ENV-CROSSED`,
-`MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED`,
-`MUT-PICK-WINDOWS-HOME-COUNTS-BY-DEFAULT`,
-`MUT-PICK-WINDOWS-HOME-ROUTES-PULL-REQUESTS-BY-DEFAULT`,
-`MUT-PICK-WINDOWS-HOME-ROUTES-EVERY-EVENT`,
-`MUT-PICK-WINDOWS-HOME-UNREADABLE-ANSWERS-HOSTED`,
-`MUT-PICK-WINDOWS-HOME-COUNTS-A-RUN-TWICE`,
-`MUT-PICK-WINDOWS-HOME-FIRST-PAGE-ONLY`,
-`MUT-PICK-WINDOWS-HOME-LATER-PAGE-FAILURE-IGNORED`,
-`MUT-PICK-WINDOWS-HOME-IGNORES-EARLIER-RUNS-STILL-CHOOSING`,
-`MUT-PICK-WINDOWS-HOME-COUNTS-LATER-RUNS-STILL-CHOOSING` and
-`MUT-PICK-WINDOWS-HOME-HOLDS-A-JOB-ITS-PICKER-HAS-NOT-RELEASED`. The pin
-refuses any other text; what each of the last three does to runs that start
-together is executed, in `super`'s two-picker fixtures.
-
-The two `ROUTES` rows are the pull-request rule's one `elif` with one of its
-two tests removed: without the variable's, every pull request leaves the
-guest with nothing set; without the event's, a merge-queue entry and a push
-leave it when the variable is `1`. Those are the two lanes `super`'s picker
-fixtures answer every case in, a pull request with the variable empty and a
-merge-queue entry with it `1`, so what the script answers there is executed
-as well as pinned. `MUT-PICK-WINDOWS-HOME-PR-VARIABLE-CROSSED` leaves the
-script alone and binds the rule's name to the busy flag's variable, under
-`pick-windows-home-env`: the rule then never routes a run, whatever the
-owner set.
+With the picker gone there is no exception. Until 2026-11-20 the scan was
+part of the picker's check and passed over that one job, which widened the
+workflow's token by one read scope, to list other runs' jobs, and checked
+out nothing. Every job is scanned now.
+Measured, `MUT-JOB-PERMISSIONS-ON-THE-HOSTED-SHARDS`.
 
 ## `pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {`
 
-Every way the hosted Windows codegen witness fails its contract.
+Every way the Windows codegen witness on current stable fails its contract.
 
-The Windows test leg executes the suite with the golden image's toolchain,
-which moves only by re-curation. `cargo check` and Clippy on
-`windows-latest` type-check current stable and stop before codegen, so
-without this witness nothing on GitHub's current stable ever code-generates
-or links the Windows tree: a Windows-only codegen or link failure there
-would pass every hosted leg while the guest, one stable behind, links and
-passes. [`WINDOWS_BUILD_WITNESS`] builds every test binary and executes
-none. It lives in the Windows Clippy gate's job, whose field set and shells
-the gate contract pins; this pins the command, exactly once, on exactly one
-hosted Windows job. Measured, `MUT-WINDOWS-BUILD-WITNESS-*`.
+The Windows suite's shards build with the pinned
+[`GOLDEN_IMAGE_TOOLCHAIN`], which moves only by an edit to that pin. `cargo
+check` and Clippy on `windows-latest` type-check current stable and stop
+before codegen, so without this witness nothing on GitHub's current stable
+ever code-generates or links the Windows tree: a Windows-only codegen or
+link failure there would pass every other leg while the shards, on the
+pinned compiler, link and pass. [`WINDOWS_BUILD_WITNESS`] builds every test
+binary and executes none. It lives in the Windows Clippy gate's job, whose
+field set and shells the gate contract pins; this pins the command, exactly
+once, on exactly one `windows-latest` job. Measured,
+`MUT-WINDOWS-BUILD-WITNESS-*`.
 
 ## `pub(super) fn ci_windows_build_witness_complaints(doc: &Yaml) -> Vec<String> {` › `if !steps_of(job)`
 
@@ -1338,7 +1298,7 @@ whose second shard skips its own filter and selects nothing. The same test
 holds all three tables' strings to written-out literals.
 
 One function, so that the tables and anything derived from them cannot
-disagree about the rule. The hosted twin's matrix is the first thing derived
+disagree about the rule. The Windows shards' matrix is the first thing derived
 from one: [`windows_shard_legs`] takes each leg's arguments from here, and
 `ci.yml` is held to them. The `test` job's matrix is the second:
 [`test_legs`] takes the five macOS legs' arguments and the two Linux legs'

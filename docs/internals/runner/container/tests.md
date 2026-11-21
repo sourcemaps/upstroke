@@ -3247,11 +3247,9 @@ A printed frame alone is never acceptance.
 The one ignored, cfg-free observation test. CI's observation step selects it
 by its exact name immediately after the native host acceptance capture, in
 `test` (once in each of ubuntu-latest's two shards and of macos-latest's five)
-and in whichever Windows suite job the
-run's `pick-windows-home` chose, `test-windows` (winguest) or
-`test-windows-hosted` (windows-latest, once in each of its ten shards). It does
-not call `docker_gate` and is not in `DOCKER_GATED_TESTS`. Its body has no
-platform cfg and no early return.
+and in `test-windows-hosted`, once in each of its ten shards on
+`windows-latest`. It does not call `docker_gate` and is not in
+`DOCKER_GATED_TESTS`. Its body has no platform cfg and no early return.
 
 Every capability class is a valid observation, and the test passes after
 printing the record: an absent executable, an unknown or rejected endpoint,
