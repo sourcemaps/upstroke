@@ -59,6 +59,7 @@ pub struct PlanRequest<'a> {
     pub attempt: AttemptNumber,
     pub rung: u32,
     pub binding: RungBinding,
+    pub pool: Option<String>,
     pub workspace: &'a std::path::Path,
     pub resume_session: Option<SessionId>,
     pub feedback: Vec<crate::events::Feedback>,
@@ -88,6 +89,10 @@ pub trait AttemptPlans {
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError>;
 
     fn pool_for(&self, agent: &str) -> Option<String>;
+
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.pool_for(agent).into_iter().collect()
+    }
 
     fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError>;
 
@@ -139,6 +144,7 @@ pub struct AttemptPlan {
     pub rung: u32,
     pub binding: RungBinding,
     pub pool: Option<String>,
+    pub credential_profile: Option<std::path::PathBuf>,
     pub resume_session: Option<SessionId>,
     pub materialization_observed: Option<Materialization>,
     pub agent: AgentId,
@@ -955,6 +961,10 @@ impl Judge<'_> {
             plan.worker_timeout,
             invocation,
         );
+        let request = match &plan.credential_profile {
+            Some(profile) => request.with_credential_profile(profile.clone()),
+            None => request,
+        };
         let worker = self.execute(&request, plan.pool.clone())?;
         let worker_common_dir = self.runner.composed_common_dir(&request);
         Ok(AttemptRun {

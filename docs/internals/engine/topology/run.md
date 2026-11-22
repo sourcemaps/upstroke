@@ -750,6 +750,15 @@ Which attempt of the generation.
 
 Which rung of the frozen ladder.
 
+## `struct RunAs` › `pool: Option<String>,`
+
+The pool an attempt already announced was announced on: a retry's, as its
+`attempt_started` recorded it. `prepare_attempt` plans an announced attempt
+on this pool and chooses none of its own, so the plan and the event it
+follows name one pool. A dispatch carries `None` here, which says nothing
+about its pool: it is not announced yet, and `prepare_attempt` chooses its
+pool with [`serving_pool`].
+
 ## `struct RunAs` › `resume_session: Option<SessionId>,`
 
 The session this attempt resumes, if any.
@@ -1140,6 +1149,11 @@ settled attempt that proves a pool serving again retires it
 (`capacity::retire_served_pools`). What a resume starts it from is the
 `let exhausted_pools` section of `resumed`, below.
 
+A pool in this map is *held exhausted*, and that is all the word means: a
+signal put it here and no attempt it served has taken it out. It is the only
+thing [`serving_pool`] reads to decide which of an agent's pools a new
+attempt binds. No estimate, no spend and no configuration is consulted.
+
 ## `impl TopologyRun` › `pub fn resumed(handle: RunHandle, inputs: FrozenInputs, ceiling: Ceiling) -> Self {`
 
 Take over a run a completed recovery handed back.
@@ -1476,6 +1490,20 @@ appends its `defer_wait_elapsed`, for the whole wait, in the order and form
 the plain backoff appends one ([`Self::wait_elapsed`]), and answers
 `Progress::Waited`.
 
+**The choice is handed the plans.** `back_off` passes `seams.plans` to
+[`Self::awaited_reset`], which it did not before a worker's rate limit failed
+over (`settle_failure`). A task such a limit deferred is now one whose agent
+had no other pool left, and its next attempt can run on whichever of that
+agent's pools comes back first. Only the plans list those pools
+(`AttemptPlans::pools_for`). The choice used to read the one pool the task's
+last attempt ran on, which is the pool that refused last and not the one that
+resets first. With `claude-max` held until 05:30 and `claude-max-2`, the last
+to refuse, until 07:00, the run slept from 03:00 to 07:02 and left idle for
+an hour and a half a pool that could have served at 05:32
+(`tests::with_every_pool_of_the_agent_exhausted_the_run_waits_for_the_earliest_reset_among_them`).
+The wait itself, its slices, its margin, its one line and its record, did not
+change.
+
 **A held wait is continued before any reset is chosen.** The arm first
 asks the deferral for the target of the wait it holds
 (`Deferral::held_until`). With one held, it sleeps the next slice toward
@@ -1500,10 +1528,13 @@ With no wait held and no known reset in range, the arm is the plain
 backoff, unchanged. That covers a limit naming a reset more than
 `interaction::RESET_WAIT_BOUND` ahead (the weekly one, usually), a pool
 exhausted with no reset recorded, a recorded reset that does not read as
-a date ([`unix_seconds_of`]), a recorded reset the clock had already
-passed when the back-off began, and a deferred queue verification, which
-names no pool. A reset the clock passes during a held wait is not one of
-these: that wait is continued to its target.
+a date ([`unix_seconds_of`]), an earliest recorded reset the clock had
+already passed, two-minute margin and all, when the back-off began (one
+still inside its margin is waited out to the margin's end,
+[`Self::awaited_reset`]), a worker's limit one of whose agent's pools has
+been freed since it deferred the task, and a deferred queue verification,
+which names no pool. A reset the clock passes during a held
+wait is not one of these: that wait is continued to its target.
 
 ## `impl TopologyRun` › `fn wait_elapsed(`
 
@@ -1511,29 +1542,135 @@ Append a wait's `defer_wait_elapsed` and answer `Progress::Waited`. Both of
 `back_off`'s waits end here, so the record of a wait that elapsed has one
 shape whichever wait it was.
 
-## `impl TopologyRun` › `fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset> {`
+## `impl TopologyRun` › `fn awaited_reset(&self, now_unix: u64, plans: &dyn AttemptPlans) -> Option<AwaitedReset> {`
 
 The reset a back-off starts a wait toward. It is asked only when the
 deferral holds no wait (`Deferral::held_until`), so a held wait is never
 chosen again, and a reset that has fallen behind the clock during the
-wait cannot end it early. It chooses from the log and the run's memory
-of exhausted pools:
+wait cannot end it early. It chooses from the log, the plans and the run's
+memory of exhausted pools:
 
-1. each task the fold holds `Deferred`;
-2. its last `attempt_finished` ([`last_settled_record`]);
-3. the pool that attempt's failure names, as `capacity::retire_signals`
-   chooses it (`capacity::limited_pool`);
-4. that pool's recorded reset in `exhausted_pools`, read as Unix seconds
-   by [`unix_seconds_of`]. A reset that does not read, such as one on a
-   day its month lacks, is no known reset and is dropped here;
-5. the earliest of those resets that is ahead of the run's clock by at
-   most `interaction::RESET_WAIT_BOUND`, the one
-   `interaction::reset_wait_until` waits for. With none ahead within the
-   bound it answers `None`.
+1. each task the fold holds `Deferred`, and the resets that task waits on
+   ([`Self::resets_awaited_by`]). A spent reset ([`spent_resets`]) is not
+   among them, and neither is a reset at or behind the clock for a task
+   whose limit cannot fail over;
+2. the earliest of all those resets, which decides the wait:
+
+| The earliest reset | Its margin | Answer |
+|---|---|---|
+| at or behind the clock | passed too | `None`: the plain backoff's minute |
+| at or behind the clock | not passed | two minutes past that reset, for its pool |
+| ahead of the clock | | `interaction::reset_wait_until`'s target, or `None` |
+
+- **passed, and its margin too.** If the clock is at or past both the
+  earliest reset and the two minutes after it
+  (`interaction::RESET_WAIT_MARGIN`), there is no wait and it answers
+  `None`. That pool can serve now ([`serving_pool`] serves a held pool from
+  its reset plus the margin), so `back_off` takes the plain backoff's minute
+  and the task wakes onto it.
+- **passed, its margin not.** If the clock is at or past the earliest reset
+  but short of the two minutes after it, the wait runs to two minutes past
+  that reset, under two minutes, for that pool.
+- **ahead.** Otherwise every reset is ahead of the clock, and the wait is for
+  the earliest one ahead by at most `interaction::RESET_WAIT_BOUND`, the one
+  `interaction::reset_wait_until` waits for. With none within the bound it
+  answers `None`.
+
+The two rows for a passed reset hold only for a worker's limit on an agent
+with more than one pool: only there can a passed reset be another pool's
+than the one that refused, waiting while that refusal's own pool is held.
+For one pool, or a reviewer's limit, `resets_awaited_by` drops a reset at or
+behind the clock, so only the third row is asked, as before the failover. An
+agent with one pool whose limit names `resets 3am (UTC)` at 03:00:00 backs
+off the plain minute, as it did then
+(`tests::with_one_pool_a_reset_at_the_clock_backs_off_as_before`,
+`tests::a_reviewers_limit_whose_pool_resets_at_the_clock_backs_off_as_before`).
+
+A spent reset is left out for the reason it is left out of `serving_pool`'s
+input: the pool refused past it, so it says nothing about when the pool
+serves again. Waited for, the passed rows would wake the task onto that pool
+again and again. With `spare` refusing again at 03:01 past its 02:59 reset,
+the wait runs to 05:32 for `primary`
+(`tests::a_reset_its_pool_has_refused_past_is_spent_and_the_wait_runs_to_the_other_pools_reset`),
+and with `primary` refusing again at 03:03 past its 03:01 reset, to 05:32 for
+`spare`
+(`tests::a_pool_that_refuses_again_past_its_reset_with_none_readable_is_not_served_from_that_reset`).
+
+A pool's reset plus the margin is when it can serve again, so the earliest
+reset is also the earliest a pool comes back, passed or not. The two cases
+for a passed reset are decided here, before `interaction::reset_wait_until`
+is asked, because that rule waits only for a reset still ahead. Asked alone,
+it dropped a held pool whose reset had passed and waited for a later pool's.
+With `claude-max` reset at 03:01 and `claude-max-2` refusing until 07:00, a
+back-off at 03:05 slept to 07:02, though `claude-max` could serve from 03:03
+(`tests::a_held_pool_whose_reset_and_margin_have_passed_takes_the_ordinary_back_off`).
+With `primary` reset at 02:59 and `spare` refusing until 05:30, a back-off at
+03:00 slept to 05:32, though `primary` could serve from 03:01
+(`tests::a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it`).
 
 The pool and reset text come back with the target, for the line
-[`Self::announce_reset_wait`] prints. A pool a later attempt proved serving
-is no longer in `exhausted_pools`, so its old reset is not waited for.
+[`Self::announce_reset_wait`] prints. They are those of the pool whose reset
+was chosen, which for a worker's limit need not be the pool that refused
+last. A pool a later attempt proved serving is no longer in
+`exhausted_pools`, so its old reset is not waited for.
+
+`plans` is new with the worker's failover: the signature was
+`fn awaited_reset(&self, now_unix: u64) -> Option<AwaitedReset>`, and the
+choice read one pool for each task, the one its last attempt's failure
+named. [`Self::resets_awaited_by`] says what it reads now and why.
+
+## `impl TopologyRun` › `fn resets_awaited_by(`
+
+The recorded resets one task's deferral waits on, each as Unix seconds with
+its pool and its text. `None` when the task is not `Deferred`, when its last
+`attempt_finished` ([`last_settled_record`]) is not a rate limit, or when a
+pool it would run on is free.
+
+Which pools those are depends on who was limited:
+
+- **A worker's limit: every pool of the agent.** The candidates are the
+  pools the plans list (`AttemptPlans::pools_for`) for the agent of the
+  binding the task's next attempt runs under (`fold.rung_binding` at the
+  task's rung). They are the candidates [`serving_pool`] chooses among when
+  the task wakes, so the two agree about where it can run. A worker's limit
+  defers only when it could not fail over (`settle_failure`), which leaves
+  every one of them held, and the task can run again as soon as any one
+  resets. So it waits on all their resets, and the earliest is the one
+  `awaited_reset` takes.
+- **A reviewer's limit: the reviewer's pool.** `capacity::limited_pool`
+  names it, as `capacity::retire_signals` does. A reviewer runs on its
+  agent's first pool whatever is held, so no other pool's reset helps it.
+  This is the pool `awaited_reset` read for every limit before.
+
+If any candidate is not in `exhausted_pools`, the task waits on no reset. A
+pool a later attempt proved serving, for another task perhaps, can take this
+one at its next wake. When no other task waits on a reset, the plain
+backoff's minute gets it there. Waiting out the reset of a pool it no longer
+needs would only hold it back.
+
+Of the held candidates, one with no reset recorded gives none, and so does
+one whose reset does not read as a date ([`unix_seconds_of`]), such as a
+reset on a day its month lacks. So does one whose reset is in `spent`
+([`spent_resets`], read once by `awaited_reset` for every task).
+
+When the limit cannot fail over, a worker's on an agent with one pool or a
+reviewer's, a reset at or behind `now_unix` gives none too. Only a limit that
+fails over can leave a passed reset on another pool than the one that
+refused, so only there does `awaited_reset` wait out its margin; for the
+rest it asks `interaction::reset_wait_until` alone, as before the failover.
+
+`spent` and `now_unix` are new with the spent rule: the signature was
+`fn resets_awaited_by(&self, key: TaskKey, plans: &dyn AttemptPlans)`.
+
+## `impl TopologyRun` › `fn held_unspent(&self) -> BTreeMap<String, Option<String>> {`
+
+`exhausted_pools` with each spent reset ([`spent_resets`], read from
+`self.handle.events`) read as no reset. It is the held map
+`prepare_attempt` gives [`serving_pool`], so a pool whose reset is spent is
+held with no known reset: it serves only when no pool is free and no other
+held pool's reset and margin have passed, as a pool whose limit named no
+reset does. `exhausted_pools` itself keeps the reset, so the failover and
+`capacity::pool_exhausted_to_record` see the pool held as before.
 
 ## `impl TopologyRun` › `fn announce_reset_wait(&self, awaited: &AwaitedReset, now_unix: u64) {`
 
@@ -1581,7 +1718,9 @@ and the announcement ([`TopologyRun::first_attempt`]) take the run.
 ## `impl TopologyRun` › `fn first_attempt(`
 
 The first attempt of a dispatched generation: rung and feedback from the run,
-the plan and `attempt_started` through [`TopologyRun::prepare_attempt`].
+the plan and `attempt_started` through [`TopologyRun::prepare_attempt`]. It
+names no pool (`pool: None`), because nothing has announced the attempt yet:
+`prepare_attempt` chooses the pool it binds.
 
 ## `impl TopologyRun` › `fn judge_inline(`
 
@@ -1822,16 +1961,35 @@ scrubbed as before.
 
 The run's side of a retry, before its worktree is verified: the request, owned.
 
-## `impl TopologyRun` › `let pool = seams.plans.pool_for(&binding.agent);`
+It takes no seams: everything it reads is the run's own fold, log and
+retained tree. It took them for one call, `seams.plans.pool_for`, which the
+`let pool =` section below replaced.
 
-Read before `binding` moves into the request below it.
+## `impl TopologyRun` › `let pool =`
+
+**The retained attempt's own pool**, read from its record: the task's last
+`attempt_finished` ([`last_settled_record`]), which for a retained generation
+is the settlement that retained it. A retry resumes that attempt's session,
+and a session lives under its pool's credential directory, so the retry stays
+on the pool the session ran on. It does not ask [`serving_pool`]. A pool
+earlier in file order may have come back since the attempt started, and
+choosing it would hand a session to credentials that never held it.
+
+This line read `seams.plans.pool_for(&binding.agent)`, the agent's first pool.
+While every attempt bound the first pool, that was the retained attempt's pool
+by construction. Once a dispatch can bind a later pool, it is not:
+`tests::a_retained_retry_resumes_on_the_pool_its_session_ran_on` has the
+retained attempt on `claude-max-2` and `claude-max` no longer held, and the
+retry stays on `claude-max-2`.
 
 ## `impl TopologyRun` › `pool,`
 
-Through the seam that owns the frozen pool table, not a
-second lookup here. The dispatch arm reads `plan.pool`;
-this arm appends before its plan exists, so it asks the
-same authority one step earlier (`R3-SEAMS-001`).
+A pool named by the record, not invented here. The dispatch arm's
+`attempt_started` reads `plan.pool`; this arm appends before its plan
+exists, so it names the pool first and `prepare_attempt` then plans on the
+pool the event recorded ([`RunAs::pool`]). `R3-SEAMS-001` was this field
+passed as `None`, so the ledger recorded no pool for an attempt whose plan
+resolved one.
 
 ## `impl TopologyRun` › `feedback: self.brief.lines(key),`
 
@@ -1843,7 +2001,9 @@ same-rung retry ever produces.
 ## `impl TopologyRun` › `fn retry_started(`
 
 A started retry: `attempt_started`, the reservation converted, and the attempt's
-plan.
+plan. The plan is built on the pool the event recorded, which the retry's
+`RunAs` carries (`pool: started.pool.clone()`), so the two cannot name
+different pools.
 
 ## `impl TopologyRun` › `fn retry_closed(`
 
@@ -1867,7 +2027,8 @@ The attempt number a fresh generation's first attempt carries.
 
 The fourth clause of the ready-dispatch branch, first half: **the attempt's
 plan and its announcement.** The binding from the fold, the frozen registry
-entry, `plans.plan`, and `attempt_started` unless the retry already appended it
+entry, the pool the attempt binds (the `let pool =` section below),
+`plans.plan`, and `attempt_started` unless the retry already appended it
 — on the coordinator's thread, as an [`AttemptJob`] that owns everything the
 body reads. The worker, the exact-tree capture, the gate set on one shared
 snapshot and each reviewer on a fresh one are [`attempt_body`]'s, in that order,
@@ -1905,6 +2066,28 @@ would not survive to the second read. One registry entry is a few
 strings; the alternative is the driver copying the five fields
 `inputs` reads, which is assembly logic in the one place that must
 not hold any.
+
+## `impl TopologyRun` › `let pool = if run_as.announced {`
+
+**Which pool this attempt binds.** An attempt already announced keeps the
+pool its `attempt_started` recorded ([`RunAs::pool`]): that is a retry, whose
+pool `retry_request` took from the retained attempt. Any other attempt is the
+first of its generation, in a fresh session, and binds [`serving_pool`]'s
+choice among the pools the plans list for the binding's agent
+(`AttemptPlans::pools_for`), read against `exhausted_pools` and the run's
+clock. The choice goes to the assembler as `PlanRequest::pool`, and the
+plan's `pool`, the slot the worker takes and its credential profile follow
+from it.
+
+So a task that a usage limit deferred is dispatched again on its agent's
+next pool while a signal still holds the first one exhausted, and returns to
+the first once an attempt it served has retired the signal. The reviewers'
+pools are not chosen here. Each is its agent's first pool, as before.
+
+`tests::a_task_dispatched_again_after_a_rate_limit_binds_the_next_pool_of_its_agent_in_a_fresh_session`
+is the witness. Before this section's line the plan resolved the agent's
+first pool on its own, so the second generation ran on the pool that had just
+refused the first.
 
 ## `impl TopologyRun` › `if !run_as.announced {`
 
@@ -2098,6 +2281,12 @@ The run's side of a failed attempt's settlement, below: the ladder's next step,
 its question and `attempt_finished`, answering whether the generation closed and
 whether the attempt was spent.
 
+Since the worker's rate limit fails over, the step the settlement carries is
+not always the ladder's own. One deferral is replaced by a retry, in the
+`let next = match next {` section below. Nothing else here changed for it:
+the question, `settle_failed`, the `pool_exhausted` that precedes a
+rate-limited `attempt_finished`, and the two answers are as they were.
+
 ## `impl TopologyRun` › `let position = self.ladder_position(site.key)?;`
 
 Where the task stands on its ladder, from the log rather than from
@@ -2139,6 +2328,76 @@ is corrected in a fresh generation, not in place (`design/26`
 fresh one. (Until PR #249's sixth repair round this paragraph
 named the first two only.)
 
+## `impl TopologyRun` › `let next = match next {`
+
+**A worker's rate limit fails over before it defers.** The ladder knows
+nothing about pools. It answers every outage with `Next::Defer` while the
+task has deferrals left (`ladder::next_step`), and a deferred task waits for
+its pool's reset, hours for a five-hour window. When the agent has another
+pool that no signal holds exhausted ([`Self::another_pool_can_serve`]), that
+wait buys nothing, because the pool could serve the task now. So the
+deferral becomes `Next::RetrySameRung { resume: false }`, and `settle_failed`
+closes the generation with the `Retry` transition. The next dispatch is the
+first attempt of a fresh generation, and [`serving_pool`] gives it the first
+pool no signal holds, which is one of the pools found here: the pool that
+refused is held by then, signalled a few lines below.
+
+`resume` is false because a session lives under its pool's credential
+directory, and the next pool's credentials never held this one. A retained
+retry would also keep the pool that refused ([`RunAs::pool`]).
+
+Only `Next::Defer` is replaced. A limit the ladder parks instead, because the
+task has spent its `max_defers`, still parks with its question, and every
+other step is untouched. The failover spends none of `max_defers`: the fold
+counts a deferral from the `Deferred` transition, and this settlement does
+not carry one. It spends none of the rung's allowance either, since a rate
+limit is an outage (`ladder::spends_allowance`).
+
+A task cannot move between pools for ever. Each failover leaves the pool
+that refused held exhausted, and only an attempt a pool serves retires its
+signal, so the pools left to move to shrink by one each time. When the last
+of the agent's pools refuses, every other pool is held and the limit defers
+as it always did. `back_off` then waits for the earliest of their resets
+([`Self::awaited_reset`]).
+
+`tests::a_rate_limit_fails_over_to_the_next_pool_of_the_same_agent_in_a_fresh_session`
+is the witness. Before this section's lines the limit deferred the task, and
+the run slept until two minutes past the first pool's reset while the second
+pool stood idle.
+
+## `impl TopologyRun` › `fn another_pool_can_serve(`
+
+Whether a failed attempt is a worker's rate limit that another pool of the
+same agent could take over. All three must hold:
+
+1. `failure.kind` is `RateLimited` and `failure.origin` is `Worker`. A
+   reviewer's limit names the reviewer's pool, and a reviewer runs on its
+   agent's first pool whatever is held (`prepare_attempt`'s `let pool =`
+   section), so a retry would run the reviewer into the same limit. It
+   defers as before
+   (`tests::a_reviewers_rate_limit_still_defers`).
+2. The record names the pool that refused (`AttemptRecord::pool`). An
+   attempt on no pool has no other pool to move to.
+3. Some pool the plans list for the agent (`AttemptPlans::pools_for`), other
+   than the one that refused, is not in `exhausted_pools`.
+
+The pool that refused is excluded by name, not by looking it up.
+`settle_failure` asks this before it records the refusal, so on a pool's
+first limit `exhausted_pools` does not hold it yet. Counted as free, it would
+turn the limit of an agent's only pool into a retry on that same pool, and
+the retry into another, with no deferral to bound them
+(`tests::a_rate_limit_with_no_other_pool_for_the_agent_still_defers`).
+
+The candidates are the agent's own pools. A pool another agent's is never
+one, however free it is: it holds another subscription's credentials.
+
+Held means held by a signal, whatever its reset says. A reset behind the
+clock frees nothing here: the signal stands until an attempt the pool serves
+retires it (`capacity::retire_served_pools`). The pool that refused is the
+sharpest case. Its limit can name a reset a minute old, and the next attempt
+still goes to another pool
+(`tests::a_failover_never_returns_to_the_pool_that_refused_even_when_its_reset_reads_as_past`).
+
 ## `impl TopologyRun` › `let question = match next {`
 
 **The question a park raises, built once here.** `settle_failed`
@@ -2175,10 +2434,81 @@ the log, and applying the event as it will be read back is what makes
 a live run and a replay of its own log one computation rather than two
 that agree by inspection (§15, "one fold, not two").
 
+## `fn spent_resets(events: &[TopologyEvent]) -> BTreeSet<String> {`
+
+The pools whose recorded reset is spent: the pool refused an attempt again,
+two minutes or more past that reset (`interaction::RESET_WAIT_MARGIN`), after
+the `pool_exhausted` that recorded it. Read from the log alone, so a resumed
+run reads the same set as the process that wrote it. Resumed at 05:32 after
+`primary` refused at 03:03, two minutes past its 03:01, the woken task binds
+`spare` and not `primary`
+(`tests::a_resumed_run_reads_a_reset_its_pool_refused_past_as_spent`).
+
+| Event | Effect on its pool |
+|---|---|
+| `pool_exhausted` | records the reset it names (or none), and the pool is not spent |
+| `attempt_finished` limited on the pool, its `ts` at or past the recorded reset plus `interaction::RESET_WAIT_MARGIN`, not the refusal that recorded it | spent |
+| any other | none |
+
+**The margin.** A refusal is counted from the recorded reset plus
+`interaction::RESET_WAIT_MARGIN`, added as [`serving_pool`] adds it: the
+instant a held pool serves from, and the one a wait toward the reset runs
+to. A pool can come back a little after the reset it names, which is what
+the margin is for, so a refusal inside it says nothing yet about whether
+the reset brought the pool back. Counted from the reset itself, such a
+refusal dropped the reset, and the wait ran to the other pool's. A resumed
+run woken at 03:02, with `primary` held to 03:01 and `spare` to 05:30,
+binds `primary`, which refuses naming 03:01 again: the reset is kept, and
+`awaited_reset` waits to 03:03 for `primary`, not to 05:32 for `spare`
+(`tests::a_refusal_a_minute_past_a_reset_leaves_it_unspent_and_the_wait_runs_to_its_margin`).
+Refused at 03:01:00, 03:02:00 or 03:02:59 the reset is kept; refused at
+03:03:00 it is spent
+(`tests::a_reset_is_spent_only_by_a_refusal_two_minutes_or_more_past_it`).
+
+The refusal that recorded a reset is the `attempt_finished` that follows its
+`pool_exhausted` with nothing between, as `capacity::exhausted_pools_of`
+reads it. It is not counted, even when the reset it named was already
+behind the clock: a pool that names 02:59 at 03:00 is waited for to 03:01
+(`tests::a_held_pool_whose_reset_passed_inside_the_margin_is_waited_for_only_to_two_minutes_past_it`).
+A later refusal past the reset and its margin is the evidence that the reset
+did not bring the pool back. It names the same reset, or none it can read, so
+`capacity::pool_exhausted_to_record` writes no new signal for it, and
+without this rule the run would keep the old reset and serve the pool from
+it again and again. A later `pool_exhausted` for the pool, with a reset of
+its own, makes it unspent.
+
+`held_unspent` (for `serving_pool`) and `awaited_reset` (through
+`resets_awaited_by`) read it; `exhausted_pools` and the failover do not.
+
+## `fn serving_pool<'a>(`
+
+The pool a new attempt binds, among `candidates`: its agent's pools in file
+order (`AttemptPlans::pools_for`). `held` is the run's `exhausted_pools` and
+`now_unix` its clock. Pure, so the rule is tested on its own
+(`tests::the_serving_pool_is_the_first_in_file_order_no_signal_holds_exhausted`).
+
+1. The first candidate `held` does not contain. Whether a held pool earlier
+   in the order has a reset behind the clock does not matter here: a pool no
+   signal holds is taken before any pool one does.
+2. With every candidate held, the first whose recorded reset, plus
+   `interaction::RESET_WAIT_MARGIN`, is at or before `now_unix`. That is the
+   moment a wait toward the reset ends (`interaction::reset_wait_until`), so
+   a pool whose reset the run waited out counts as passed when the task it
+   deferred wakes. The reset is read by [`unix_seconds_of`]. A pool held with
+   no reset, or with one that does not read as a date, has not passed.
+3. With every candidate held and none passed, the first candidate. The
+   attempt runs into the limit again, which is what a single pool always did,
+   and the ladder's deferral bounds how often.
+4. `None` when there are no candidates: an agent no pool names binds none.
+
+A pool that is held but is not a candidate is another agent's and changes
+nothing.
+
 ## `fn unix_seconds(clock: &dyn TimeSource) -> u64 {`
 
 The run's clock in Unix seconds: the "now" a limit message's reset is
-read against (`capacity::pool_exhausted_to_record`). It is read through
+read against (`capacity::pool_exhausted_to_record`), and the "now"
+[`serving_pool`] compares a held pool's reset with. It is read through
 the same seam that stamps every event. A reading that is not RFC 3339 UTC
 falls back to the host clock, which is what the sequential engine reads.
 

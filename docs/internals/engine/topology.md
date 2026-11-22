@@ -148,10 +148,11 @@ width 1 steps.
 
 ## `mod profiled;`
 
-The runner wrapper that stamps each agent request with its agent's bound
-credential profile (`capacity::pool_for`'s pool, its `profile`). Private:
-only `entry` installs it, over the run's runner on both the fresh and the
-resume path; with no profiled pool it installs nothing.
+The runner wrapper that stamps each review and agent-probe request with its
+agent's bound credential profile (`capacity::pool_for`'s pool, its
+`profile`). A worker's request is left as its attempt's plan made it.
+Private: only `entry` installs it, over the run's runner on both the fresh
+and the resume path; with no profiled pool it installs nothing.
 
 ## `pub mod entry;`
 

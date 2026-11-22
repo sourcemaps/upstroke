@@ -53,13 +53,16 @@ pools, and `connect` itself on its next run — and it has this shape:
 
 **What `profile` does.** A pool's `profile` is the directory handed to the pool's agent as its
 credential location: `CLAUDE_CONFIG_DIR` for Claude Code, so the CLI runs on the account logged
-in there, and the engine handles no token. The host runner sets it from the pool a task attempt
-is bound to, which is the first pool in the file naming the attempt's agent. It applies to that
-agent's work, review and probe processes, and a gate gets no credential location. The value is
-used as written, with no `~` expansion, so it must be an absolute path. A profile is supported
-for Claude Code on the host runner only. Before any agent CLI is started, the engine refuses a
-profile on the container runner, a profile for another agent, a relative path (`~/…` among them),
-or one whose directory is missing or not a directory, checking every pool that names one. It also
+in there, and the engine handles no token. The host runner sets it. A worker runs under the
+profile of its attempt's pool: the first pool in the file naming the attempt's agent that the
+run's signals do not hold exhausted (with every one held, the first whose recorded reset is two
+minutes past, or else the first; a retry that resumes its session keeps its pool). Review and
+probe processes run under the profile of their agent's first pool in the file, whatever pool an
+attempt is bound to. A gate gets no credential location. The value is used as written, with no
+`~` expansion, so it must be an absolute path. A profile is supported for Claude Code on the host
+runner only. Before any agent CLI is started, the engine refuses a profile on the container runner,
+a profile for another agent, a relative path (`~/…` among them), or one whose directory is missing
+or not a directory, checking every pool that names one. It also
 refuses any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set, because that token overrides a
 profile's credentials. A fresh run makes these checks in `prepare_fresh`, before its lease, so a
 refused run leaves no run directory and no private half. A resume makes them first in its

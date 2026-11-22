@@ -322,6 +322,21 @@ supply its `SequenceIdentities` here without a redesign.
 Every process really went through the run's Runner, with the identity
 this attempt assigns and the seat its role gives it.
 
+## `fn a_worker_runs_under_the_credential_profile_its_plan_names() {`
+
+**The plan decides the worker's credentials.** An attempt started from a plan
+naming `/profiles/spare` hands the runner a worker request carrying that
+directory, and one started from a plan naming none hands it a request
+carrying none.
+
+The request is read back from the scaffold's recording runner
+(`Ran::request`), which is the run's runner itself with nothing wrapped over
+it, so what is asserted is what `Judge::run_worker` built. Each round is its
+own run, because a generation starts its first attempt once.
+
+The scaffold's plan names no profile, so the profile is set over it by struct
+update, as `authorized_plan` sets the fields its event authorized.
+
 ## `fn retained_tree(worktree: &Path) -> String {`
 
 ---------------------------------------------------------------------------

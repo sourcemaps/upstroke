@@ -20,14 +20,18 @@ Three things live here: the pool types `~/.upstroke/pools.toml` parses into,
 the estimator that turns observations into a per-pool remaining figure, and
 the fold that collects those observations from a run's event log.
 
-§13's sequencing is the reason nothing routes on any of it yet: v0.1 ships
+§13's sequencing is the reason no estimate routes anything yet: v0.1 ships
 the estimator so `upstroke capacity` and the dry-run preview can show what each
 strategy *would* do, and v0.2 wires it into the binder once the estimates
-have been watched for a while. So `pool_for` fills `WorkerProfile.pool` for
-attribution, and it also selects the profile an agent runs under (see
-[Credential profiles](#credential-profiles) below). Nothing routes on it: the
-binder still picks models from the catalog and pins, exactly as it did before
-this module existed.
+have been watched for a while. The binder still picks models from the catalog
+and pins, exactly as it did before this module existed. One thing does choose
+between pools, and it reads no estimate: a schema-4 run binds a new attempt to
+the first pool of its agent that the run's own rate-limit signals do not hold
+exhausted, and a worker's rate limit fails over to another such pool (see
+[Credential profiles](#credential-profiles) below). That choice is made in
+`src/engine/topology/run.rs` (`serving_pool`), not here. `pool_for` answers an
+agent's first pool, which still names the pool of its reviews and selects the
+profile its review and probe processes run under.
 
 The estimator is a pure function over plain values ([`estimate`]), so every
 rule in §13 is exercisable with no CLI installed and no file on disk. Only
@@ -58,11 +62,18 @@ undocumented as of Aug 2026). Login stays a user-driven interactive step the
 engine never automates.
 
 [`Pool::profile`] is that directory, and it is acted on for Claude Code on the
-host runner (§17). On a schema-4 run, each agent's bound pool, which
-[`pool_for`] says is the first pool in the file naming it, supplies the
-`profile`. The host runner then sets it as `CLAUDE_CONFIG_DIR` on that agent's
-work, review and probe processes (`src/engine/topology/profiled.rs` stamps the
-request, and `src/runner/host/environment.rs` composes it). The value is the
+host runner (§17). On a schema-4 run a worker runs under the `profile` of the
+pool its attempt is bound to, and a review or probe process under the `profile`
+of its agent's first pool, which is what [`pool_for`] answers. The attempt's
+pool is chosen in `src/engine/topology/run.rs` (`serving_pool`): the first pool
+naming the agent, in file order, that the run's signals do not hold exhausted;
+with every one held, the first whose recorded reset is two minutes past, or
+else the first. A reset is spent once its pool refuses again two minutes or
+more past it, and then counts as none. A retry that resumes its session
+keeps its pool. The host runner then sets the profile as `CLAUDE_CONFIG_DIR`
+on the process (`src/engine/assembly.rs` puts the bound pool's on a worker's attempt plan,
+`src/engine/topology/profiled.rs` stamps a review or probe request, and
+`src/runner/host/environment.rs` composes it). The value is the
 configured string used as a path, with no `~/` expansion. A profile the run
 cannot honour is refused before anything runs for it, by one function
 (`src/engine/topology/preflight.rs`) that both paths call: a fresh run before
@@ -73,9 +84,14 @@ path and an existing directory (besides the host runner, Claude Code and no
 profile. Nothing checks sign-in, so a profile that is not signed in passes
 pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
 The legacy coordinator refuses any profiled pool.
-Nothing routes on a profile: the binder still binds each agent to one pool,
-because everything multi-profile actually buys (per-profile attribution,
-asymmetric reserve, rebind-instead-of-wait) is capacity-*driven* behaviour,
+A rate limit moves a task between pools, and so between profiles. When a
+schema-4 worker's limit would defer its task and another pool of its agent is
+not held exhausted, the task runs again at once on that pool, in a fresh
+session under its profile (`TopologyRun::settle_failure`; DESIGN.md §19).
+Beyond that binding and this failover, nothing routes on a pool or a profile.
+Both read the run's own signals and no estimate, and the failover stays within
+one agent and one model. The rest of what several profiles buy (per-profile
+attribution, asymmetric reserve, affinity) is capacity-*driven* behaviour,
 which is v0.2 by sequencing.
 
 A resume reads today's configuration. A profile changed between a run's
@@ -195,15 +211,19 @@ One line for a preview or a listing: what this pool is and whose it is.
 
 ## `pub fn pool_for<'a>(agent: &str, pools: &'a [Pool]) -> Option<&'a Pool> {`
 
-Which pool an attempt on `agent` drains: the first matching entry, table
+An agent's first pool: the first matching entry, table
 order as preference — the same convention `different_family_at` uses, so
 moving a pool up the file promotes it.
 
-**Attribution and profile, never routing.** Nothing routes on the answer
-in v0.1. It fills `WorkerProfile.pool` so the ledger can say which
-subscription paid, and it also selects the profile an agent runs under:
-the answer for an agent is its bound pool, and only that pool's `profile`
-is set on the agent's processes (`src/engine/topology/profiled.rs`).
+**Attribution and profile, never routing.** Nothing routes on the answer.
+It names the pool a review drains, so the ledger can say which subscription
+paid, and it selects the profile an agent's review and probe processes run
+under (`src/engine/topology/profiled.rs`). The legacy coordinator also takes
+it as every attempt's pool. It does not decide a schema-4 worker's pool:
+`src/engine/topology/run.rs` chooses that (`serving_pool`) among every pool
+naming the agent, and the worker's attempt plan carries the chosen pool's
+`profile` (`src/engine/assembly.rs`). While no signal holds any of the agent's
+pools exhausted, that choice is this answer.
 
 ## `pub struct Spend {`
 
@@ -351,10 +371,21 @@ other failure, or none, names no pool, and so does an attempt that ran on
 no pool.
 
 `retire_signals` marks this pool exhausted. The schema-4 run's
-`back_off` reads the same pool from each deferred task's last
-`attempt_finished`, to find the reset it waits toward, so the two cannot
-disagree about which subscription refused. It is effect-free in
-`effects/wrappers.toml`.
+`back_off` reads the same pool from a deferred task's last
+`attempt_finished` when a reviewer was limited, to find the reset it waits
+toward, so the two cannot disagree about which subscription refused. For
+a worker's limit it reads every pool of the worker's agent instead
+(`TopologyRun::resets_awaited_by`): the task can run again on whichever of
+them resets first, and that need not be the one that refused last. When
+the earliest of those resets has passed (`TopologyRun::awaited_reset`),
+the wait runs only until two minutes past it, and once the clock is past
+that there is no reset wait, only the ordinary back-off. Only a worker's
+limit on an agent with more than one pool keeps a passed reset; with one
+pool, or for a reviewer's limit, it is dropped and only a reset ahead is
+waited for, as before the failover. A reset is spent once its pool
+refuses again two minutes or more past it (`run::spent_resets`), and is
+not waited for.
+`limited_pool` is effect-free in `effects/wrappers.toml`.
 
 ## `pub(crate) fn retire_served_pools(`
 

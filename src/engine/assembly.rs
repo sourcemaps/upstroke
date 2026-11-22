@@ -6,7 +6,7 @@
     clippy::disallowed_macros
 )]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -207,6 +207,14 @@ impl AttemptPlans for FrozenPlans<'_> {
         crate::capacity::pool_for(agent, self.pools).map(|pool| pool.name.clone())
     }
 
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.pools
+            .iter()
+            .filter(|pool| pool.agent == agent)
+            .map(|pool| pool.name.clone())
+            .collect()
+    }
+
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {
         let entry = request.entry;
         Ok(ReviewInputs {
@@ -242,8 +250,14 @@ impl AttemptPlans for FrozenPlans<'_> {
         let entry = request.entry;
         let profile = implementer_profile(
             ImplementerBinding::of_frozen(&request.binding),
-            self.pool_for(&request.binding.agent),
+            request.pool.clone(),
         );
+        let pool = pool_option(&profile.pool);
+        let credential_profile = pool
+            .as_deref()
+            .and_then(|name| self.pools.iter().find(|listed| listed.name == name))
+            .and_then(|listed| listed.profile.as_ref())
+            .map(PathBuf::from);
         let adapter = self
             .adapters
             .get(&profile.agent)
@@ -281,7 +295,8 @@ impl AttemptPlans for FrozenPlans<'_> {
             attempt: request.attempt,
             rung: request.rung,
             binding: request.binding.clone(),
-            pool: pool_option(&profile.pool),
+            pool,
+            credential_profile,
             resume_session: request.resume_session.clone(),
             materialization_observed: request.materialization_observed,
             agent: AgentId::new(&profile.agent),
@@ -325,6 +340,10 @@ impl SharedPlans {
 impl AttemptPlans for SharedPlans {
     fn pool_for(&self, agent: &str) -> Option<String> {
         self.frozen().pool_for(agent)
+    }
+
+    fn pools_for(&self, agent: &str) -> Vec<String> {
+        self.frozen().pools_for(agent)
     }
 
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError> {
