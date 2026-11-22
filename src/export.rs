@@ -136,7 +136,7 @@ struct RunContext<'a> {
 pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
     let run_id = rundir::resolve_run_id(repo_root, wanted)?;
     let public = rundir::public_dir(repo_root, &run_id);
-    let events_path = public.join("events.jsonl");
+    let events_path = public.join(rundir::EVENT_LOG);
     let snapshot_bytes = begin_snapshot(&public, &run_id, &events_path)?;
 
     let legacy = || {
@@ -173,7 +173,7 @@ pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
             &started_event.ts,
         )?;
 
-        let plan_path = public.join("plan.normalized.json");
+        let plan_path = public.join(rundir::PLAN);
         let plan_bytes = std::fs::read(&plan_path).map_err(|source| UpstrokeError::Io {
             path: plan_path.clone(),
             source,

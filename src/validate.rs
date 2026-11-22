@@ -241,7 +241,7 @@ fn latest_run_observations(
     let Some(run_id) = crate::rundir::latest_run(repo_root) else {
         return none();
     };
-    let events_path = crate::rundir::public_dir(repo_root, &run_id).join("events.jsonl");
+    let events_path = crate::rundir::public_dir(repo_root, &run_id).join(crate::rundir::EVENT_LOG);
     let mut ignored = Vec::new();
     match crate::events::read_all(&events_path, &mut ignored) {
         Ok(events) => (capacity::observe(&events), Some(run_id)),

@@ -97,6 +97,20 @@ An agent the record names and no adapter provides refuses, naming it.
 from, so an agent in it that this build cannot probe is a run that cannot be
 certified — not one that quietly certifies fewer agents than it recorded.
 
+## `fn a_probe_refusal_ends_saying_the_run_is_resumable_and_without_a_full_stop() {`
+
+The ending of [`refused`], the refusal every failed shell or CLI probe takes:
+its message ends "so the run is resumable", with no full stop after it, since
+`Display` text takes no trailing period (`standards/07`). Checked under both
+policies, because the sentence before it names a different boundary for each:
+the host, or the recorded image.
+
+This test builds the error directly instead of driving `certify`, because the
+ending is in the helper's own text, the same for whatever probe failed.
+[`PROFILE_REFUSAL_CLOSING`] pins `profile_refused`'s ending, and before this
+test nothing pinned `refused`'s, so its period could come back with every test
+still passing (`PR400-PROBE-REFUSAL-PERIOD-UNPINNED`).
+
 ## `fn a_slotted_invocation_without_an_agent_binding_is_refused() {`
 
 A slotted invocation with no agent binding is refused, and its registration
@@ -178,7 +192,9 @@ The sentence every profile refusal ends in, on a fresh run and on a resume
 alike: no agent CLI was started and no event was appended, and the operator
 corrects the pools file or the environment and runs the same command again. It
 carries the full stop that ends the sentence before it, so `ends_with` holds the
-closing to being a sentence of its own. Spelled out here rather than read from
+closing to being a sentence of its own, and none at its own end, so `ends_with`
+also holds the message to `Display` text's lack of a trailing period
+(`standards/07`). Spelled out here rather than read from
 `profile_refused`, so a change of wording is a change to this test as well, and
 to `engine::tests`' `assert_a_profile_refusal_created_nothing`, which spells the
 same closing for the fresh path. It replaces `refused`'s closing, which said the

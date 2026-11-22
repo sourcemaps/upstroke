@@ -861,8 +861,7 @@ pub fn run_started_sha256(line: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Allowance, INTERRUPTED_ALLOWANCE, Observed, RunDirClass, SCAN_CHUNK, append, class_of,
-        header_of, reserve,
+        Allowance, Observed, RunDirClass, SCAN_CHUNK, append, class_of, header_of, reserve,
     };
 
     /// A valid committed first line, without its terminator, as
@@ -907,8 +906,9 @@ mod tests {
     /// The count is asserted against a literal rather than against
     /// `INTERRUPTED_ALLOWANCE`, because a test that derives its expectation
     /// from the constant it is checking grows with any mutation of it and
-    /// catches none. The constant is named only in the floor: raising it is
-    /// allowed, and removing the bound is what this refuses.
+    /// catches none. The literal is a floor and the million is a ceiling:
+    /// raising the constant is allowed, and lowering it -- to zero included --
+    /// or removing the bound is what this refuses.
     #[test]
     fn the_interruption_allowance_is_finite_and_does_not_refill() {
         let mut allowance = Allowance::new();
@@ -921,7 +921,11 @@ mod tests {
                  so the probe is not bounded on an interrupting source"
             );
         }
-        assert_eq!(spent, u64::from(INTERRUPTED_ALLOWANCE));
+        assert!(
+            spent >= 65_536,
+            "the allowance ran out after {spent} interruptions, fewer than the 65_536 \
+             it was set generously to absorb"
+        );
         assert!(!allowance.spend(), "an exhausted allowance does not refill");
     }
 

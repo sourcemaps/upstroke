@@ -4052,6 +4052,7 @@ fn every_role_reaches_the_containment_points_of_this_platform() {
                 "{role}: the child did not lead its own process group, so the \
                  pre-exec containment step did not run for this role; observed: {seen}"
             );
+            eprintln!("{role}: the child led its own process group; observed: {seen}");
         }
         if matches!(role, ExecutionRole::Probe(_)) {
             probe_paths.push(role.label());

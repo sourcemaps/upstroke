@@ -109,7 +109,7 @@ pub(super) fn resume_harness_inner_on(
         run_id: run_id.clone(),
         message,
     };
-    let events_path = public.join("events.jsonl");
+    let events_path = public.join(rundir::EVENT_LOG);
 
     // This unlocked header read only selects the inputs for read-only refusal.
     // Resume adopts the authoritative log only after both leases are held below.
@@ -183,7 +183,7 @@ pub(super) fn resume_harness_inner_on(
     )?;
     let recorded_normalized_plan_digest =
         events::recorded_normalized_plan_digest(&events).map(str::to_owned);
-    let frozen_plan_path = public.join("plan.normalized.json");
+    let frozen_plan_path = public.join(rundir::PLAN);
     let frozen_plan_bytes = fs::read(&frozen_plan_path).map_err(|source| UpstrokeError::Io {
         path: frozen_plan_path.clone(),
         source,

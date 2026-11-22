@@ -728,7 +728,10 @@ The child half of the kill tests.
 
 A kill is `std::process::abort` for the reason [`crate::agent::proc`] gives:
 the claim under test is what a process that dies **without running any
-cleanup** leaves durable, and both `panic!` and `exit` run destructors.
+cleanup** leaves durable, and `panic!` and `exit` both run some. `panic!`
+unwinds and runs the stack's destructors. `std::process::exit` runs no stack
+destructors, but it is the orderly exit and runs the process-exit handlers
+registered with the platform. `std::process::abort` runs neither.
 
 ## `fn event_funnel_kill_helper()` › `let _ = EventLog::open_hooked(EventSite::OpenLog, &path, &mut warnings, &mut kill);`
 
@@ -1350,8 +1353,13 @@ described at `crate_under_test` in `docs/internals/effects/tests.md`.
 
 ## `fn typecheck(dir: &Path, name: &str, body: &str) -> (bool, String) {` › `fs::write(&source, format!("fn main() {{\n{body}\n}}\n")).expect("the fixture");`
 
-Doctests without a `fn main` are wrapped in one, so the fixtures are
-written that way and this wraps them the same.
+The fixtures are bodies without a `fn main` — `use` items and statements, as
+a function body holds them — and so is the positive control. Statements
+cannot stand at a crate's top level, and this crate is checked as a binary,
+so `typecheck` supplies the `fn main` around each.
+
+History: the fixtures began as doctests, which rustdoc wraps in a `fn main`
+when they have none; that is where the bodies' shape comes from.
 
 ## `fn error_codes(stderr: &str) -> BTreeSet<String> {`
 

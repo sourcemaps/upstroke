@@ -3465,25 +3465,37 @@ impl KillableGitChild {
     }
 
     /// Leave the child running until `aim` after its spawn or until it
-    /// exits on its own, and say which: `Some` with how long it ran, as the
-    /// parent saw it, if it exited first; `None` if it was still running at
-    /// the aim — and then **the kill has fired**, sent by the poll that found
-    /// it running there, and [`Self::fired`] says when.
+    /// exits on its own, and say which the parent saw: `Some` with how long
+    /// it ran, as the parent saw it, if a poll found it gone before the
+    /// parent read the aim passed; `None` if none did — and then **the kill
+    /// has been attempted**, straight after the last poll, which did not
+    /// find the child gone, and [`Self::fired`] says when the attempt
+    /// returned. Not finding it gone is all that poll observed: its
+    /// `try_wait` answered either that the child was still running or with
+    /// an error — `ECHILD`, say, if another reaper had collected it — and
+    /// [`Self::exited`] answers `None` to both alike. That poll came before
+    /// the clock read that found the aim passed — by however long the
+    /// parent took between the two, descheduled or not — so it fell at a
+    /// time this does not claim is the aim: `None` says the last poll did
+    /// not find the child gone, not that the child was running then, at the
+    /// aim or at the kill.
     ///
     /// Polled, never slept through. `sleep(aim)` then `kill` reports nothing
     /// about the child and wakes when the scheduler pleases, so on a loaded
     /// host the kill is late by the wake-up and the sampler cannot tell a
     /// child it missed from one it never aimed inside. Here [`Self::exited`]
     /// is asked once a millisecond while the aim is far and continuously
-    /// once it is within [`Self::SPIN_WITHIN`], and the poll that reaches
-    /// the aim with the child still running sends the kill itself, with no
-    /// return to the caller between the two. What remains is the
+    /// once it is within [`Self::SPIN_WITHIN`], each poll that does not find
+    /// the child gone is followed by a read of the clock, and when that read
+    /// finds the aim passed the kill is attempted at once, with no return to
+    /// the caller between that poll and the kill. What remains is the
     /// platform's: between that poll's `try_wait` and the kill's own system
     /// call the parent can be descheduled, and a child that exits in that
-    /// window is missed by the kill and ends on its own terms — its status
-    /// is a completion, not the kill's signature, and the samplers feed it
-    /// back like any completion, as [`Self::reaped`], the clock once
-    /// [`Self::wait`] has returned that status.
+    /// window, whether before the aim or after it, is missed by the kill and
+    /// ends on its own terms — its status is a completion, not the kill's
+    /// signature, and the samplers feed it back like any completion, as
+    /// [`Self::reaped`], the clock once [`Self::wait`] has returned that
+    /// status.
     pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
         let deadline = self.origin + aim;
         loop {
@@ -3826,11 +3838,13 @@ impl KillBudget {
     /// the aim, which the parent cannot see: on the first, no poll reached
     /// the aim with the child running and no kill was sent — a parent
     /// descheduled across the aim and the exit alike finds the child gone
-    /// at its next poll, whichever of the two came first; on the second, a
-    /// poll reached the aim with the child still running, and the kill sent
-    /// from there missed it, or was not sent at all
-    /// ([`KillableGitChild::kill_error`]). The budget follows what the child
-    /// took either way, as the parent read it.
+    /// at its next poll, whichever of the two came first; on the second, the
+    /// parent read the aim passed with no poll having found the child gone,
+    /// and attempted the kill against a child whose state at that instant it
+    /// had not observed — one that may have exited after the last poll,
+    /// before the aim or after it — and the attempt missed it, or sent
+    /// nothing ([`KillableGitChild::kill_error`]). The budget follows what
+    /// the child took either way, as the parent read it.
     pub(crate) fn completed(&mut self, clock: std::time::Duration) {
         self.completed.push(clock);
     }

@@ -309,7 +309,10 @@ impl EffectHooks for HarnessEffects {
 /// [`Injection::Kill`] aborts, for the reason
 /// [`crate::agent::proc`] already gives: the claim under test is what a
 /// coordinator that dies **without running any cleanup** leaves durable, and
-/// both `panic!` and `std::process::exit` run destructors.
+/// `panic!` and `std::process::exit` both run some. `panic!` unwinds and runs
+/// the stack's destructors. `std::process::exit` runs no stack destructors,
+/// but it is the orderly exit and runs the process-exit handlers registered
+/// with the platform. `std::process::abort` runs neither.
 ///
 /// [`Injection::Error`] refuses with the site and the phase that answered.
 /// The refusal is an injected fault, so the variant is the one every funnel

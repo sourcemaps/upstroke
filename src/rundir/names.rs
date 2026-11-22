@@ -23,18 +23,23 @@
 //! of its assertion, and it cannot witness the substitution that put accessor
 //! and const in agreement at all; its own doc says why.
 //!
-//! **One source of truth for `rundir`, not yet for the crate.** [`EVENT_LOG`]
-//! and [`PLAN`] name the two files a command outside this module opens by path
-//! rather than through `RunPaths`, and **seven production sites in five files**
-//! still spell the byte string for themselves: five of `events.jsonl`
-//! (`export.rs`, `validate.rs`, `engine/resume.rs`, `status.rs`, `capacity.rs`)
-//! and two of `plan.normalized.json` (`export.rs`, `engine/resume.rs`). One
-//! derivation, quoted the same way here, in `SWEEP-NAMES-002` and in the pull
-//! request body. A rename of either const is therefore still a multi-file edit.
-//! The six names above them are not: no production code outside `rundir` spells
-//! any of the six as a path. One test does — `engine/topology/emit/tests.rs`,
-//! joining `committed.json` — and that one is load-bearing rather than untidy;
-//! see below and `SWEEP-NAMES-003`.
+//! **One source of truth, for the crate as well as for `rundir`.**
+//! [`EVENT_LOG`] and [`PLAN`] name the two files a command outside this module
+//! opens by path rather than through `RunPaths`, and the commands that do so —
+//! `export.rs`, `validate.rs`, `engine/resume.rs`, `status.rs` and
+//! `capacity.rs` — join the constant. No production code outside `rundir`
+//! spells `events.jsonl` or `plan.normalized.json` as a path into a run, so a
+//! rename of either const is a one-file edit as far as production code goes.
+//! `upstroke validate --emit-json` also writes a `plan.normalized.json`, from
+//! `main.rs`, but into the working directory: a different file, deliberately
+//! not [`PLAN`]. Suites outside `rundir` still spell both names by hand —
+//! `export.rs`'s fixture writes the log and the plan under their literals — so
+//! a rename reddens those tests until they follow it; that is the suite seeing
+//! the rename, not a production site left behind. The six names above them are
+//! in the same position: no production code outside `rundir` spells any of the
+//! six as a path. One test does — `engine/topology/emit/tests.rs`, joining
+//! `committed.json` — and that one is load-bearing rather than untidy; see
+//! below and `SWEEP-NAMES-003`.
 //!
 //! **What the proof consults, exactly.** `prove_private_half_ownership` reads
 //! two of these back and parses each ([`MARKER`], then [`OWNER_RECORD`] at the

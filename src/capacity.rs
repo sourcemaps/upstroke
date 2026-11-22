@@ -654,7 +654,8 @@ pub fn report(
 
     let (observations, run_id) = match crate::rundir::latest_run(&opts.repo_root) {
         Some(run_id) => {
-            let path = crate::rundir::public_dir(&opts.repo_root, &run_id).join("events.jsonl");
+            let path =
+                crate::rundir::public_dir(&opts.repo_root, &run_id).join(crate::rundir::EVENT_LOG);
             match crate::events::read_all(&path, &mut warnings) {
                 Ok(events) => (observe(&events), Some(run_id)),
                 Err(error) => {

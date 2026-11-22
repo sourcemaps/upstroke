@@ -102,7 +102,7 @@ pub fn load(repo_root: &Path, run_id: Option<&str>) -> Result<Status, UpstrokeEr
         }));
     }
     let public = rundir::public_dir(repo_root, &run_id);
-    let events_path = public.join("events.jsonl");
+    let events_path = public.join(rundir::EVENT_LOG);
 
     let (bytes, held) = stable_event_bytes_with(
         &events_path,
