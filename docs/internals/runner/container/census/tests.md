@@ -1382,8 +1382,9 @@ tidying at the same moment.
 Second field held constant: a real, readable record sits beside the vanished
 one in the same namespace, so the test cannot pass by skipping everything.
 
-Unix-only because a dangling symlink needs a privilege the Windows guest's
-test user does not have; the racing fixture above covers the same property
+Unix-only because a dangling symlink needs a privilege a Windows test user
+need not have, and the Windows guest's, where the suite ran until
+2026-11-20, did not; the racing fixture above covers the same property
 on every platform, less sharply, and this comment is the record of which
 half runs where.
 

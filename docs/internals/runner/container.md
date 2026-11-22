@@ -1066,8 +1066,9 @@ reclaimed.
 > (orphan window until then; documented; **a portable watchdog is
 > deferred**).
 
-A value rather than a comment, so the Windows guest — which has no container
-runtime at all — still asserts something about containers, and so lane C's
+A value rather than a comment, so a Windows machine with no container
+runtime at all — as the guest, CI's Windows home until 2026-11-20, was —
+still asserts something about containers, and so lane C's
 census can report the window it is closing rather than infer it.
 
 ## `pub enum OrphanWindow` › `ClosedByTheUnixReaper,`

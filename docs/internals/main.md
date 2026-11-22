@@ -280,7 +280,8 @@ real argv and exits on a parse error, so a test cannot call `run` with a
 command of its choosing, and `run` was therefore the one link in
 `expected_failures_refusals[1]`'s chain that nothing exercised.
 `dispatch` is driven with an injected failure and
-`runner::host::start_write_command` is driven with one on the guest — but
+`runner::host::start_write_command` is driven with one on Windows, in
+`test-windows-hosted`'s ten `windows-latest` legs — but
 the **wiring between them** was a closure no test ever called, so
 
 ```text
@@ -516,8 +517,9 @@ that discards it and called again where a test can see it.
 
 ## `fn the_cli_wires_the_real_containment_step_into_dispatch()` › `let source = source.replace("\r\n", "\n");`
 
-Line endings are the checkout's, not the repository's: the Windows
-guest checks this file out with CRLF, and a census that split on
+Line endings are the checkout's, not the repository's: a Windows
+checkout can land this file with CRLF, as the guest's did, and a census
+that split on
 `"\n#[cfg(test)]\n"` found nothing there and read the test module as
 production. Normalised first, so the oracle is the source and not the
 platform that happens to be reading it — the same class as

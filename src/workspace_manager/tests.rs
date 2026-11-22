@@ -62,7 +62,7 @@ use crate::rundir::scratch_tree::acquire;
 // `use std::ffi::{OsStr, OsString};` to `OsString`. It carried a `#[cfg(unix)]`
 // while its only call site was inside a `#[cfg(unix)]` test: on Windows the
 // item was compiled out and an ungated import is an `unused_imports` error
-// under the guest's `-D warnings`. `hostile_replacement_environments` names it
+// under the Windows legs' `-D warnings`. `hostile_replacement_environments` names it
 // on both platforms, so the gate is gone -- and it was the gate that broke the
 // three Windows legs of CI while ubuntu and macos were green, which is the one
 // thing this box cannot measure for itself.
@@ -2398,7 +2398,7 @@ fn a_run_id_is_the_canonical_ulid_and_a_case_variant_is_refused() {
 
 /// The Windows half of the test above: Win32 resolves `..` lexically before
 /// the filesystem sees it, so `missing\..` canonicalizes to the scratch
-/// directory and the peel rejoins `x` onto it. Evaluated on `test (winguest)`.
+/// directory and the peel rejoins `x` onto it. Evaluated on the Windows legs.
 #[cfg(windows)]
 #[test]
 fn windows_resolves_a_dot_dot_below_an_absent_component_before_the_filesystem_sees_it() {
@@ -13726,7 +13726,7 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
              the pick to read the proposal commit",
         ),
     ];
-    // CRLF normalized first: the Windows guest checks this tree out with it,
+    // CRLF normalized first: the Windows legs check this tree out with it,
     // and `find("\n    }\n")` does not match `\r\n    }\r\n`. Measured — this
     // census passed on Linux and panicked "the function ends" on the guest.
     let source =
@@ -15200,11 +15200,10 @@ fn unused_alphabetic_fan_out_pair(objects: &Path) -> (PathBuf, PathBuf) {
 /// *requires* its native casefold branch rather than observing it. Set to
 /// `1`, it says that the temporary directory this suite runs under folds
 /// case: of the steps that run the full suite, `ci.yml` sets it on the
-/// `macos-latest` test step and on the suite step of both Windows suite jobs,
-/// the `winguest` guest's and its hosted `windows-latest` twin's, which runs
-/// the suite instead when the guest is busy; the capture steps after each
-/// carry the same map. Unset, empty, or anything but `1`, the test asserts
-/// the scan against whatever the filesystem does.
+/// `macos-latest` test step and on the suite step of `test-windows-hosted`,
+/// which runs the Windows suite on `windows-latest`; the capture steps after
+/// each carry the same map. Unset, empty, or anything but `1`, the test
+/// asserts the scan against whatever the filesystem does.
 const TEMP_FOLDS_CASE: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
 
 /// Every platform constructs the upper-case witness and asserts the scan
@@ -15217,11 +15216,11 @@ const TEMP_FOLDS_CASE: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
 /// resolving to the stored upper-case fan-out — is the one that guards
 /// `PR258-CASEFOLD-FANOUT-INVISIBLE`, and it is *required* only where the
 /// leg declares it: `ci.yml` sets `TEMP_FOLDS_CASE` to `1` on the
-/// `macos-latest` test step and on the `winguest` step, whose temporary
-/// directories fold case (both legs passed the round-5 assertion of that
-/// branch at `f4a351be`), and on the hosted `windows-latest` twin's suite
-/// step, whose NTFS folds case too, so a green there records that this
-/// branch ran.
+/// `macos-latest` test step and on the suite step of `test-windows-hosted`,
+/// whose temporary directories fold case, so a green there records that this
+/// branch ran (both legs passed the round-5 assertion of that branch at
+/// `f4a351be`, where the Windows leg was the `winguest` step of the
+/// self-hosted guest, retired on 2026-11-20).
 /// Anywhere the variable is not `1` the branch is observed, not required:
 /// on a case-sensitive volume — the ubuntu leg, the build box the ten gates
 /// run on, a developer whose `TMPDIR` is a case-sensitive APFS volume — the
@@ -15234,7 +15233,7 @@ const TEMP_FOLDS_CASE: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
 /// regression lens executed the equivalent `cfg!(unix)` branch on Linux
 /// (`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`). So the casefold P1 is
 /// guarded by a gate on the legs that declare the variable -- macOS, and
-/// whichever Windows suite job ran -- and by no gate on the ubuntu leg or on
+/// `test-windows-hosted` -- and by no gate on the ubuntu leg or on
 /// this box
 /// (`PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`).
 #[test]
@@ -15258,9 +15257,8 @@ fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
     };
     // Required only where the leg declares it: `ci.yml` sets
     // `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` on the macOS test step and the suite
-    // step of both Windows suite jobs (the winguest guest and its hosted
-    // twin), and a green there records that the native branch of this guard
-    // ran.
+    // step of `test-windows-hosted`, and a green there records that the
+    // native branch of this guard ran.
     // Everywhere else the branch is observed, so a case-sensitive volume —
     // a developer's `TMPDIR` on case-sensitive APFS — takes the negative
     // branch below instead of failing here.

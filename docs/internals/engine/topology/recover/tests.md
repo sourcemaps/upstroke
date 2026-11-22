@@ -1396,8 +1396,10 @@ Bound inside the `cfg`, because only the `cfg` uses it. Bound
 outside, Windows compiles an unused local and CI's `lint (windows)`
 leg refuses it under `-D warnings` — which is exactly the gap
 recorded as `windows-gate-lint-level-gap`: a local
-`--target x86_64-pc-windows-msvc` check accepts code the guest does
-not, because only the guest sets the lint level.
+`--target x86_64-pc-windows-msvc` check accepts code CI's Windows jobs
+do not, because only CI sets the lint level (`ci.yml`'s
+`RUSTFLAGS: -D warnings`, on `lint (windows)` and on
+`test-windows-hosted`'s ten `windows-latest` legs alike).
 
 
 ## `fn resume_refused_while_reaper_hold_observed_then_succeeds()` › `let started = std::time::Instant::now();`

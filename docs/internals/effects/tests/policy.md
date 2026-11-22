@@ -109,6 +109,6 @@ about -- but it is **vacuous** rather than a hole, because a path that
 does not resolve is also a path no macOS code can call. Recorded here
 rather than suppressed, so the set stays asserted on every host.
 
-Found by CI, not locally: this project has a Windows guest and no
-macOS host, and `PR5-MACOS-CLIPPY-NEVER-RUN` predicted this exact test
-would be the one to see it.
+Found by CI, not locally: this project had a Windows guest until
+2026-11-20 and has no macOS host, and `PR5-MACOS-CLIPPY-NEVER-RUN`
+predicted this exact test would be the one to see it.

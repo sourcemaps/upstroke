@@ -1570,8 +1570,9 @@ ephemeral scratch mount, and no other writable surface without a host
 source.
 
 `PR6-CORRECTNESS-008` / `PR6-ENUM-005`, the half a machine with no
-container runtime can assert — which is the Windows guest, and which is
-why it is here as well as in the gated test that runs the write.
+container runtime can assert — which the Windows guest was until its
+retirement on 2026-11-20, and which is why it is here as well as in the
+gated test that runs the write.
 
 ## `fn every_role_gets_a_read_only_root_and_one_ephemeral_scrat…` › `for mount in plan.mounts() {`
 

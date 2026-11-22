@@ -84,7 +84,7 @@ A generated artifact's content, with the line discipline the checkout gave it
 taken out of the comparison.
 
 **Measured, not anticipated.** The first three Windows guest runs failed both
-artifact tests and nothing else: the guest's `core.autocrlf` checks these
+artifact tests and nothing else: the guest's `core.autocrlf` checked these
 files out with `\r\n`, and `serde_json::to_string_pretty` emits `\n`, so the
 byte comparison was asserting the checkout's line endings rather than the
 document's content. `test (windows-latest)` in CI would have failed the same

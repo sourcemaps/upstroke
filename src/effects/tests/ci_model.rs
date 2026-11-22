@@ -26,13 +26,6 @@ pub(super) const TEST_SCRIPTS: [&str; 4] = [
     CAPABILITY_OBSERVATION,
 ];
 
-pub(super) const TEST_WINDOWS_SCRIPTS: [&str; 4] = [
-    GIT_IDENTITY_SCRIPT,
-    WINDOWS_TEST_WITNESS,
-    HOST_ACCEPTANCE_WINDOWS_CAPTURE,
-    CAPABILITY_WINDOWS_OBSERVATION,
-];
-
 pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [
     GIT_IDENTITY_SCRIPT,
     WINDOWS_SHARD_WITNESS,
@@ -41,8 +34,6 @@ pub(super) const TEST_WINDOWS_HOSTED_SCRIPTS: [&str; 4] = [
 ];
 
 pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
-
-pub(super) const WINDOWS_TEST_WITNESS: &str = "$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()\nif ($rustc -notmatch '^rustc 1\\.97\\.1 ' -or $path_rustc -notmatch '^rustc 1\\.97\\.1 ' -or $cargo -notmatch '^cargo 1\\.97\\.1 ') { throw \"the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow\" }\n$out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'\n$suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\ntry { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter \"Name LIKE 'upstroke%'\"); foreach ($p in $left) { \"left running after the suite: pid $($p.ProcessId): $($p.CommandLine)\"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }\ncatch { if ($code -ne 0) { \"reading the suite's output or listing the processes it left failed: $_\" } else { throw } }\nif ($code -ne 0) { exit $code }\nif ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
 
 pub(super) const WINDOWS_SHARD_WITNESS: &str = r#"$rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
 if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
@@ -147,22 +138,14 @@ pub(super) const ACTION_INPUTS: [(&str, &[&str]); 4] = [
 
 pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];
 
-pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";
-pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];
 pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
 
 pub(super) const TEST_WINDOWS_PLATFORM: &str = "windows-latest";
-
-pub(super) const TEST_WINDOWS_NAME: &str = "test (winguest)";
-pub(super) const TEST_WINDOWS_TIMEOUT_MINUTES: i64 = 20;
-pub(super) const TEST_WINDOWS_CONDITION: &str = "needs.pick-windows-home.outputs.home == 'guest'";
 
 pub(super) const TEST_WINDOWS_HOSTED_JOB: &str = "test-windows-hosted";
 pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest, ${{ matrix.shard }})";
 pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 40;
 pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
-pub(super) const TEST_WINDOWS_HOSTED_CONDITION: &str =
-    "needs.pick-windows-home.outputs.home == 'hosted'";
 
 pub(super) const WINDOWS_SHARD_FILTERS: [&str; 9] = [
     "engine::topology::coordinator::tests::a_p",
@@ -195,92 +178,6 @@ pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [
     ("macos-latest", &MACOS_SHARD_FILTERS),
 ];
 
-pub(super) const PICK_WINDOWS_HOME_JOB: &str = "pick-windows-home";
-pub(super) const PICK_WINDOWS_HOME_NAME: &str = "pick windows home";
-pub(super) const PICK_WINDOWS_HOME_RUNNER: &str = "ubuntu-latest";
-pub(super) const PICK_WINDOWS_HOME_TIMEOUT_MINUTES: i64 = 5;
-
-pub(super) const PICK_WINDOWS_HOME_JOB_FIELDS: [&str; 6] = [
-    "name",
-    "outputs",
-    "permissions",
-    "runs-on",
-    "steps",
-    "timeout-minutes",
-];
-
-pub(super) const PICK_WINDOWS_HOME_PERMISSIONS: [(&str, &str); 2] =
-    [("actions", "read"), ("contents", "read")];
-
-pub(super) const PICK_WINDOWS_HOME_STEP_ID: &str = "pick";
-
-pub(super) const PICK_WINDOWS_HOME_OUTPUTS: [(&str, &str); 1] =
-    [("home", "${{ steps.pick.outputs.home }}")];
-
-pub(super) const PICK_WINDOWS_HOME_STEP_FIELDS: [&str; 5] = ["env", "id", "name", "run", "shell"];
-
-pub(super) const PICK_WINDOWS_HOME_SHELL: &str = "bash";
-
-pub(super) const PICK_WINDOWS_HOME_STEP_ENV: [(&str, &str); 4] = [
-    ("GH_TOKEN", "${{ github.token }}"),
-    ("WINGUEST_BUSY", "${{ vars.WINGUEST_BUSY }}"),
-    ("WINGUEST_PR_HOSTED", "${{ vars.WINGUEST_PR_HOSTED }}"),
-    ("WINGUEST_QUEUE_LIMIT", "${{ vars.WINGUEST_QUEUE_LIMIT }}"),
-];
-
-pub(super) const PICK_WINDOWS_HOME_SCRIPT: &str = r#"winguest_queue() {
-  local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
-  local status listed seen="" id jobs found held=0 ahead=0
-  local -a run_ids
-  for status in queued in_progress; do
-    listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
-    listed="$(jq -r '.workflow_runs[].id' <<<"$listed")" || return 1
-    seen+="$listed"$'\n'
-  done
-  mapfile -t run_ids < <(sort -u <<<"$seen")
-  for id in "${run_ids[@]}"; do
-    if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
-    [[ "$id" =~ ^[0-9]+$ ]] || return 1
-    jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
-    found="$(jq -rs '
-      [.[].jobs[]] as $jobs
-      | [$jobs[] | select(.name == "test (winguest)") | .status] as $guest
-      | [$jobs[] | select(.name == "pick windows home") | .status] as $picker
-      | ($picker | any(. != "completed")) as $picking
-      | ([$guest[] | select(. == "in_progress" or (. == "queued" and ($picking | not)))] | length) as $held
-      | ($picking or ($guest | any(. != "completed")) or (($guest | length) == 0 and (($picker | length) > 0 or ($jobs | length) == 0))) as $unsettled
-      | "\($held) \(if $held == 0 and $unsettled then 1 else 0 end)"' <<<"$jobs")" || return 1
-    [[ "$found" =~ ^([0-9]+)\ ([01])$ ]] || return 1
-    held=$((held + BASH_REMATCH[1]))
-    if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi
-  done
-  echo "$held $ahead"
-}
-home=guest
-if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
-  home=hosted
-  echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
-elif [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && "${WINGUEST_PR_HOSTED:-}" == "1" ]]; then
-  home=hosted
-  echo "This run is a pull request's and WINGUEST_PR_HOSTED is 1, so its Windows suite runs on the hosted shards and the queue for the guest was not counted."
-elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
-  echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a whole number from 1 to 999999, so routing on the queue is off and the queue for the guest was not counted."
-else
-  limit=$((10#$WINGUEST_QUEUE_LIMIT))
-  echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
-  if queue="$(winguest_queue)"; then
-    read -r held ahead <<<"$queue"
-    echo "Other runs of this workflow have $held 'test (winguest)' jobs queued or in progress."
-    echo "Earlier runs of this workflow that have not yet shown where their Windows suite goes: $ahead."
-    if (( held + ahead >= limit )); then home=hosted; fi
-  else
-    echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
-  fi
-fi
-echo "home: $home"
-echo "home=$home" >> "$GITHUB_OUTPUT"
-"#;
-
 pub(super) const MSRV_JOB: &str = "msrv";
 pub(super) const MSRV_COMMAND: &str = "cargo check --locked --all-targets --all-features";
 
@@ -292,24 +189,14 @@ pub(super) const AGGREGATE_JOB: &str = "merge-gate";
 pub(super) const REQUIRED_CONTEXT: &str = "upstroke-ci";
 
 pub(super) const AGGREGATE_SCRIPT: &str = r#"failed=0
-windows=""
-for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do
+for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS_HOSTED; do
   result_var="${gate}_RESULT"
   result="${!result_var}"
-  if [[ "$gate" == "TEST_WINDOWS" || "$gate" == "TEST_WINDOWS_HOSTED" ]]; then
-    windows+="$gate=$result "
-  elif [[ "$result" != "success" ]]; then
+  if [[ "$result" != "success" ]]; then
     echo "$gate did not succeed: $result" >&2
     failed=1
   fi
 done
-case "$windows" in
-  "TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped " | "TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success ") ;;
-  *)
-    echo "exactly one Windows suite job must succeed and the other be skipped: $windows" >&2
-    failed=1
-    ;;
-esac
 exit "$failed"
 "#;
 
@@ -336,18 +223,8 @@ pub(super) const AGGREGATE_JOB_FIELDS: [&str; 6] =
 pub(super) const TEST_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];
 
-pub(super) const TEST_WINDOWS_JOB_FIELDS: [&str; 6] =
-    ["if", "name", "needs", "runs-on", "steps", "timeout-minutes"];
-
-pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 7] = [
-    "if",
-    "name",
-    "needs",
-    "runs-on",
-    "steps",
-    "strategy",
-    "timeout-minutes",
-];
+pub(super) const TEST_WINDOWS_HOSTED_JOB_FIELDS: [&str; 5] =
+    ["name", "runs-on", "steps", "strategy", "timeout-minutes"];
 
 pub(super) const MSRV_JOB_FIELDS: [&str; 5] =
     ["name", "runs-on", "steps", "strategy", "timeout-minutes"];

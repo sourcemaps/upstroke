@@ -918,7 +918,7 @@ The file a kill child writes its repository root into.
 The deadline a topology kill child is given. `kill_child_and_adopt`, the kill witnesses in
 `recover/tests.rs`, the informational-append and open-log witnesses in `emit/tests.rs` and the
 creation witnesses of rows 103 and 106 in `create/tests.rs` hand it to `run_kill_child_within`. It is
-the finalization matrix's 120 seconds, which a loaded Windows guest has needed for a creation kill
+the finalization matrix's 120 seconds, which a loaded Windows guest needed for a creation kill
 child.
 A child still running at the bound is ended there, and the witness fails naming its cell rather than
 judging what the child left. `src/engine/tests.rs` cannot name this `#[cfg(test)]` module, so its
@@ -943,7 +943,8 @@ fixture, and the neutral Git configuration every process that runs the fixture's
 suite's own temporary directory and nothing removed their configurations: 23 directories per suite run
 (the PR11 record, §8, phase 7's residue). The nesting lengthens every path under such a child's fixture
 by the guard's name, so the parents keep that name short: the record's phase-7 arithmetic bounds the
-longest checkout `.git` path at 207 characters on the CI guest, 13 under Git for Windows' 220.
+longest checkout `.git` path at 207 characters on the CI guest, CI's Windows home until 2026-11-20,
+13 under Git for Windows' 220.
 
 ## `pub(super) fn kill_child_and_adopt(test: &str, dir: &Path, site: &str) -> Run {`
 
@@ -988,7 +989,8 @@ nesting lengthens every path under the child's fixture by the tree's name, and
 Git for Windows does not add a worktree whose `.git` path is longer than 220
 characters: `git worktree add` exits 128 with `fatal: '$GIT_DIR' too big`
 (measured on the Windows guest, with Git 2.50.1, the version CI's
-`test (winguest)` runs, and `core.longpaths` unset: 220 added, 221 refused).
+`test (winguest)` ran until 2026-11-20, and `core.longpaths` unset: 220
+added, 221 refused).
 With the site in the tag, that leg failed at `2780e0e4` on the
 `after_snapshot_intent` child, which ended 101 instead of aborting; the launch
 discards the child's standard error, so that is all CI shows. On the guest,

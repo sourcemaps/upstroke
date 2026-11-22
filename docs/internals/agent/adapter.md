@@ -1367,9 +1367,10 @@ pre-flight because *this* machine had no such file.
 
 The premise is asserted rather than hoped for: with all three CLIs
 installed here the absence half is unobservable, and a silent skip would
-measure nothing while looking green. Both machines this slice is
-measured on satisfy it — this box has `claude` and `codex` and no
-`copilot`, and the Windows guest has none of the three.
+measure nothing while looking green. Both machines this slice was
+measured on satisfied it — this box has `claude` and `codex` and no
+`copilot`, and the Windows guest, retired on 2026-11-20, had none of the
+three.
 
 ## `mod built_program_tests` › `fn a_cli_this_host_does_not_have_is_refused_by_name_and_by_boundary() {`
 
@@ -1387,8 +1388,9 @@ remedy, which is the failure nobody could diagnose from a log.
 The premise — that this machine lacks at least one of the three — is
 asserted rather than hoped for, the same way its sibling above asserts
 it, so a machine with all three installed reports that it cannot observe
-this instead of passing vacuously. Both measured machines satisfy it:
-this box has no `copilot`, the Windows guest has none of the three.
+this instead of passing vacuously. Both measured machines satisfied it:
+this box has no `copilot`, and the Windows guest, retired on 2026-11-20,
+had none of the three.
 
 ## `fn a_cli_this_host_does_not_have_is_refused_by_name_and_by_boundary` › `assert!(`
 

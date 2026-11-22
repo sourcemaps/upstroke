@@ -455,8 +455,9 @@ zero, and this is where a variant that grew one would be noticed.
 > then; documented; a portable watchdog is deferred)**.
 
 The window is a **value** and not only a sentence, so the two platforms give
-different answers and the Windows guest — which has no container runtime at
-all — still asserts something about containers. The intersection here is
+different answers and a Windows machine with no container runtime at all —
+as the guest, CI's Windows home until 2026-11-20, was — still asserts
+something about containers. The intersection here is
 {platform} x {who closes the window}, and a constant would collapse it.
 
 ## `fn windows_orphan_window_documented()` › `let answers: BTreeSet<OrphanWindow> = OrphanWindow::ALL.iter().copied().collect();`
@@ -1604,8 +1605,8 @@ attributes is walked through rather than stopped at.
 
 ## `fn every_child_module_of_the_container_funnel_states_its_own_lint_level() {` › `for (fixture, lint, expected) in [`
 
-**CRLF.** The prologue walk is over bytes, and the guest checks this tree
-out with `\r\n`. Every answer above is taken again over the same
+**CRLF.** The prologue walk is over bytes, and a Windows checkout can land
+this tree with `\r\n`. Every answer above is taken again over the same
 fixtures converted, so a walk that treated `\r` as the first token of an
 item -- and so ended the prologue at the first line break -- fails here
 rather than on the Windows leg.
@@ -1626,8 +1627,8 @@ Prose with its line endings and its wrapping taken out.
 
 Two records state the same two numbers, and both wrap: the TOML with a
 trailing `\` and the Rust with a fresh `//`. A search for a phrase that
-crosses either wrap is a search for a spelling of a newline, and the guest
-checks this tree out with **CRLF** -- so `\n` and `\r\n` are two spellings
+crosses either wrap is a search for a spelling of a newline, and a Windows
+checkout can land this tree with **CRLF** -- so `\n` and `\r\n` are two spellings
 again, and `find("… six\nsites")` matches on one platform only.
 
 So nothing here reads a line ending. `str::lines` splits on `\n` and drops
@@ -1682,8 +1683,8 @@ five it already knows.
 
 ## `fn the_readiness_allowance_names_the_paths_it_is_written_against() {` › `assert_eq!(`
 
-**CRLF.** The guest checks this tree out with `\r\n`, and every count
-above has to be the same there. Converted deterministically from the
+**CRLF.** A Windows checkout can land this tree with `\r\n`, and every
+count above has to be the same there. Converted deterministically from the
 source just read rather than assumed to be line-ending-blind.
 
 ## `fn the_readiness_allowance_names_the_paths_it_is_written_against() {` › `let allowlist = fs::read_to_string(root.join("effects/allowlist.toml")).expect("the allowlist");`
@@ -2740,8 +2741,8 @@ is sequential.
 
 [`super::settle_remove`] is a free function over the raw outcome for the
 reason [`super::settle_stop`] is: the branch is reachable — and testable —
-**without a daemon**, which is what makes it assertable at all on CI and on
-the Windows guest.
+**without a daemon**, which is what makes it assertable at all on CI, as it
+was on the Windows guest until its retirement on 2026-11-20.
 
 The intersection: {what the daemon said} × {is it tolerable}, with the
 tolerable answers counted as **distinct** values so three cells cannot be
@@ -3247,11 +3248,9 @@ A printed frame alone is never acceptance.
 The one ignored, cfg-free observation test. CI's observation step selects it
 by its exact name immediately after the native host acceptance capture, in
 `test` (once in each of ubuntu-latest's two shards and of macos-latest's five)
-and in whichever Windows suite job the
-run's `pick-windows-home` chose, `test-windows` (winguest) or
-`test-windows-hosted` (windows-latest, once in each of its ten shards). It does
-not call `docker_gate` and is not in `DOCKER_GATED_TESTS`. Its body has no
-platform cfg and no early return.
+and in `test-windows-hosted`, once in each of its ten shards on
+`windows-latest`. It does not call `docker_gate` and is not in
+`DOCKER_GATED_TESTS`. Its body has no platform cfg and no early return.
 
 Every capability class is a valid observation, and the test passes after
 printing the record: an absent executable, an unknown or rejected endpoint,

@@ -223,7 +223,7 @@ These bind across every lane at once and override the per-lane column above.
 
 | Cap | Value | Why |
 |---|---|---|
-| Pull requests in flight | **6** | `/tmp/w1-eight.lock` serialises every gate run, and `winguest` is a single KVM guest on the same box. Unserialised load measured 90+ on 32 cores and reddened required legs on its own. |
+| Pull requests in flight | **6** | `/tmp/w1-eight.lock` serialises every gate run; the Windows legs run on GitHub-hosted runners, so that lock and the box's load are what bind. Unserialised load measured 90+ on 32 cores and reddened required legs on its own. |
 | P1s in flight | **1** | A P1 repair rewrites the ground other fixes are standing on. |
 | Three-lens lanes at once | **2** | Review spend, and reviewer-family capacity. |
 

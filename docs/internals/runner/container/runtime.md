@@ -343,7 +343,8 @@ needs to write.
 
 A field rather than an unconditional argv flag so the obligation is
 assertable from a [`CreateSpec`] on a machine with no container runtime
-— including the Windows guest, which has none.
+— as was the Windows guest, which had none, until its retirement on
+2026-11-20.
 
 ## `pub struct CreateSpec` › `pub user: Option<ContainerUser>,`
 

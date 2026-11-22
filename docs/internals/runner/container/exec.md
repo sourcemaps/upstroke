@@ -450,7 +450,8 @@ What one request becomes before anything is created.
 Returned by [`ContainerRunner::plan`] so a test can inspect the mounts, the
 environment and the create spec **without** a runtime — which is what makes
 the mount and environment obligations assertable on a machine with no
-container runtime at all, including the Windows guest.
+container runtime at all, as the Windows guest was until its retirement
+on 2026-11-20.
 
 ## `pub struct InvocationPlan` › `pub launch: LaunchPlan,`
 

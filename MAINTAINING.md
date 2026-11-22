@@ -14,9 +14,8 @@ source, documentation, workflows, release machinery and this file.
    pushing.
 3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
-   test matrix, the Windows suite in `test-windows` -- on its self-hosted ephemeral runner for a
-   pull request, a push and a merge-queue entry alike, unless the run is sent to the hosted
-   runner (below) -- the MSRV matrix, the six
+   test matrix, the Windows suite in `test-windows-hosted` -- ten shards on `windows-latest`, on
+   every pull request, push and merge-queue entry -- the MSRV matrix, the six
    Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
    branch behind `master` is not updated by hand to merge once the ruleset carries the merge
    queue (Repository rules): the queue builds the entry on `master`'s head and runs both
@@ -24,37 +23,24 @@ source, documentation, workflows, release machinery and this file.
    Until the ruleset carries the queue, the up-to-date requirement stands: a branch behind
    `master` is updated first and waits again, and the audit reports it as `behind-master`.
 
-   **The Windows suite has two homes.** It runs on the guest unless the run's
-   `pick-windows-home` job answers `hosted`; then `test-windows` is skipped and
-   `test-windows-hosted` runs the suite on `windows-latest` in ten shards,
-   `test (windows-latest, k of 10)`. Each shard installs and asserts the guest image's compiler,
-   runs the guest's suite step with that shard's test-name filter, and holds a share of the
-   guest's passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
+   **The Windows suite runs in ten shards**, `test (windows-latest, k of 10)`, the legs of
+   `test-windows-hosted`. Each shard installs and asserts the pinned compiler, `1.97.1`, runs
+   the suite step with its shard's test-name filter, and holds a share of the Windows suite's
+   passing-test floor of 1700; the shares sum to it. A test runs in exactly one shard: each
    shard skips the filters of the shards before it, and the last takes what no filter names.
-   `upstroke-ci` still requires exactly one of the two jobs to pass, and the hosted one passes
-   only when all ten shards do. The answer is `hosted` in three cases: the repository variable
-   `WINGUEST_BUSY` is `1`; the run is a pull request's and the repository variable
-   `WINGUEST_PR_HOSTED` is `1`; or the repository variable `WINGUEST_QUEUE_LIMIT` is a whole
-   number from 1 to 999999 and the guest's queue reaches it: the guest's jobs queued or running in other
-   runs, together with the runs of a lower run id that have not yet shown where their own suite
-   goes. The limit is best effort. While every run's picker can read the API and list the other
-   runs, of runs that start together, a merge queue's entries among them, the earliest take the
-   guest up to the limit and no further, and the rest go to the hosted runner. All three are
-   opt-in: with none set every run goes to the guest, and an unset or malformed limit counts
-   nothing. `WINGUEST_PR_HOSTED` moves pull-request runs only, never a merge-queue entry or a
-   push, and reads no API.
-   A GitHub API the job cannot read answers `guest`: a failed question never moves a run off
-   the guest. So the limit can be passed in two ways. A burst of n runs costs about n² requests,
-   each picker asking about each other active run, against the workflow token's rate limits
-   (GitHub documents 1,000 requests an hour for a repository's `GITHUB_TOKEN`), and pickers
-   refused together each answer `guest`; and an earlier run a picker could not list, one still
-   `pending` or a finished run re-run, is not counted. Either can put more suites than the limit
-   on the guest. The build machine's operator sets
-   `WINGUEST_BUSY` to `1` while baselines or Upstroke runs hold the machine, and clears it
-   afterwards. A hosted run is not free: measured on 2026-11-15 (run 43719719561), the whole
-   suite takes 59 to 76 minutes on `windows-latest` and three of its shards took 14m42s, 17m17s
-   and 22m53s (the fourth shard of that run never ended, and was divided in two, which made
-   five), against the guest's 13 for the whole. The five were measured on 2026-11-19 (run
+   `upstroke-ci` requires the job, which passes only when all ten shards do. From 2026-09-01
+   to 2026-11-20 the suite ran on an ephemeral self-hosted guest unless the run was sent to
+   `windows-latest`: the merge queue's entries ran there from 2026-09-16 until its October
+   timeouts, and from 2026-11-12 a `pick-windows-home` job could send any run to
+   `test-windows-hosted`, opt-in, through the repository variables `WINGUEST_BUSY`,
+   `WINGUEST_PR_HOSTED` and `WINGUEST_QUEUE_LIMIT`. On 2026-11-20 the guests were deleted, and
+   the picker, the guest's job and the reads of those variables were removed from `ci.yml`,
+   whose comment on `test-windows-hosted` carries that history.
+
+   Measured on 2026-11-15 (run 43719719561), the whole suite takes 59 to 76 minutes on
+   `windows-latest` and three of its shards took 14m42s, 17m17s and 22m53s (the fourth shard
+   of that run never ended, and was divided in two, which made five), against the guest's 13
+   for the whole. The five were measured on 2026-11-19 (run
    44614925593): their test harnesses took 1201, 508, 976, 564 and 860 seconds and the slowest
    job took 24.3 minutes, about 3.6 minutes of every leg being fixed. A run's slowest leg sets
    its wall clock, so that day the suite was divided into ten shards by that measured time,
@@ -85,30 +71,8 @@ source, documentation, workflows, release machinery and this file.
    kill-timing test, and one shard did not end after its tests had passed; a leftover test
    process is inferred to have held its output. Neither followed a change.
 
-   The two homes share the compiler and the suite, and the floor in sum. What still differs is the runner:
-   GitHub's image against the curated guest's, their filesystems and temporary directories,
-   their services, and what the runner environment reports. A test that depends on those can
-   pass on one home and fail on the other, and a run sent to the twin can pass where the guest
-   would have failed (`PR299-HOSTED-QUEUE-DOES-NOT-PROVE-GUEST-BEHAVIOUR`). So run a Windows-only
-   failure on the other home too: one that follows the change to both homes is the change's;
-   one that appears on only one home is a test whose outcome depends on the runner, which is
-   repaired in the test, not dismissed as the machine's. The picker answers from the variables
-   and the live queue as the run starts, not from the home the run had before: re-running the
-   failed job keeps the home already picked, and re-running all of the run's jobs asks again
-   under the same rule, which usually gives the same answer. To move a run, re-run all of its
-   jobs after setting `WINGUEST_BUSY` to `1` (to the twin), or after clearing it and, where a
-   `WINGUEST_QUEUE_LIMIT` is set, unsetting it or waiting for the queue to fall below it (to the
-   guest; a pull request's run goes there only if `WINGUEST_PR_HOSTED` is not `1` either, as
-   below). These are repository variables, so the change reaches every run that starts while it
-   stands -- with `WINGUEST_BUSY` at `1`, other pull requests, pushes to `master` and merge-queue
-   entries go to the twin too; with it cleared and no limit reached they go to the guest, except
-   that pull requests go to the twin while `WINGUEST_PR_HOSTED` is `1`
-   -- and it is the operator's to make while the operator holds the machine; set it for the
-   re-run and put it back once that run's picker has answered. To move one pull request's run,
-   `WINGUEST_PR_HOSTED` is the variable that reaches pull-request runs only: re-run all of its
-   jobs after setting it to `1` (to the twin), or after clearing it (to the guest, unless
-   `WINGUEST_BUSY` or the limit still answers `hosted`). It reaches every pull request's run
-   that starts while it stands, and never a push to `master` or a merge-queue entry.
+   A Windows-only failure that does not follow the change is a test whose outcome depends on
+   the runner, which is repaired in the test, not dismissed as the machine's.
 4. **One frontier review pass on the green head.** Give the exact diff and head SHA to an
    independent frontier-class reviewer at `max` effort — today `gpt-5.6-sol` through `codex exec`,
    run by the owner's review driver against the pull request's own base. Allow at least 90 minutes per

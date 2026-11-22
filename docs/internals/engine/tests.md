@@ -2880,8 +2880,8 @@ and none panics: the witness wants the whole record, not the first failure.
   `fx/.git/refs/replace/<40 hex>.lock`. It fails on Windows at 260 characters,
   `MAX_PATH`. A gate's working directory is the product's snapshot, deep in the
   private root, so this is where a name that grows runs out first, and the record
-  says so with the length before Git's "Filename too long" does. On the CI guest
-  the longest is 249 characters, for the shapes witness's glob directory.
+  says so with the length before Git's "Filename too long" does. On the CI guest,
+  until 2026-11-20, the longest was 249 characters, for the shapes witness's glob directory.
 - `fixture-inside`, `fixture-outside`: the role makes a repository inside its
   own working directory (named `fx`, for the budget above) and one outside it,
   installs a replacement in each and reads it back replaced. Both keep their
@@ -3794,10 +3794,8 @@ With these rules each kind of damage is detectable:
 G7's native HOST acceptance record (root direction `087fea89`), the host half of R21's per-platform
 run ids. CI selects it by its exact name, after the suite, in the `test` job (Linux and macOS,
 where each of Linux's two shards and macOS's five runs the capture after its own share of the
-suite) and in whichever Windows suite job the run's `pick-windows-home` chose: `test-windows` (the
-guest, after the whole suite)
-or `test-windows-hosted` (its twin on `windows-latest`, on the guest image's compiler, where each
-of the ten shards runs the capture after its own share of the suite):
+suite) and in `test-windows-hosted`, once in each of its ten shards on `windows-latest`, after
+that shard's own share of the suite:
 
 ```text
 cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture

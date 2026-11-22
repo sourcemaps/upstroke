@@ -42,7 +42,7 @@ jobs:
     # log contains every closing test summary, each ok; printed summaries
     # are not a successful exit. The 45 minutes named no cause for either
     # cancellation and repaired no test. Under them `test (macos-latest)`
-    # was the slowest job of every run that does not wait for the guest:
+    # was the slowest job of every run that did not wait for the guest:
     # 32m 23s of run 43705001427's 32m 32s on 2026-11-15, the harness
     # 1,777 s for 3,888 tests on three processors, 72% of that limit. So the
     # macOS suite was divided, at first into three shards:
@@ -89,8 +89,7 @@ jobs:
         # an afterthought: the subprocess supervisor, the cmd /C quoting and the
         # PATHEXT resolution all behave differently per platform and are covered
         # by tests. It is absent from this matrix because it runs below, in
-        # `test-windows` on a self-hosted runner, or in `test-windows-hosted`
-        # when the guest is busy; these legs stay on GitHub's runners.
+        # `test-windows-hosted`, in ten shards of its own.
         #
         # Seven legs: the Linux suite as two shards -- `engine::`, and
         # everything else -- and the macOS suite as five -- the coordinator's
@@ -164,13 +163,12 @@ jobs:
       # else -- the ubuntu legs, a developer's TMPDIR on case-sensitive APFS --
       # it observes the branch instead of failing it. The macOS runner's
       # temporary directory folds case and the ubuntu runner's does not, so
-      # the declaration is per leg, and `test-windows` and its hosted twin
-      # make the same declaration for the guest's and the hosted runner's
-      # NTFS. The workflow oracle pins this one
-      # step-level `env:` as a whole map (`TEST_STEP_ENV`), the way it pins
-      # the aggregate's: any other key here is refused. The cargo line hands
-      # libtest the leg's `matrix.tests`, on a Linux leg as on a macOS one:
-      # the shard's filter, where it has one, and its skips.
+      # the declaration is per leg, and `test-windows-hosted` makes the same
+      # declaration for the hosted runner's NTFS. The workflow oracle pins
+      # this one step-level `env:` as a whole map (`TEST_STEP_ENV`), the way
+      # it pins the aggregate's: any other key here is refused. The cargo
+      # line hands libtest the leg's `matrix.tests`, on a Linux leg as on a
+      # macOS one: the shard's filter, where it has one, and its skips.
       - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
@@ -244,385 +242,53 @@ jobs:
               exit !ok
             }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
 
-  # Where this run's Windows suite should go: `guest`, the self-hosted guest
-  # on the build machine, or `hosted`, GitHub's windows-latest. The guest is
-  # one machine, shared with the operator's baselines and Upstroke runs, and
-  # on a busy day each makes the other fail (owner request, 2026-11-11). The
-  # answer is the job output `home`: `test-windows` runs when it is `guest`
-  # and `test-windows-hosted` when it is `hosted`.
+  # The Windows suite, on every lane: a pull request, a push to master and a
+  # merge-queue entry alike run it here, one suite in ten shards, each a leg
+  # of this job's matrix on a windows-latest runner of its own. It is no
+  # longer a twin for the runs a picker sent off a self-hosted guest; the
+  # guest's history is below.
   #
-  # The answer is `hosted` in three cases, tested in this order: the
-  # repository variable WINGUEST_BUSY is `1` (the build machine's operator
-  # sets it while the machine is held); the run is a pull request's and the
-  # repository variable WINGUEST_PR_HOSTED is `1`; or the repository variable
-  # WINGUEST_QUEUE_LIMIT is a whole number from 1 to 999999 and the guest's
-  # queue, as this run reads it in the other runs of this workflow, has
-  # reached that limit.
+  # The compiler. Step 1 installs `1.97.1`, not `stable`: the compiler the
+  # guest's image carried when the guest was retired. The pin is kept so
+  # that the suite's compiler moves by an edit here -- the install, the two
+  # lines of the suite step that refuse any other compiler and the workflow
+  # oracle's constant, together -- and not with GitHub's stable. `lint
+  # (windows)` compiles, code-generates and links the tree on current
+  # stable on every event. The install step's name and the suite step's
+  # refusal still call the version "the image's". The first of the suite
+  # step's compiler questions compiles the dependencies, which the suite
+  # would compile next anyway. `clippy` is a test dependency here, as in
+  # `test` above.
   #
-  # Routing pull requests saves the guest's time. 26 of the last 30 CI runs
-  # on 2026-11-15 were pull-request runs, and all of them wait for the one
-  # guest. Sent to the hosted shards they use no guest time. Merge-queue
-  # entries and pushes keep the guest: the rule reads GITHUB_EVENT_NAME,
-  # which the runner sets for every step, and only `pull_request` takes it,
-  # whatever the variable holds. The rule is opt-in, like the two it joins:
-  # with WINGUEST_PR_HOSTED unset, empty or anything but `1` every run is
-  # answered as if the rule were not there. In the measurement behind the
-  # shards (`test-windows-hosted`, below) one of three whole hosted runs
-  # failed a kill-timing test that an open finding already lists, and one
-  # shard did not end after its tests passed; the owner sets the variable
-  # when hosted runs are trusted and clears it again without a workflow
-  # change. A run the rule sends to the hosted shards counts nothing and
-  # calls no API.
+  # The cache. The job carries no cache step, and the workflow oracle
+  # refuses one. Until 2026-11-20 the reason was that `master` saved a twin
+  # cache only on a push the picker sent here, so nearly every run would
+  # upload a cache nothing later read. Every push to `master` now runs these
+  # legs, so `master` would save one that pull requests and queue entries
+  # could restore. Whether that pays inside a leg's 40 minutes is not
+  # measured, and adding a cache step is a change of its own.
   #
-  # Routing on the queue is opt-in too: with WINGUEST_QUEUE_LIMIT unset,
-  # empty or anything else the queue is not counted, no API call is made,
-  # and the answer is `guest`, so with none of the three variables set every
-  # run goes to the guest as it did before the twin existed. A limit that
-  # applied by default would be reached by ordinary
-  # concurrency -- one build and one queue entry -- and send runs, merge-queue
-  # entries among them, to a hosted suite whose October 2026 queue runs were
-  # cancelled at their timeouts (operator decision, 2026-11-12, on the first
-  # review of this job). The answer is also `guest` whenever the API cannot
-  # be read: a failed question must not move a run off the machine every
-  # lane has run on so far. The count takes the queued and the in-progress
-  # runs in two queries, so a run that moves between them can be listed by
-  # both: run ids are collected from both and each distinct run is read
-  # once, this run left out. Every page of every listing is read,
-  # and a failure on any page is the API not being readable. The script
-  # prints what it found.
+  # The guest. From 2026-09-01 the suite ran as one job on an ephemeral
+  # self-hosted guest on the build box: a throwaway overlay of a frozen
+  # Server 2025 image, one job per boot. Measured 2026-09-15/16: five hosted
+  # samples of the suite on windows-latest (run 34980597250, at `126b8832`)
+  # took 1122-1499 s in the harness, 21m 30s to 28m 03s a job; the guest, on
+  # three green runs of pull request #299, took 346 s in the harness, 6m 47s
+  # to 6m 55s a job. The merge queue ran on windows-latest from 2026-09-16,
+  # and returned to the guest after its October timeouts: three queue
+  # entries of one head reached a 45-minute limit and two of the next head a
+  # 55-minute one, each cancelled before its suite reported a complete
+  # result. From 2026-11-12 a `pick-windows-home` job could send a run here
+  # instead, opt-in, through the repository variables `WINGUEST_BUSY`,
+  # `WINGUEST_QUEUE_LIMIT` and, later, `WINGUEST_PR_HOSTED`. With
+  # `WINGUEST_BUSY` set on 2026-11-19, every run came here. On 2026-11-20
+  # the guests were deleted from the build box on the owner's direction, and
+  # the picker, the guest's job and the reads of the three variables were
+  # removed from this workflow.
   #
-  # The queue is two counts, because runs that start together read one
-  # listing and none can reserve the guest (PR375-QUEUE-PICKERS-RACE): a
-  # count of the jobs already waiting gives a burst of runs one answer, all
-  # `guest` or all `hosted`. The first count is the `test (winguest)` jobs
-  # that hold the guest, in a run of any id: in progress, or queued with
-  # their own run's picker finished or not listed. The second is the runs
-  # with a lower run id that have not yet shown where their Windows suite
-  # goes: the picker not finished, a guest job listed but not yet queued, or
-  # no guest job listed beside a finished picker or an empty job list. A
-  # queued guest job whose own picker has not finished is the second kind:
-  # whatever status the API gives a job still waiting on its `needs`, the
-  # job has not been released to the guest. A later run still choosing is
-  # not counted, because it counts this one. The run id orders every picker's
-  # reading the same way, so of a burst the earliest runs take the guest up
-  # to the limit and the rest go to the twin. No reading is atomic, and what
-  # that leaves open is in `docs/internals/effects/tests/ci_model.md`.
-  #
-  # Reading other runs' jobs needs `actions: read`, which the workflow's
-  # token does not carry. This job alone widens it, by that one read scope;
-  # it checks out nothing and runs no step but the script below. The
-  # workflow oracle pins the job whole -- fields, permissions, output,
-  # environment and the script as text -- and refuses a `permissions:` block
-  # on any other job; `the_windows_home_picker_answers_from_canned_api_pages`
-  # runs this script against canned API answers, a fake `gh` on its PATH
-  # (`docs/internals/effects/tests.md`).
-  pick-windows-home:
-    name: pick windows home
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      home: ${{ steps.pick.outputs.home }}
-    steps:
-      - name: Pick where the Windows suite runs
-        id: pick
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WINGUEST_BUSY: ${{ vars.WINGUEST_BUSY }}
-          WINGUEST_PR_HOSTED: ${{ vars.WINGUEST_PR_HOSTED }}
-          WINGUEST_QUEUE_LIMIT: ${{ vars.WINGUEST_QUEUE_LIMIT }}
-        run: |
-          winguest_queue() {
-            local runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs"
-            local status listed seen="" id jobs found held=0 ahead=0
-            local -a run_ids
-            for status in queued in_progress; do
-              listed="$(gh api --paginate "$runs?status=$status&per_page=100")" || return 1
-              listed="$(jq -r '.workflow_runs[].id' <<<"$listed")" || return 1
-              seen+="$listed"$'\n'
-            done
-            mapfile -t run_ids < <(sort -u <<<"$seen")
-            for id in "${run_ids[@]}"; do
-              if [[ -z "$id" || "$id" == "$GITHUB_RUN_ID" ]]; then continue; fi
-              [[ "$id" =~ ^[0-9]+$ ]] || return 1
-              jobs="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?filter=latest&per_page=100")" || return 1
-              found="$(jq -rs '
-                [.[].jobs[]] as $jobs
-                | [$jobs[] | select(.name == "test (winguest)") | .status] as $guest
-                | [$jobs[] | select(.name == "pick windows home") | .status] as $picker
-                | ($picker | any(. != "completed")) as $picking
-                | ([$guest[] | select(. == "in_progress" or (. == "queued" and ($picking | not)))] | length) as $held
-                | ($picking or ($guest | any(. != "completed")) or (($guest | length) == 0 and (($picker | length) > 0 or ($jobs | length) == 0))) as $unsettled
-                | "\($held) \(if $held == 0 and $unsettled then 1 else 0 end)"' <<<"$jobs")" || return 1
-              [[ "$found" =~ ^([0-9]+)\ ([01])$ ]] || return 1
-              held=$((held + BASH_REMATCH[1]))
-              if (( BASH_REMATCH[2] == 1 && 10#$id < 10#$GITHUB_RUN_ID )); then ahead=$((ahead + 1)); fi
-            done
-            echo "$held $ahead"
-          }
-          home=guest
-          if [[ "${WINGUEST_BUSY:-}" == "1" ]]; then
-            home=hosted
-            echo "WINGUEST_BUSY is 1, so the queue for the guest was not counted."
-          elif [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" && "${WINGUEST_PR_HOSTED:-}" == "1" ]]; then
-            home=hosted
-            echo "This run is a pull request's and WINGUEST_PR_HOSTED is 1, so its Windows suite runs on the hosted shards and the queue for the guest was not counted."
-          elif [[ ! "${WINGUEST_QUEUE_LIMIT:-}" =~ ^0*[1-9][0-9]{0,5}$ ]]; then
-            echo "WINGUEST_BUSY is not 1, and WINGUEST_QUEUE_LIMIT is unset or not a whole number from 1 to 999999, so routing on the queue is off and the queue for the guest was not counted."
-          else
-            limit=$((10#$WINGUEST_QUEUE_LIMIT))
-            echo "WINGUEST_BUSY is not 1. WINGUEST_QUEUE_LIMIT is $limit."
-            if queue="$(winguest_queue)"; then
-              read -r held ahead <<<"$queue"
-              echo "Other runs of this workflow have $held 'test (winguest)' jobs queued or in progress."
-              echo "Earlier runs of this workflow that have not yet shown where their Windows suite goes: $ahead."
-              if (( held + ahead >= limit )); then home=hosted; fi
-            else
-              echo "The GitHub API could not be read, so the queue for the guest is unknown. A failed question does not move a run off the guest."
-            fi
-          fi
-          echo "home: $home"
-          echo "home=$home" >> "$GITHUB_OUTPUT"
-
-  # The Windows suite runs on an ephemeral self-hosted runner: a throwaway
-  # overlay of a frozen Server 2025 image on the build box, one job per boot,
-  # registered for that job with a single-use just-in-time config
-  # (MAINTAINING.md step 3). A pull request, a push to master and a
-  # merge-queue entry all run it there, on the same three labels, unless the
-  # run's `pick-windows-home` answers `hosted` -- WINGUEST_BUSY is `1`, or
-  # the run is a pull request's and WINGUEST_PR_HOSTED is `1`, or
-  # WINGUEST_QUEUE_LIMIT is set and the guest's queue has reached it, all
-  # three opt-in and none set by default. Then this job is skipped
-  # and `test-windows-hosted` below runs the same suite on windows-latest,
-  # in ten shards, each on a runner of its own; the aggregate requires
-  # exactly one of the two jobs to succeed, and the hosted job succeeds only
-  # when all ten shards do. Measured
-  # 2026-09-15/16: five hosted samples of the suite on windows-latest (run
-  # 34980597250, at 126b8832) took 1122-1499 s in the harness, 21m 30s to
-  # 28m 03s a job; the guest, on three green runs of pull request #299, took
-  # 346 s in the harness, 6m 47s to 6m 55s a job -- three to four times
-  # faster. From 2026-09-16 a merge-queue entry ran on windows-latest
-  # instead, under a 45-minute timeout and then a 55-minute one. In October
-  # 2026 three queue entries of one head reached the 45 minutes and two of
-  # the next head reached the 55, each cancelled before its suite reported a
-  # complete result, while the guest ran the full suite of the tree the
-  # second of those two entries tested, as a pull request (run 40263568079),
-  # inside its own 20-minute timeout. So the queue runs on the guest again.
-  # That is a scheduling repair: it names no cause for the hosted runs, and
-  # it repairs no test. One guest serves every lane, so a queue entry's leg
-  # waits for it behind any build that holds it, up to the queue limit where
-  # the operator has set one. With none of the three set every run of a
-  # change is on the guest, where the hosted queue left a test whose outcome
-  # depends on the machine to be seen first by the push to master. That is
-  # as far as it goes: the picker answers for each run on its own, so taking
-  # the guest for one run says nothing about where the earlier runs of the
-  # same change ran. A pull request and its queue entry sent to the hosted
-  # twin can both pass there, and the push to master is then the change's
-  # first run on the guest. With WINGUEST_PR_HOSTED alone set, a change's
-  # pull-request runs are on the hosted shards and its queue entry is its
-  # first run on the guest. `lint (windows)` and the Windows
-  # MSRV leg stay on windows-latest, and `lint (windows)` also links every
-  # binary and test harness with `cargo build --all-targets`, so GitHub's
-  # runner still compiles, code-generates and links every `#[cfg(windows)]`
-  # body on current stable on every lane. Every step of every job here is a
-  # pinned action or a pinned script: an unpinned step could check out
-  # another tree first.
-  #
-  # The guest's image carries the toolchain and a pre-warmed target
-  # directory, so there is no install step and no cache step, and the
-  # workflow oracle refuses a toolchain install in this job: the image
-  # selects the compiler, re-curation moves it, and the suite step below
-  # refuses to run on any other. The timeout is the guest's 20 minutes on
-  # every lane.
-  test-windows:
-    name: test (winguest)
-    runs-on: [self-hosted, windows, winguest]
-    needs: pick-windows-home
-    if: needs.pick-windows-home.outputs.home == 'guest'
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Configure git identity
-        run: |
-          git config --global user.email "ci@upstroke.local"
-          git config --global user.name "upstroke CI"
-
-      # The suite, and a witness that it ran. A green `cargo test` is not that
-      # claim. A `target.<triple>.runner` bound in a `.cargo/config.toml`, in
-      # `$CARGO_HOME`, in a directory above the checkout or in the process
-      # environment makes Cargo compile every harness and hand each one to a
-      # wrapper that exits zero; a `[workspace]` in the root manifest whose
-      # `default-members` name another crate makes it build no harness of this
-      # one at all. Each is a green job over a suite that never ran, each is
-      # written somewhere a check reading this repository cannot see, and the
-      # list is not closed -- Cargo has more ways to be told this than anyone
-      # will enumerate. Counting what libtest itself reported refuses the
-      # effect instead of the causes: a suite that did not execute has no
-      # `test result: ok.` line to count. This is the one leg whose execution
-      # leaves GitHub's runners, so it is the leg that has to say so. The
-      # floor is today's count on this platform less a margin; removing that
-      # many tests is a deliberate act, and it edits this number in the same
-      # change.
-      #
-      # First, though, the compiler. No step in this job installs one: the
-      # guest's image carries it, and what the image carries and the guest's
-      # environment selects is not something a reader of this file can see.
-      # And the `rustc` on PATH is not the question: Cargo picks its
-      # compiler through `RUSTC`, `CARGO_BUILD_RUSTC` or a `build.rustc` in
-      # any config it reads, none of which this workflow can see. So the
-      # script asks Cargo itself -- `cargo rustc --lib -- --version` runs the
-      # compiler Cargo would run, and prints its version. The `rustc` on PATH
-      # is a second question, not a substitute: the suite's own fixtures spawn
-      # bare `rustc` against what Cargo built (`effects::tests`, the log and
-      # run-directory tests), and a PATH rustc of another version fails them
-      # with an incompatible-rlib error rather than a wrong answer. So the
-      # script asks all three -- Cargo's compiler, PATH's rustc, PATH's cargo
-      # -- and refuses to run the suite unless every one is the image's: it
-      # asserts what the image carries and the guest's environment selects,
-      # and the workflow oracle holds the number in this script to the one it
-      # pins as the image's. Re-curation edits both together.
-      #
-      # Then the suite, started as a process and waited on. The script does
-      # not pipe Cargo into `Tee-Object`: `Start-Process` sends Cargo's two
-      # streams to files in `RUNNER_TEMP`, `WaitForExit()` returns when
-      # Cargo's own process ends, and the script prints the files and counts
-      # from them after that. Twice a hosted shard reported its tests and did
-      # not end. In run 43719719561, on 2026-11-15, the 1,669 s shard printed
-      # every `test result: ok` line 31.6 minutes into its job and ran to the
-      # job's limit, where the runner's clean-up killed a test process left
-      # over. In run 44277078005, on 2026-11-18, `test (windows-latest, 3 of
-      # 5)`, job 134707868382, printed `test result: ok. 700 passed; 0
-      # failed` at 09:50:41 and ran until its 40-minute limit cancelled it,
-      # and the job's clean-up killed an orphaned test binary,
-      # `upstroke-8ddcc7d640fdf222`. That much was observed: the passing
-      # result line, the hang, and the test binary killed at clean-up. The
-      # cause is inferred from it, and from Rust's `Command`, which on
-      # Windows hands a child the handles its parent holds as inheritable: a
-      # test process that outlived the suite held the pipe `Tee-Object`
-      # reads, so the pipeline never reached its end. Which test leaves the
-      # process is not established. Waiting on Cargo's process does not
-      # depend on what that process left running, and nothing the step reads
-      # is a pipe a survivor can hold open.
-      #
-      # What is left running is then the step's to report. After Cargo ends
-      # the script lists every process named `upstroke*` that is still
-      # running, with its command line, and asks Windows to stop it. It
-      # does not check that the process stopped. The listing names a
-      # process, not the test that started it. Cargo's own failure comes
-      # first, with Cargo's exit code, and a failure while reading the
-      # output or listing the processes cannot replace that code: the
-      # script prints the failure and still exits with Cargo's code. Where
-      # Cargo exited zero the same failure fails the step, because nothing
-      # was read or listed to count from. Where Cargo exited zero and a
-      # process was left, the step throws: the suite passed, and a test
-      # leaves a process running. If the inference is wrong and Cargo
-      # itself does not end, the listing is never reached, and the job's
-      # limit still ends the leg.
-      - name: Test, and witness that the suite ran
-        env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
-        run: |
-          $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
-          if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
-          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'
-          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode
-          try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
-          catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
-          if ($code -ne 0) { exit $code }
-          if ($left.Count -gt 0) { throw "$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open" }
-          $passed = [int](($log | Select-String -Pattern '^test result: ok\. (\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)
-          if ($passed -lt 1700) { throw "the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them" }
-
-      # The native HOST acceptance record on the guest: the `test` job's
-      # selection under PowerShell, on the compiler the step above has just
-      # asserted, and the harness that step built. This step pipes Cargo
-      # into `Tee-Object` and reads Cargo's exit from `$LASTEXITCODE`; the
-      # suite step, which no longer pipes, reads its exit code from the
-      # process it waited on. The step refuses unless exactly the record's
-      # test ran and passed, and refuses a missing or incomplete frame:
-      # BEGIN first, END last with the same summary, and chunk k at
-      # position k with the tag and its exact length. The workflow oracle
-      # pins the script and its case-fold map whole, immediately after the
-      # suite-and-witness step.
-      - name: Capture the native host acceptance record
-        env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
-        run: |
-          cargo test --all-features --lib engine::tests::host_acceptance_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not ($capture -ccontains 'test engine::tests::host_acceptance_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the capture did not run exactly the one host acceptance test to a pass" }
-          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-HOST-ACCEPTANCE-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
-          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
-          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
-          if (-not $ok) { throw "the host acceptance record is missing or its framing is incomplete" }
-
-      # The container capability observation on the guest: the `test` job's
-      # selection under PowerShell, on the compiler the suite step asserted
-      # and the harness it built, immediately after the host acceptance
-      # capture. `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`.
-      # The step refuses unless exactly the observation's test ran and
-      # passed, and refuses a missing or incomplete frame, as the capture
-      # above does for its record. Every capability class passes; the record
-      # is decoded from this log, and a class is not M2 acceptance. Four
-      # minutes, and no environment of its own; the workflow oracle pins the
-      # script and its case-fold map whole.
-      - name: Capture the container capability observation
-        timeout-minutes: 4
-        env:
-          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
-        run: |
-          cargo test --all-features --lib runner::container::tests::container_capability_record -- --ignored --exact --nocapture | Tee-Object -Variable capture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not ($capture -ccontains 'test runner::container::tests::container_capability_record ... ok') -or -not ($capture -cmatch '^test result: ok\. 1 passed; 0 failed; 0 ignored; ')) { throw "the observation did not run exactly the one container capability test to a pass" }
-          $f = @($capture | Where-Object { $_ -cmatch '^UPSTROKE-CONTAINER-CAPABILITY-RECORD ' } | ForEach-Object { ,($_ -split ' ') })
-          $ok = $f.Count -ge 3 -and $f[0].Count -eq 7 -and $f[-1].Count -eq 7 -and $f[0][1] -ceq 'v1' -and $f[0][2] -ceq 'BEGIN' -and $f[-1][1] -ceq 'v1' -and $f[-1][2] -ceq 'END' -and ($f[0][3..6] -join ' ') -ceq ($f[-1][3..6] -join ' ') -and $f[0][4] -ceq "$($f.Count - 2)"
-          for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
-          if (-not $ok) { throw "the container capability record is missing or its framing is incomplete" }
-
-  # The Windows suite's hosted twin, for a run `pick-windows-home` sends off
-  # the guest: the one suite in ten shards, each a leg of this job's matrix
-  # on a windows-latest runner of its own. Its suite step is the guest's but
-  # for three things: the cargo line hands libtest the shard's filter, the
-  # count of passing tests is held to the shard's share of the guest's
-  # floor, and a last line prints the count. The three compiler questions,
-  # the suite's exit and the count itself are the guest's, character for
-  # character. Otherwise the job differs only where GitHub's image differs
-  # from the guest's. No image carries the compiler here, so step 1
-  # installs the image's, `1.97.1`, not `stable`. Current stable is ahead of
-  # the image (`lint (windows)` installed 1.98.1 on 2026-09-16), so `stable`
-  # here would run the suite on a compiler the guest never ran it on: a test
-  # whose outcome depends on the compiler -- a version-gated test, a std
-  # change to Windows process spawning, which this suite's `cmd /C` quoting
-  # and PATHEXT tests exercise, a new lint in test code under the
-  # workflow-wide `-D warnings` -- would pass on one home and fail on the
-  # other according to how busy the guest was. The pin keeps the two homes
-  # one compiler, as it kept the hosted merge-queue lane and the guest one
-  # compiler until that lane went (d3434ace). The toolchain action tolerates
-  # a failed `rustup default` and then verifies only `rustc +1.97.1`, so the
-  # install can report success while bare `cargo` is still the runner's
-  # preinstalled stable; the suite step's three questions refuse that here
-  # as they do on the guest, and the workflow oracle holds the install and
-  # the questions to the one version it pins as the image's. Re-curation
-  # edits both. The first question compiles the dependencies, which the
-  # suite would compile next anyway. `clippy` is a test dependency here, as
-  # in `test` above. No cache step, for the reason the hosted merge-queue
-  # lane carried none: a run restores caches from its own ref or the default
-  # branch, a queue entry's ref is a fresh `gh-readonly-queue/` branch, and
-  # `master` saves a twin cache only on a push the picker itself sent here,
-  # so nearly every run would start cold and then upload, inside its 40
-  # minutes, a cache nothing later reads; the workflow oracle refuses one
-  # here. A pull request sent here twice is the one run that would gain.
   # The host acceptance capture and the container capability observation
-  # follow the suite as they do on the guest: neither depends on the guest's
-  # image -- each runs the test it names and checks its frame, and every
-  # capability class passes, an absent Docker included. What the pin does
-  # not remove is the machine: GitHub's image, filesystem, temporary
-  # directory and services are not the guest's, so a test whose outcome
-  # depends on the machine can still pass here and fail there.
+  # follow the suite on each leg: each runs the test it names and checks its
+  # frame, and every capability class passes, an absent Docker included.
   #
   # Shards, because one job no longer fits. Measured on 2026-11-15, run
   # 43719719561, on windows-latest with four processors: the whole suite
@@ -679,21 +345,21 @@ jobs:
   # last leg has no filter and runs the tests that contain none of them. So
   # every test runs in exactly one leg. The workflow oracle derives the table
   # below from its filter list and its floors, and holds this matrix to it
-  # entry for entry; the ten floors sum to the guest's 1700. Every `shard:`
-  # and `tests:` value is double-quoted: a `tests:` value contains `:: `, a
-  # colon and a space, which YAML reads as a mapping in a plain scalar.
+  # entry for entry; the ten floors sum to 1700, the floor the whole suite
+  # was held to as one job on the guest. Every `shard:` and `tests:` value
+  # is double-quoted: a `tests:` value contains `:: `, a colon and a space,
+  # which YAML reads as a mapping in a plain scalar.
   #
   # `fail-fast: false`, so one leg's failure does not cancel the others
   # before they report. The aggregate reads the ten legs through one
-  # result, `needs.test-windows-hosted.result`, as it already reads the
-  # `test` and `msrv` matrices through one result each. So its rule stands
-  # as written: exactly one of the two Windows suite jobs succeeded and the
-  # other was skipped, and it accepts `success` alone. What GitHub gives a
-  # matrix whose leg did not finish is observed, not a rule stated here: a
-  # leg GitHub cancelled without a runner made its matrix `abandoned` and
-  # the aggregate red, in runs 44114671287 (`msrv`) and 44149091955
-  # (`test`). No hosted shard has been lost that way yet. A `success`
-  # reported over an unfinished leg is what the rule cannot refuse.
+  # result, `needs.test-windows-hosted.result`, as it reads the `test` and
+  # `msrv` matrices through one result each, and it accepts `success` alone
+  # from it, as from every gate. What GitHub gives a matrix whose leg did
+  # not finish is observed, not a rule stated here: a leg GitHub cancelled
+  # without a runner made its matrix `abandoned` and the aggregate red, in
+  # runs 44114671287 (`msrv`) and 44149091955 (`test`). No hosted shard has
+  # been lost that way yet. A `success` reported over an unfinished leg is
+  # what the rule cannot refuse.
   #
   # 40 minutes a leg: 1.75 times the slowest leg that ended in run
   # 43719719561, and inside the merge queue's 60. In that run the 1,669 s
@@ -712,14 +378,12 @@ jobs:
   # held in both runs. It waits on Cargo's process and reads the suite's
   # output from files; it lists, and asks Windows to stop, any `upstroke*`
   # process still running, and fails for it where Cargo's own exit has not
-  # already failed the step. The comment above the guest's suite step says
+  # already failed the step. The comment above this job's suite step says
   # what was observed, what is inferred, and that the test which leaves
   # the process is not established.
   test-windows-hosted:
     name: test (windows-latest, ${{ matrix.shard }})
     runs-on: windows-latest
-    needs: pick-windows-home
-    if: needs.pick-windows-home.outputs.home == 'hosted'
     timeout-minutes: 40
     strategy:
       fail-fast: false
@@ -769,6 +433,84 @@ jobs:
           git config --global user.email "ci@upstroke.local"
           git config --global user.name "upstroke CI"
 
+      # The suite, and a witness that it ran. A green `cargo test` is not that
+      # claim. A `target.<triple>.runner` bound in a `.cargo/config.toml`, in
+      # `$CARGO_HOME`, in a directory above the checkout or in the process
+      # environment makes Cargo compile every harness and hand each one to a
+      # wrapper that exits zero; a `[workspace]` in the root manifest whose
+      # `default-members` name another crate makes it build no harness of this
+      # one at all. Each is a green job over a suite that never ran, each is
+      # written somewhere a check reading this repository cannot see, and the
+      # list is not closed -- Cargo has more ways to be told this than anyone
+      # will enumerate. Counting what libtest itself reported refuses the
+      # effect instead of the causes: a suite that did not execute has no
+      # `test result: ok.` line to count. On each leg the cargo line hands
+      # libtest the leg's `matrix.tests`, the count of passing tests is held
+      # to the leg's `matrix.floor`, and a last line prints the count. The
+      # count stays now that the suite runs on GitHub's machines, because a
+      # Cargo target runner or a `[workspace]` selection reaches them the
+      # same way, and a leg's floor also refuses a shard whose filter matched
+      # almost nothing. Each leg's floor is its share of 1700, the floor the
+      # whole suite was held to as one job on the guest. Removing that many
+      # tests is a deliberate act, and it edits the floors in the same
+      # change.
+      #
+      # First, though, the compiler. Step 1 installs `1.97.1`, and a green
+      # install is not yet that compiler running the suite: the toolchain
+      # action tolerates a failed `rustup default` and then verifies only
+      # `rustc +1.97.1`, so the install can report success while bare `cargo`
+      # is still the runner's preinstalled stable. The script's three
+      # questions refuse that. And the `rustc` on PATH is not the question:
+      # Cargo picks its compiler through `RUSTC`, `CARGO_BUILD_RUSTC` or a
+      # `build.rustc` in any config it reads, none of which this workflow can
+      # see. So the script asks Cargo itself --
+      # `cargo rustc --lib -- --version` runs the compiler Cargo would run,
+      # and prints its version. The `rustc` on PATH is a second question, not
+      # a substitute: the suite's own fixtures spawn bare `rustc` against
+      # what Cargo built (`effects::tests`, the log and run-directory tests),
+      # and a PATH rustc of another version fails them with an
+      # incompatible-rlib error rather than a wrong answer. So the script
+      # asks all three -- Cargo's compiler, PATH's rustc, PATH's cargo -- and
+      # refuses to run the suite unless every one is `1.97.1`: the workflow
+      # oracle holds the number in this script and the install to the one it
+      # pins, and moving the compiler edits all three together.
+      #
+      # Then the suite, started as a process and waited on. The script does
+      # not pipe Cargo into `Tee-Object`: `Start-Process` sends Cargo's two
+      # streams to files in `RUNNER_TEMP`, `WaitForExit()` returns when
+      # Cargo's own process ends, and the script prints the files and counts
+      # from them after that. Twice a hosted shard reported its tests and did
+      # not end. In run 43719719561, on 2026-11-15, the 1,669 s shard printed
+      # every `test result: ok` line 31.6 minutes into its job and ran to the
+      # job's limit, where the runner's clean-up killed a test process left
+      # over. In run 44277078005, on 2026-11-18, `test (windows-latest, 3 of
+      # 5)`, job 134707868382, printed `test result: ok. 700 passed; 0
+      # failed` at 09:50:41 and ran until its 40-minute limit cancelled it,
+      # and the job's clean-up killed an orphaned test binary,
+      # `upstroke-8ddcc7d640fdf222`. That much was observed: the passing
+      # result line, the hang, and the test binary killed at clean-up. The
+      # cause is inferred from it, and from Rust's `Command`, which on
+      # Windows hands a child the handles its parent holds as inheritable: a
+      # test process that outlived the suite held the pipe `Tee-Object`
+      # reads, so the pipeline never reached its end. Which test leaves the
+      # process is not established. Waiting on Cargo's process does not
+      # depend on what that process left running, and nothing the step reads
+      # is a pipe a survivor can hold open.
+      #
+      # What is left running is then the step's to report. After Cargo ends
+      # the script lists every process named `upstroke*` that is still
+      # running, with its command line, and asks Windows to stop it. It
+      # does not check that the process stopped. The listing names a
+      # process, not the test that started it. Cargo's own failure comes
+      # first, with Cargo's exit code, and a failure while reading the
+      # output or listing the processes cannot replace that code: the
+      # script prints the failure and still exits with Cargo's code. Where
+      # Cargo exited zero the same failure fails the step, because nothing
+      # was read or listed to count from. Where Cargo exited zero and a
+      # process was left, the step throws: the suite passed, and a test
+      # leaves a process running. If the inference is wrong and Cargo
+      # itself does not end, the listing is never reached, and the job's
+      # limit still ends the leg.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
@@ -785,6 +527,17 @@ jobs:
           if ($passed -lt ${{ matrix.floor }}) { throw "shard ${{ matrix.shard }} reported $passed passing tests, below its floor of ${{ matrix.floor }}: Cargo compiled the harnesses and executed almost none of this shard's tests" }
           "shard ${{ matrix.shard }} reported $passed passing tests; its floor is ${{ matrix.floor }}"
 
+      # The native HOST acceptance record on each leg: the `test` job's
+      # selection under PowerShell, on the compiler the step above has just
+      # asserted, and the harness that step built. This step pipes Cargo
+      # into `Tee-Object` and reads Cargo's exit from `$LASTEXITCODE`; the
+      # suite step, which no longer pipes, reads its exit code from the
+      # process it waited on. The step refuses unless exactly the record's
+      # test ran and passed, and refuses a missing or incomplete frame:
+      # BEGIN first, END last with the same summary, and chunk k at
+      # position k with the tag and its exact length. The workflow oracle
+      # pins the script and its case-fold map whole, immediately after the
+      # suite-and-witness step.
       - name: Capture the native host acceptance record
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
@@ -797,6 +550,16 @@ jobs:
           for ($k = 1; $ok -and $k -lt $f.Count - 1; $k++) { $ok = $f[$k].Count -eq 5 -and $f[$k][1] -ceq 'v1' -and $f[$k][2] -ceq $f[0][3] -and $f[$k][3] -ceq "$k" -and $f[$k][4].Length -eq $(if ($k -lt $f.Count - 2) { 192 } else { 2 * ([long]$f[0][5] - ([long]$f[0][4] - 1) * 96) }) }
           if (-not $ok) { throw "the host acceptance record is missing or its framing is incomplete" }
 
+      # The container capability observation on each leg: the `test` job's
+      # selection under PowerShell, on the compiler the suite step asserted
+      # and the harness it built, immediately after the host acceptance
+      # capture. `$LASTEXITCODE` carries Cargo's exit through `Tee-Object`.
+      # The step refuses unless exactly the observation's test ran and
+      # passed, and refuses a missing or incomplete frame, as the capture
+      # above does for its record. Every capability class passes; the record
+      # is decoded from this log, and a class is not M2 acceptance. Four
+      # minutes, and no environment of its own; the workflow oracle pins the
+      # script and its case-fold map whole.
       - name: Capture the container capability observation
         timeout-minutes: 4
         env:
@@ -836,16 +599,16 @@ jobs:
   # `[6]` are undischarged for the Windows half of the tree.
   #
   # A separate job rather than a step in a test job, deliberately: the
-  # Windows suite job that ran, `test-windows` or its hosted twin, is the
-  # attestation of record for the Windows suite and a lint failure must not
-  # be able to masquerade as a test failure in it. This
+  # Windows suite job, `test-windows-hosted`, is the attestation of record
+  # for the Windows suite and a lint failure must not be able to masquerade
+  # as a test failure in it. This
   # leg stays on windows-latest on every lane, on purpose: GitHub's runner
   # remains the neutral witness that the Windows tree compiles clean, and its
   # second step, `cargo build --all-targets`, makes it the witness that the
   # tree code-generates and links on current stable too, library, binaries and
   # test harnesses alike -- `cargo check` and Clippy stop before codegen, and
-  # both Windows suite jobs, the guest and its hosted twin, link with the
-  # image's toolchain, which moves only by re-curation. In the dev
+  # the Windows suite's shards link with the pinned `1.97.1`, which moves
+  # only by an edit to that pin. In the dev
   # profile, which is the profile every CI leg here builds; `release.yml` builds
   # the shipped artifact with `--release`. The two steps fail separately and the
   # log names which.
@@ -924,12 +687,13 @@ jobs:
   # splitting a gate cannot silently leave GitHub protecting yesterday's job
   # names. `always()` makes a failed or cancelled dependency produce a failed
   # aggregate instead of a missing required check that never settles. Every
-  # gate must succeed except the two Windows suite jobs, of which
-  # `pick-windows-home` sends a run to one: exactly one of those must succeed
-  # and the other be skipped, so both skipped, both run, or either failed or
-  # cancelled is red. `test-windows-hosted` is a matrix, read through one
-  # result as `test` and `msrv` are, and the rule accepts `success` alone
-  # from it. What GitHub gives a matrix whose leg did not finish is
+  # gate must succeed, `test-windows-hosted` among them, on every event.
+  # Until 2026-11-20 the aggregate required exactly one of two Windows suite
+  # jobs, the guest's or the hosted one, to succeed and the other to be
+  # skipped; with the guest retired, a skipped `test-windows-hosted` is red
+  # like any skipped gate. `test-windows-hosted` is a matrix, read through
+  # one result as `test` and `msrv` are, and the rule accepts `success`
+  # alone from it. What GitHub gives a matrix whose leg did not finish is
   # observed: a leg GitHub cancelled without a runner made its matrix
   # `abandoned` and the aggregate red, in runs 44114671287 (`msrv`) and
   # 44149091955 (`test`). No hosted shard has been lost that way yet. A
@@ -938,7 +702,7 @@ jobs:
   merge-gate:
     name: upstroke-ci
     if: always()
-    needs: [lint, lint-windows, lint-macos, msrv, pick-windows-home, test, test-windows, test-windows-hosted]
+    needs: [lint, lint-windows, lint-macos, msrv, test, test-windows-hosted]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -949,28 +713,16 @@ jobs:
           LINT_WINDOWS_RESULT: ${{ needs.lint-windows.result }}
           LINT_MACOS_RESULT: ${{ needs.lint-macos.result }}
           MSRV_RESULT: ${{ needs.msrv.result }}
-          PICK_WINDOWS_HOME_RESULT: ${{ needs.pick-windows-home.result }}
           TEST_RESULT: ${{ needs.test.result }}
-          TEST_WINDOWS_RESULT: ${{ needs.test-windows.result }}
           TEST_WINDOWS_HOSTED_RESULT: ${{ needs.test-windows-hosted.result }}
         run: |
           failed=0
-          windows=""
-          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV PICK_WINDOWS_HOME TEST TEST_WINDOWS TEST_WINDOWS_HOSTED; do
+          for gate in LINT LINT_WINDOWS LINT_MACOS MSRV TEST TEST_WINDOWS_HOSTED; do
             result_var="${gate}_RESULT"
             result="${!result_var}"
-            if [[ "$gate" == "TEST_WINDOWS" || "$gate" == "TEST_WINDOWS_HOSTED" ]]; then
-              windows+="$gate=$result "
-            elif [[ "$result" != "success" ]]; then
+            if [[ "$result" != "success" ]]; then
               echo "$gate did not succeed: $result" >&2
               failed=1
             fi
           done
-          case "$windows" in
-            "TEST_WINDOWS=success TEST_WINDOWS_HOSTED=skipped " | "TEST_WINDOWS=skipped TEST_WINDOWS_HOSTED=success ") ;;
-            *)
-              echo "exactly one Windows suite job must succeed and the other be skipped: $windows" >&2
-              failed=1
-              ;;
-          esac
           exit "$failed"
