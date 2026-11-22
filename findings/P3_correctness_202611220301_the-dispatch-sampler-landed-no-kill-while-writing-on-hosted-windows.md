@@ -35,7 +35,7 @@ thing a completed `--no-commit` pick writes. The last assertion of the test is t
 happened (`kills.iter().any(KilledSample::while_writing)`, line 1578). **That is the assertion that
 failed.**
 
-## The one sighting
+## The first sighting
 
 | run | job | platform | date | pull request | head |
 |---|---|---|---|---|---|
@@ -77,6 +77,47 @@ reads them as what a timing probe reports when it is descheduled, on a self-host
 was overcommitted. It records that as a resource observation, not a proven cause. That sighting was
 on the self-hosted guest. This one is on a GitHub-hosted runner.
 
+## A second sighting
+
+| run | job | platform | date | pull request | head |
+|---|---|---|---|---|---|
+| `44986968988` (`pull_request`) | `137099560736`, `test (windows-latest, 10 of 10)` | a GitHub-hosted `windows-latest` runner | 2026-11-22 | #400 (findings repair batch one) | `ff0148d9` |
+
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed (`evidence/job-137099560736.log`, SHA256
+`de963cfe5cf0da2f371d8c7353651d19684f5859ccee9eaef2d2bea1acfe8631`):
+
+- Line 1160: `test
+  engine::topology::dispatch::tests::sampled_repair_materialization_child_kills_every_residue_classified_and_recovered
+  ... FAILED`. Line 1140 says the test had been running for over 60 seconds.
+- The panic (lines 2465-2466), at `src\engine\topology\dispatch\tests.rs:1578`, is the same
+  `while_writing` assertion. It reads "none of the 63 kills in 64 spawns landed while the pick was
+  writing". Its schedule says:
+  - the probe measured **73.7639 ms**, and the ladder followed **one completion**: sample 6, aimed
+    at 57.371922 ms, completed in **37.4019 ms**, `After`;
+  - the six kills before it, samples 0 to 5, were aimed between **8.195989 ms and 49.175933 ms**;
+    every later kill, samples 7 to 63, was aimed between **4.155767 ms and 33.246133 ms**;
+  - of the 63 kills, **all 63 found nothing written** (`None`). **No kill** found `After`.
+  - This matches ruling r38's reading: "all 63 kills found nothing written: six aimed at 8.2 to
+    49.2 ms, then 57 at 4.2 to 33.2 ms once sample 6, complete in 37.4 ms, had set the ladder
+    alone".
+- Line 2472: `test result: FAILED. 2021 passed; 1 failed; 39 ignored; 0 measured; 1601 filtered out;
+  finished in 673.78s`. This test was the job's only failure.
+- #400 changes nothing under `src/engine/topology/dispatch/`. Its change to
+  `src/workspace_manager/fixture.rs` is comment-only.
+- `test (windows-latest, 10 of 10)` passed this test in run 44996199348, on `cf200561`, an empty
+  commit whose tree is `ff0148d9`'s, and on #400's earlier heads in runs 44970652323 (`c3908c6e`)
+  and 44978559642 (`c0f60b7b`). CI ran GitHub's merge commit of each head with `master`, not the
+  head itself, and `master` had moved between the two runs. The failing job ran `1bbe3b68`, the
+  merge of `ff0148d9` into `fe2b9bc5` (its log, line 112). The passing job (`job-137127690628`, its
+  log with ANSI escape sequences removed has SHA256
+  `cd6ca2bab642ab20a5a237b5c538b383a9fa948c66585523524e4135c9f010d4`) ran `9b58fc9f`, the merge of
+  `cf200561` into `5437a06b` (its log, line 112). `git diff --name-only fe2b9bc5 5437a06b` lists 28
+  files, nine of them Rust files, none under `src/engine/topology/dispatch/` and not
+  `src/workspace_manager/fixture.rs`.
+- **Established:** the same test failed the same assertion again, on a second pull request whose
+  diff does not reach the sampler, and passed in a later run on the same pull-request tree, which
+  CI merged with a later `master`.
+
 ## What is and is not established
 
 **Established.** On one hosted Windows leg, the sampler spent all 64 spawns without a kill landing
@@ -109,8 +150,10 @@ and whether it moved. Write times beside only the return clock would not remove 
 kill that returned after `MERGE_MSG` was written could have been entered before the write or after
 it. The kill call's entry time is also needed.
 
-**Not established: the rate.** One sighting on a hosted runner. The other runs of this test on
-2026-11-22 were not counted.
+**Not established: the rate.** Two sightings on hosted runners: the first, on #399, and the second,
+on #400, both recorded above. The other runs of this test on 2026-11-22 were not counted.
+
+A second sighting, on #400, is recorded above; it adds no reading.
 
 ## Why this is its own row
 
