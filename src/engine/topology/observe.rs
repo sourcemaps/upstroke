@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/observe.md`
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -276,8 +277,13 @@ impl Observed {
     /// will append for what is in flight, so the spend nobody can know is a floor
     /// here as it will be in the log.
     fn accounting(&self) -> RunReport {
+        RunReport::from_topology(&self.fold, &self.accounting_events(), Vec::new())
+    }
+
+    #[must_use]
+    pub(crate) fn accounting_events(&self) -> Cow<'_, [TopologyEvent]> {
         if self.running || self.finished() {
-            return RunReport::from_topology(&self.fold, &self.events, Vec::new());
+            return Cow::Borrowed(&self.events);
         }
         // An owned snapshot is the intended semantics: the view adds settlements the
         // log does not hold yet, and `self.events` stays the committed log that
@@ -289,7 +295,7 @@ impl Observed {
                 .iter()
                 .map(|item| TopologyEvent::now(item.interrupted())),
         );
-        RunReport::from_topology(&self.fold, &settled, Vec::new())
+        Cow::Owned(settled)
     }
 
     #[must_use]
