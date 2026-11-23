@@ -125,6 +125,21 @@ Without this, the total of a run killed mid-attempt read as exact.
 - A run another process holds is not settled: its attempt is working, not
   interrupted (`status.md` says the same of the legacy view).
 
+The events it projects are `accounting_events`' (below), read rather than
+rebuilt here.
+
+## `impl Observed` › `pub(crate) fn accounting_events(&self) -> Cow<'_, [TopologyEvent]> {`
+
+The events `accounting` folds: the committed log, borrowed, for a run that
+is finished or that another process holds; otherwise an owned copy of the
+committed log followed by one interrupted settlement for each item
+`closure::in_flight` names, built from `InFlight::interrupted` as above.
+`accounting` reads it, and so does `capacity::latest_run_observations`,
+which folds it through `observe_topology`. One builder serves both, so the
+spend `upstroke status` counts for an unresumed run is the spend `capacity`
+and `validate` count, and the two cannot drift apart. `events()` stays the
+committed log, which `describe`, `follow` and `export-decisions` read.
+
 ## `impl Observed` › `pub fn describe(&self, event: &TopologyEvent) -> String {`
 
 One line per event for `--follow`: its timestamp, its kind, and for the
