@@ -1837,14 +1837,19 @@ Calls to `name` in `code`: neither its definition, nor a longer identifier
 that merely ends in it.
 
 The second half is the one that was missing. A needle built as
-`format!("{name}(")` is a plain substring search, so `expected_refs(` is
-satisfied by every `refuse_unexpected_refs(` in the tree — and a census whose
-entry is proved by a different function's call sites proves nothing about its
-own. Measured on this tree: `workspace_manager.rs` carries four occurrences of
-the substring `expected_refs(` and **zero** calls to `expected_refs` — one of
-the four survives into `production_code`'s region, and it is the *definition
-line* of `refuse_unexpected_refs`, which the "calls, not definitions" filter
-does not see because the text before the match is `pub fn refuse_un`.
+`format!("{name}(")` is a plain substring search, and a substring is satisfied
+by any longer identifier that ends in it: `expected_refs(` matches inside every
+`refuse_unexpected_refs(`, so a census counting substrings counts calls that
+are not calls to its entry — and a census whose entry is proved by a different
+function's call sites proves nothing about its own. The "calls, not
+definitions" filter does not close this either: the longer identifier's
+*definition line* passes it, because the text before the match in
+`pub fn refuse_unexpected_refs(` is `pub fn refuse_un`, which does not end in
+`fn`. The collision was found in `workspace_manager.rs`, whose production
+region carries the substring without a single call to `expected_refs`;
+`engine::topology::recover::tests::a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it`
+holds that against the live module, so this note carries no count for the
+next extraction to falsify.
 
 The boundary is "the byte before the match is not an identifier byte", which
 keeps `crate::a::b::expected_refs(` — `:` is not one — and rejects

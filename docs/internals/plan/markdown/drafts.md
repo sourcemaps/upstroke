@@ -20,6 +20,13 @@ The confluence of the DAG: [`super::sections`], [`super::annotation`] and
 [`super::hints`] all feed it, and [`super::assemble`] consumes what it
 produces.
 
+## `pub(super) annotation: Annotation,`
+
+A draft whose task carries no upstroke comment holds the empty annotation,
+every attribute absent, so `assemble` falls back to its heuristics for each.
+The sink's `Option` only marks whether a comment has been accepted yet; a
+draft does not keep it.
+
 ## `let Some(slice) = raw.get(section.content.clone()) else {`
 
 The range came from `split_sections`' own walk of `raw`, so it lies on

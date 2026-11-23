@@ -93,8 +93,8 @@ pub struct Gathered {
     pub runs: usize,
     /// Distinct repositories those logs belong to.
     pub repositories: usize,
-    /// Runs that were found and whose log could not be folded. Each has a
-    /// warning naming it.
+    /// Runs that were found and whose log could not be read. Each has a
+    /// warning naming it, and [`Gathered::describe`] counts them.
     pub unread: usize,
 }
 
@@ -141,16 +141,17 @@ pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered 
     let mut repositories: BTreeSet<PathBuf> = BTreeSet::new();
     let mut runs = Vec::new();
     let mut unread = 0;
-    for log in logs {
+    for run in logs {
         // Canonical, so that a run listed from its repository and again from
         // its owner record is folded once. A path that does not resolve is
         // kept as written: the read below then fails and names the run, which
         // is where a missing log is reported.
-        let identity = std::fs::canonicalize(&log.path).unwrap_or(log.path);
+        let log = run.log();
+        let identity = std::fs::canonicalize(&log).unwrap_or(log);
         if seen.contains(&identity) {
             continue;
         }
-        let found = evidence_in(&identity);
+        let found = evidence_in(&run);
         let repository = repository_of(&identity);
         seen.insert(identity);
         match found {
@@ -161,9 +162,9 @@ pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered 
             Err(why) => {
                 unread += 1;
                 warnings.push(format!(
-                    "run {} could not be folded for capacity ({why}); what it drew and any \
-                     rate limit it met are missing from the estimates below",
-                    log.run_id
+                    "run {} could not be read ({why}); nothing from it is shown, neither its \
+                     rate-limit signals nor its self-metered spend",
+                    run.run_id
                 ));
             }
         }
@@ -191,50 +192,105 @@ pub fn gather(opts: &GatherOptions<'_>, warnings: &mut Vec<String>) -> Gathered 
 }
 
 impl Gathered {
-    /// One line saying what the estimates were folded from.
+    /// One line saying what the estimates were folded from, and what was
+    /// found and could not be.
+    ///
+    /// A run that could not be read is never passed over in silence: with
+    /// none folded the line says the runs that exist could not be read, not
+    /// that there are none, and with some folded it says how many are
+    /// missing. The warnings name each.
     #[must_use]
     pub fn describe(&self) -> String {
-        let runs = match self.runs {
-            1 => "1 run".to_owned(),
-            count => format!("{count} runs"),
+        let counted = |count: usize, one: &str, many: &str| match count {
+            1 => format!("1 {one}"),
+            count => format!("{count} {many}"),
         };
-        match (self.basis, self.runs) {
-            (Basis::Run, _) => "signals and self-metered draw are folded from one run".to_owned(),
-            (Basis::Machine, 0) => "no run on this machine yet, so nothing has been \
-                                    self-metered and no rate-limit signal is known"
-                .to_owned(),
-            (Basis::Repository, 0) => "no run in this repository yet, so nothing has been \
-                                       self-metered and no rate-limit signal is known"
-                .to_owned(),
-            (Basis::Machine, _) => format!(
-                "signals and self-metered draw are folded from {runs} across {} on this \
-                 machine; the draw counts this calendar month (UTC)",
-                match self.repositories {
-                    1 => "1 repository".to_owned(),
-                    count => format!("{count} repositories"),
-                }
+        let place = match self.basis {
+            Basis::Run => {
+                return "signals and self-metered draw are folded from one run".to_owned();
+            }
+            Basis::Machine => "on this machine",
+            Basis::Repository => "in this repository",
+        };
+        let folded = match (self.runs, self.unread) {
+            (0, 0) => {
+                return format!(
+                    "no run {place} yet, so nothing has been self-metered and no rate-limit \
+                     signal is known"
+                );
+            }
+            (0, 1) => {
+                return format!(
+                    "the 1 run found {place} could not be read, so no rate-limit signal and no \
+                     self-metered draw is shown; a warning names it"
+                );
+            }
+            (0, unread) => {
+                return format!(
+                    "none of the {unread} runs found {place} could be read, so no rate-limit \
+                     signal and no self-metered draw is shown; the warnings name them"
+                );
+            }
+            (runs, _) => match self.basis {
+                Basis::Machine => format!(
+                    "signals and self-metered draw are folded from {} across {} {place}; the \
+                     draw counts this calendar month (UTC)",
+                    counted(runs, "run", "runs"),
+                    counted(self.repositories, "repository", "repositories"),
+                ),
+                Basis::Run | Basis::Repository => format!(
+                    "signals and self-metered draw are folded from {} {place}; the draw counts \
+                     this calendar month (UTC)",
+                    counted(runs, "run", "runs"),
+                ),
+            },
+        };
+        match self.unread {
+            0 => folded,
+            1 => format!(
+                "{folded}; 1 more run could not be read and nothing from it is shown (a warning \
+                 names it)"
             ),
-            (Basis::Repository, _) => format!(
-                "signals and self-metered draw are folded from {runs} in this repository; the \
-                 draw counts this calendar month (UTC)"
+            unread => format!(
+                "{folded}; {unread} more runs could not be read and nothing from them is shown \
+                 (the warnings name them)"
             ),
         }
     }
 }
 
+/// One run to fold: its id and the repository it belongs to, which is what
+/// the readers below are given.
 struct RunLog {
     run_id: String,
-    path: PathBuf,
+    repo_root: PathBuf,
+}
+
+impl RunLog {
+    fn log(&self) -> PathBuf {
+        crate::rundir::public_dir(&self.repo_root, &self.run_id).join(crate::rundir::EVENT_LOG)
+    }
 }
 
 fn repository_logs(repo_root: &Path) -> Vec<RunLog> {
     crate::rundir::list_runs(repo_root)
         .into_iter()
         .map(|run_id| RunLog {
-            path: crate::rundir::public_dir(repo_root, &run_id).join(crate::rundir::EVENT_LOG),
             run_id,
+            repo_root: repo_root.to_path_buf(),
         })
         .collect()
+}
+
+/// The repository a public run directory belongs to.
+///
+/// `<repo>/.upstroke/runs/<run-id>` is three components below its repository.
+/// `None` for a directory of any other shape: a run is read by repository and
+/// id, and the reader derives the directory, so a record naming a directory
+/// that derivation would not arrive at names nothing it can read.
+fn repository_holding(public: &Path, run_id: &str) -> Option<PathBuf> {
+    let root = public.parent()?.parent()?.parent()?;
+    (crate::rundir::public_dir(root, run_id) == public).then(|| root.to_path_buf())
 }
 
 /// The part of a run's `owner.json` (§15) that says where its log is.
@@ -323,9 +379,19 @@ fn machine_logs(machine_dir: &Path, warnings: &mut Vec<String>) -> Vec<RunLog> {
             ));
             continue;
         }
+        let public = PathBuf::from(&located.public_dir);
+        let Some(repo_root) = repository_holding(&public, &located.run_id) else {
+            warnings.push(format!(
+                "{} names `{}`, which is not that run's directory under a repository's \
+                 `.upstroke/runs/`, so it is not followed",
+                record.display(),
+                located.public_dir
+            ));
+            continue;
+        };
         logs.push(RunLog {
             run_id: located.run_id,
-            path: PathBuf::from(located.public_dir).join(crate::rundir::EVENT_LOG),
+            repo_root,
         });
     }
     logs
@@ -342,25 +408,27 @@ fn repository_of(log: &Path) -> PathBuf {
 
 /// One run's capacity evidence, read by the reader of its log's own schema.
 ///
-/// The schema-4 events come from the read-only observer's parser
-/// (`engine::topology::observe`), the one place besides the event funnel that
-/// may turn a schema-4 log into events; no fold is built from them, because
-/// what is derived here is an estimate that authorizes nothing.
-fn evidence_in(log: &Path) -> Result<Vec<Evidence>, String> {
-    use crate::engine::topology::observe;
-
-    let bytes = match crate::util::read_file_bounded(log) {
-        Ok(bytes) => bytes,
-        Err(error) => return Err(format!("{}: {error}", log.display())),
-    };
-    if observe::is_topology_log(&bytes, log).map_err(|refusal| refusal.to_string())? {
-        observe::committed_events(&bytes, log)
-            .map(|events| evidence::of_topology(&events))
-            .map_err(|error| error.to_string())
-    } else {
-        crate::events::parse_bytes(log, &bytes)
-            .map(|parsed| evidence::of_legacy(&parsed.events))
-            .map_err(|error| error.to_string())
+/// A schema-4 log is read by the observer `status` reads it with
+/// (`engine::topology::observe`): a stable read of its committed lines and a
+/// checked replay against the run's frozen inputs, so a log the engine would
+/// refuse to resume contributes nothing here either, and the caller says so.
+/// It never truncates, syncs or locks, so a run that is live in another
+/// repository is read as it stands. A log of schemas 1–3 is read by the
+/// sequential reader.
+///
+/// An incomplete final line is not reported from here: both readers fold the
+/// committed lines, which is all the evidence there is, and what a torn tail
+/// means for the run is `status`'s to say.
+fn evidence_in(run: &RunLog) -> Result<Vec<Evidence>, String> {
+    match crate::engine::topology::observe::observe(&run.repo_root, &run.run_id) {
+        Ok(Some(observed)) => Ok(evidence::of_topology(observed.events())),
+        Ok(None) => {
+            let mut torn_tail = Vec::new();
+            crate::events::read_all(&run.log(), &mut torn_tail)
+                .map(|events| evidence::of_legacy(&events))
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
     }
 }
 

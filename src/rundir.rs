@@ -43,15 +43,19 @@ use crate::util::{self, DurabilityLedger, DurableStep};
 use crate::workspace::Workspace;
 
 /// Created beside the repo: the run's own record and the human/UI surface.
-const PUBLIC_DIRS: [&str; 3] = ["artifacts", "questions", "answers"];
+///
+/// Built from the names in `names.rs`, which the `RunPaths` accessor of each
+/// directory returns too, so the array that creates a directory and the
+/// accessor that reads it cannot spell it two ways (`SWEEP-NAMES-004`).
+const PUBLIC_DIRS: [&str; 3] = [ARTIFACTS_DIR, QUESTIONS_DIR, ANSWERS_DIR];
 /// Created outside the workspace: everything an agent wrote or that describes
-/// an agent's sandbox.
+/// an agent's sandbox. Built from `names.rs` for the reason [`PUBLIC_DIRS`] is.
 const PRIVATE_DIRS: [&str; 5] = [
-    "transcripts",
-    "reviews",
-    "settings",
-    "gates",
-    "gate-worktrees",
+    TRANSCRIPTS_DIR,
+    REVIEWS_DIR,
+    SETTINGS_DIR,
+    GATES_DIR,
+    GATE_WORKTREES_DIR,
 ];
 
 /// Where one run's files live, split by who is allowed to read them.
@@ -183,7 +187,7 @@ impl RunPaths {
     /// A projection of the log for humans and tooling — derived, never read
     /// back as state.
     pub fn report_json(&self) -> PathBuf {
-        self.public.join("report.json")
+        self.public.join(REPORT)
     }
 
     /// Held for the lifetime of a run so two engines cannot drive one branch.
@@ -192,39 +196,39 @@ impl RunPaths {
     }
 
     pub fn questions(&self) -> PathBuf {
-        self.public.join("questions")
+        self.public.join(QUESTIONS_DIR)
     }
 
     /// Where `upstroke answer` drops an answer for the engine to ingest.
     pub fn answers(&self) -> PathBuf {
-        self.public.join("answers")
+        self.public.join(ANSWERS_DIR)
     }
 
     pub fn artifacts(&self) -> PathBuf {
-        self.public.join("artifacts")
+        self.public.join(ARTIFACTS_DIR)
     }
 
     pub fn transcripts(&self) -> PathBuf {
-        self.private.join("transcripts")
+        self.private.join(TRANSCRIPTS_DIR)
     }
 
     pub fn reviews(&self) -> PathBuf {
-        self.private.join("reviews")
+        self.private.join(REVIEWS_DIR)
     }
 
     pub fn settings(&self) -> PathBuf {
-        self.private.join("settings")
+        self.private.join(SETTINGS_DIR)
     }
 
     pub fn gates(&self) -> PathBuf {
-        self.private.join("gates")
+        self.private.join(GATES_DIR)
     }
 
     /// Durable intents and disposable directories for exact gate/review
     /// worktrees. This lives outside the candidate workspace, so a hard-killed
     /// engine can reclaim Git registrations before a resumed worker runs.
     pub fn gate_worktrees(&self) -> PathBuf {
-        self.private.join("gate-worktrees")
+        self.private.join(GATE_WORKTREES_DIR)
     }
 }
 
@@ -393,9 +397,10 @@ fn funnel<T>(
 
 mod names;
 pub use names::{
-    COMMIT_RECORD, COMMIT_RECORD_STAGED, EVENT_LOG, MARKER, MARKER_STAGED, OWNER_RECORD,
-    OWNER_RECORD_STAGED, PLAN, REPORT, REPORT_STAGING_PREFIX, REPORT_STAGING_RECORD,
-    REPORT_STAGING_RECORD_STAGED,
+    ANSWERS_DIR, ARTIFACTS_DIR, COMMIT_RECORD, COMMIT_RECORD_STAGED, EVENT_LOG, GATE_WORKTREES_DIR,
+    GATES_DIR, MARKER, MARKER_STAGED, OWNER_RECORD, OWNER_RECORD_STAGED, PLAN, QUESTIONS_DIR,
+    REPORT, REPORT_STAGING_PREFIX, REPORT_STAGING_RECORD, REPORT_STAGING_RECORD_STAGED,
+    REVIEWS_DIR, SETTINGS_DIR, TRANSCRIPTS_DIR,
 };
 
 // ---------------------------------------------------------------------------
@@ -452,7 +457,9 @@ pub struct CommitRecord {
     pub repo_key: String,
     pub public_dir: String,
     pub incarnation: String,
-    /// The digest of the exact `run_started` line bytes about to be appended.
+    /// The digest of the exact `run_started` line bytes about to be appended,
+    /// in the one spelling [`run_started_sha256`] writes and
+    /// [`is_run_started_sha256`] recognises.
     pub run_started_sha256: String,
 }
 
@@ -2126,7 +2133,7 @@ pub fn ingest_answer(
 // ===========================================================================
 
 mod classify;
-pub use classify::{RunDirClass, classify_run_dir, run_started_sha256};
+pub use classify::{RunDirClass, classify_run_dir, is_run_started_sha256, run_started_sha256};
 
 // ===========================================================================
 // The private half's ownership

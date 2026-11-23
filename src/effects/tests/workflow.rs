@@ -866,13 +866,23 @@ pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {
         out.push(format!(
             "[test-windows-hosted-command] `{TEST_WINDOWS_HOSTED_JOB}` has {running} steps whose \
              `run:` is exactly the pinned shard suite-and-witness script, not one. The lines \
-             before `{TEST_COMMAND}` refuse any compiler but the image's \
-             `{GOLDEN_IMAGE_TOOLCHAIN}`, which on this runner is the one the install selected \
-             only if its `rustup default` took. The cargo line hands libtest the leg's \
-             `matrix.tests`, without which every leg runs the whole suite. The lines after it \
-             are the count of passing tests against the leg's `matrix.floor`, without which a \
-             shard that compiled and executed nothing is green here as a whole suite that \
-             executed nothing would be."
+             before the build refuse any compiler but the image's `{GOLDEN_IMAGE_TOOLCHAIN}`, \
+             which on this runner is the one the install selected only if its `rustup default` \
+             took. The build is `{TEST_COMMAND} --no-run`, exited on when it fails, and \
+             `RUSTC_BOOTSTRAP` is set only after it and no `cargo` follows: without `--no-run` \
+             Cargo runs the whole suite itself, with no times, and with the variable set for \
+             it the build is not the one the other legs make. Every test harness the build \
+             reported is then run in turn, an empty list refused, each handed the leg's \
+             `matrix.tests` and then `-Z unstable-options --report-time`, without which every \
+             leg runs the whole suite or reports no test's time. The loop keeps each harness's \
+             code as soon as `WaitForExit()` returns, before it copies the harness's two \
+             outputs, each copy in a `try` of its own whose `catch` prints the failure and \
+             throws only where the harness passed, so a copy that fails cannot end the step \
+             before the code is kept and the errors are printed; it stops at the first harness \
+             that fails and keeps its code for the step's exit. The lines after it are \
+             the count of passing tests against the leg's `matrix.floor`, without which a shard \
+             that compiled and executed nothing is green here as a whole suite that executed \
+             nothing would be."
         ));
     }
     out.extend(capture_complaints(
@@ -2218,9 +2228,12 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-WORKFLOW-ENV-TARGET-RUNNER",
-        escape: "a Cargo target runner at workflow scope: every Windows test harness compiles \
-                 and none executes, because Cargo hands each one to `cmd /c echo`, which prints \
-                 the path it was given and exits zero. No Unix leg reads a Windows-target \
+        escape: "a Cargo target runner at workflow scope: a harness that `cargo test` runs on a \
+                 Windows leg compiles and does not execute, because Cargo hands it to \
+                 `cmd /c echo`, which prints the path it was given and exits zero. That was \
+                 every Windows test harness until the suite step began starting the harnesses \
+                 itself, which a runner does not reach; it is still the two capture steps \
+                 after it, which run `cargo test`. No Unix leg reads a Windows-target \
                  variable, and the command, shell, labels and checkout all still match.",
         job: None,
         anchor: "  RUSTFLAGS: -D warnings\n",
@@ -3289,30 +3302,30 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED",
-        escape: "the cargo line loses the leg's selection and is the whole suite's again, the \
-                 table and the floors untouched: each of the ten legs runs the whole suite. \
-                 Measured on 2026-11-15 at 59 to 76 minutes a job, that is ten legs cancelled \
-                 at their limit; on a faster runner it is ten green legs and no shard",
+        escape: "the line that runs the harnesses loses the leg's selection, so each harness runs \
+                 whole again, the table and the floors untouched: each of the ten legs runs the \
+                 whole suite. Measured on 2026-11-15 at 59 to 76 minutes a job, that is ten legs \
+                 cancelled at their limit; on a faster runner it is ten green legs and no shard",
         job: Some("test-windows-hosted"),
-        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
-        replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '-Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED",
-        escape: "the cargo line names one filter, `engine::`, where it read the leg's \
-                 `matrix.tests`, the table and the floors untouched. Every leg then runs the one \
-                 subset, and every test outside it runs on no hosted leg. By the counts the \
-                 floors were set from, the first six shards and the ninth, whose filters each \
-                 contain `engine::`, are 50 + 27 + 99 + 76 + 235 + 195 + 120 = 802 passing \
-                 tests, above nine of the ten floors. The subset also holds the rest of \
+        escape: "the line that runs the harnesses names one filter, `engine::`, where it read \
+                 the leg's `matrix.tests`, the table and the floors untouched. Every leg then \
+                 runs the one subset, and every test outside it runs on no hosted leg. By the \
+                 counts the floors were set from, the first six shards and the ninth, whose \
+                 filters each contain `engine::`, are 50 + 27 + 99 + 76 + 235 + 195 + 120 = 802 \
+                 passing tests, above nine of the ten floors. The subset also holds the rest of \
                  `engine::topology::`, which no filter names now and which was 484 tests by \
                  the counts the floors of 2026-11-19 were set from; and 802 + 484 = 1,286 is \
                  above the last leg's 965 too: ten green legs over a suite that lost every \
                  test whose name does not contain `engine::`",
         job: Some("test-windows-hosted"),
-        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
-        replacement: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- engine::' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList 'engine:: -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
@@ -3418,22 +3431,22 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN",
-        escape: "line 4 of the shards' suite step is a pipeline again, Cargo over the leg's \
-                 `matrix.tests` piped into `Tee-Object -Variable log`: the pipeline the legs \
-                 ran in runs 43719719561 and 44277078005, in each of which a shard reported \
-                 its tests and did not end before its job's limit. By the inference the step \
-                 is written against, a test process that outlives the suite holds that pipe, \
-                 so a leg whose tests all passed is cancelled at its 40 minutes with no \
-                 failing test to show for it, on whichever of the ten legs runs the test \
-                 that leaves the process",
+        escape: "line 7 of the shards' suite step runs each harness in a pipeline again, the \
+                 harness over the leg's `matrix.tests` piped into `Tee-Object`: the pipeline \
+                 the legs ran Cargo in, in runs 43719719561 and 44277078005, in each of which a \
+                 shard reported its tests and did not end before its job's limit. By the \
+                 inference the step is written against, a test process that outlives its \
+                 harness holds that pipe, so a leg whose tests all passed is cancelled at its \
+                 40 minutes with no failing test to show for it, on whichever of the ten legs \
+                 runs the test that leaves the process",
         job: Some("test-windows-hosted"),
-        anchor: "          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode\n",
-        replacement: "          cargo test --all-targets --all-features -- ${{ matrix.tests }} | Tee-Object -Variable log\n",
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { & $h ${{ matrix.tests }} -Z unstable-options --report-time | Tee-Object -FilePath $out -Append; $code = $LASTEXITCODE; if ($code -ne 0) { break } }\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {
         name: "MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED",
-        escape: "line 8 of the shards' suite step, the throw for a test process left running, \
+        escape: "line 11 of the shards' suite step, the throw for a test process left running, \
                  is gone, on all ten legs at once. Each leg still lists the `upstroke*` \
                  processes left and asks Windows to stop them, then counts and clears its \
                  floor: the leg whose tests leave a process is green beside the other nine, \
@@ -3442,6 +3455,150 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         job: Some("test-windows-hosted"),
         anchor: "          if ($left.Count -gt 0) { throw \"$($left.Count) test process(es) outlived the suite, listed above: a test leaves a process running, which would hold this step open\" }\n",
         replacement: "",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD",
+        escape: "`RUSTC_BOOTSTRAP` set on a line of its own above the build, where the loop's \
+                 line sets it again. The build then runs in the bootstrap mode the variable \
+                 exists for: Cargo and every compiler it starts accept unstable features, and a \
+                 build script that asks whether the compiler does is answered yes, so the \
+                 harnesses all ten legs test can be built otherwise than the ones the other \
+                 platforms' legs build and a user builds, from a tree nobody changed",
+        job: Some("test-windows-hosted"),
+        anchor: "          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'\n\
+                      \x20         $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-ON-THE-BUILD-LINE",
+        escape: "`RUSTC_BOOTSTRAP` set on the build's own line, ahead of the `Start-Process` that \
+                 builds, where the loop's line sets it again: the build of \
+                 `MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD`, in bootstrap mode, \
+                 written where a reading that asked only whether a line above the build sets \
+                 the variable would pass it",
+        job: Some("test-windows-hosted"),
+        anchor: "          $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CARGO-AFTER-BOOTSTRAP",
+        escape: "a `cargo` command after the line that sets `RUSTC_BOOTSTRAP`: here the \
+                 doctests, which `--all-targets` leaves out, run on a line of their own after \
+                 the loop. The step's process still holds the variable, so that Cargo, every \
+                 compiler it starts and every build script it runs work in bootstrap mode, and \
+                 the doctests run on a build no other leg makes. The later steps run in \
+                 processes of their own and do not inherit the variable; this line is in the \
+                 step that sets it",
+        job: Some("test-windows-hosted"),
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n\
+                      \x20         cargo test --doc --all-features -- ${{ matrix.tests }}\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED",
+        escape: "the harnesses started without `-Z unstable-options --report-time`, the leg's \
+                 `matrix.tests` still theirs: every leg runs its shard, clears its floor and is \
+                 green, and no line of any leg's log carries the time a test took on the hosted \
+                 runner. The times the step exists to record are lost on all ten legs at once, \
+                 and nothing fails to say so",
+        job: Some("test-windows-hosted"),
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS",
+        escape: "the harness loop no longer stops at a harness that fails: each harness after it \
+                 overwrites `$code`, so a failing harness followed by one that passes leaves \
+                 `exit $code` reading zero, and the leg is judged by its count alone, which the \
+                 harnesses that passed can clear: a failing test, on a green leg. Cargo's own \
+                 `test` stops at the first harness that fails, and so does the loop",
+        job: Some("test-windows-hosted"),
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } } }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-LOOP-DROPS-THE-FAILED-CODE",
+        escape: "the harness loop stops at a harness that fails but does not keep its code: \
+                 `$code` still holds the build's zero, `exit $code` does not fire, and the leg \
+                 is judged by its count alone, which the harnesses that passed before the \
+                 failing one can clear: a failing test, on a green leg",
+        job: Some("test-windows-hosted"),
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($suite.ExitCode -ne 0) { break } }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES",
+        escape: "the harness loop keeps a harness's code only after copying its two outputs, the \
+                 shape the step had when the legs first reported their tests' times: under \
+                 `$ErrorActionPreference = 'stop'` a harness that exits 101 and whose standard \
+                 output cannot be read ends the step on the copy's error, which the copy's \
+                 `catch` throws again because `$code` still holds the build's zero or the last \
+                 harness's. Not a false green, since the step still fails, but the failing \
+                 harness's code is never kept and its standard error is never printed, so the \
+                 leg's log says a file could not be read and not which test failed",
+        job: Some("test-windows-hosted"),
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; $code = $suite.ExitCode; if ($code -ne 0) { break } }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED",
+        escape: "the copy of a harness's standard output loses its `try` and `catch`, the bare \
+                 copy left where they stood: a `.part` file that cannot be read ends the step on \
+                 PowerShell's error, with the harness's code kept and never used and its \
+                 standard error never copied. Not a false green either, since a harness that \
+                 passed throws on a failed copy as it does with the `catch`, but a harness that \
+                 failed is reported as a file that could not be read, without its code or the \
+                 errors that say which test failed",
+        job: Some("test-windows-hosted"),
+        anchor: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        replacement: "          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; Get-Content \"$out.part\" | Add-Content $out; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE",
+        escape: "the build started without `--no-run`: Cargo runs every harness it builds, over \
+                 the whole suite, with no selection and no times, and only then does the loop \
+                 run the leg's shard again. Each of the ten legs runs the whole suite once and \
+                 its own shard a second time, and on 2026-11-15 the whole suite alone took \
+                 3,311 to 4,292 s in the harness on this runner, more than a leg's 40 minutes",
+        job: Some("test-windows-hosted"),
+        anchor: "          $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode\n",
+        replacement: "          $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED",
+        escape: "the build's errors read outside a `try`, the line the step had before it read \
+                 them in one: under `$ErrorActionPreference = 'stop'` a build that failed and \
+                 whose errors file cannot be read ends the step with PowerShell's error, not \
+                 Cargo's code, and without the errors that say what failed. Not a false green, \
+                 since the step still fails, but the leg's log says a file could not be read \
+                 and not why the build failed",
+        job: Some("test-windows-hosted"),
+        anchor: "          if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors failed: $_\" }; exit $code }\n",
+        replacement: "          if ($code -ne 0) { Get-Content $err; exit $code }\n",
+        refused_as: "test-windows-hosted-command",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-HOSTED-EMPTY-HARNESS-LIST-ALLOWED",
+        escape: "the refusal of an empty list of harnesses is gone. Not a false green while the \
+                 lines after it hold: with no harness run no output is written, and reading it \
+                 fails the step, or a count of zero falls below the floor. But a leg whose \
+                 build reported no test harness -- its messages read wrongly, or no harness of \
+                 this crate built -- is then stopped by a missing file instead of a refusal \
+                 that names the cause, and the floor is the last line between a shard that ran \
+                 nothing and a green leg",
+        job: Some("test-windows-hosted"),
+        anchor: "          $harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw \"Cargo built no test harness, so this shard would run nothing\" }\n",
+        replacement: "          $harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable })\n",
         refused_as: "test-windows-hosted-command",
     },
     WorkflowEscape {

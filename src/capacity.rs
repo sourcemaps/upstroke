@@ -380,6 +380,10 @@ pub fn observe(events: &[Event]) -> Observations {
     evidence::fold(&evidence::of_legacy(events), 0)
 }
 
+pub fn observe_topology(events: &[TopologyEvent]) -> Observations {
+    evidence::fold(&evidence::of_topology(events), 0)
+}
+
 pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {
     evidence::exhausted(&evidence::of_topology(events))
 }
@@ -1021,8 +1025,9 @@ impl CapacityReport {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::events::EventBody;
     use crate::topology::events::TopologyEventBody;
 
     fn pool(name: &str) -> Pool {
@@ -1647,13 +1652,35 @@ mod tests {
         })
     }
 
-    fn interrupted() -> TopologyEvent {
+    fn started(key: crate::topology::registry::TaskKey, pool: Option<&str>) -> TopologyEvent {
+        use crate::topology::events::{AttemptNumber, AttemptStarted4, GenerationId, RungBinding};
+        topology(TopologyEventBody::AttemptStarted {
+            data: AttemptStarted4 {
+                key,
+                generation: GenerationId(0),
+                attempt: AttemptNumber(1),
+                rung: 0,
+                binding: RungBinding {
+                    tier: crate::ir::Tier::Mid,
+                    agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+                    model: "m".to_owned(),
+                    pinned: false,
+                    effort: crate::ir::Effort::High,
+                },
+                pool: pool.map(str::to_owned),
+                resume_session: None,
+                materialization_observed: None,
+            },
+        })
+    }
+
+    fn interrupted(key: crate::topology::registry::TaskKey) -> TopologyEvent {
         use crate::topology::events::{
             AttemptInterrupted4, AttemptNumber, GenerationId, LeaseDisposition,
         };
         topology(TopologyEventBody::AttemptInterrupted {
             data: AttemptInterrupted4 {
-                key: crate::topology::registry::TaskKey(0),
+                key,
                 generation: GenerationId(0),
                 attempt: AttemptNumber(1),
                 lease: LeaseDisposition::PredictedReleased,
@@ -1708,7 +1735,10 @@ mod tests {
     fn a_topology_log_ending_in_pool_exhausted_holds_that_pool_at_that_reset() {
         for events in [
             vec![signalled("claude-max", Some(FIVE_THIRTY))],
-            vec![signalled("claude-max", Some(FIVE_THIRTY)), interrupted()],
+            vec![
+                signalled("claude-max", Some(FIVE_THIRTY)),
+                interrupted(ALPHA),
+            ],
         ] {
             assert_eq!(
                 exhausted_pools_of(&events),
@@ -1778,6 +1808,926 @@ mod tests {
                 served.body.kind()
             );
         }
+    }
+
+    const ALPHA: crate::topology::registry::TaskKey = crate::topology::registry::TaskKey(0);
+    const BETA: crate::topology::registry::TaskKey = crate::topology::registry::TaskKey(1);
+    const SCHEMA_4_RUN: &str = "01CAPACITYSCHEMA4000000001";
+    const LEGACY_RUN: &str = "01CAPACITYLEGACY0000000001";
+    const NOT_AN_EVENT: &[u8] = b"this committed line is not JSON\n";
+
+    fn schema_4_plan() -> crate::ir::Plan {
+        use crate::ir::{Artifact, ArtifactId, Plan, PlanSource, Task, TaskId, TaskKind};
+        let task = |id: &str| Task {
+            id: TaskId::from(id),
+            kind: TaskKind::Refactor,
+            title: format!("{id} title"),
+            body: format!("{id} body"),
+            depends_on: Vec::new(),
+            acceptance: vec![format!("{id} passes")],
+            path_hints: vec![format!("src/{id}/")],
+            suggested_tier: None,
+            min_tier: None,
+            artifacts_in: Vec::new(),
+            artifacts_out: vec![ArtifactId::from(format!("{id}-out").as_str())],
+        };
+        Plan {
+            source: PlanSource {
+                adapter: "markdown".to_owned(),
+                hash: "capacity-plan-hash".to_owned(),
+            },
+            tasks: vec![task("alpha"), task("beta")],
+            artifacts: vec![Artifact {
+                id: ArtifactId::from("alpha-out"),
+                produced_by: Some(TaskId::from("alpha")),
+            }],
+        }
+    }
+
+    fn schema_4_run_started(
+        run_id: &str,
+        plan: &crate::ir::Plan,
+        normalized_plan_digest: &str,
+    ) -> crate::topology::events::RunStarted4 {
+        use crate::events::{BindingSummary, ChainSummary, GateSummary};
+        use crate::gates::ShellKind;
+        use crate::ir::{Effort, ResolvedEffortPolicy, Tier};
+        use crate::review::{PassBinding, ReviewPlan};
+        use crate::topology::events::{
+            CommitSha, GitRef, IncarnationId, RunStarted4, RunnerContract, RunnerKind,
+            RunnerPolicy, TopologyLimits,
+        };
+        use crate::topology::paths::{PathGrammar, PathPolicy, PathPolicyVersion};
+
+        let chain = |task: &str| ChainSummary {
+            task: task.to_owned(),
+            tiers: vec![Tier::Mid, Tier::Frontier],
+            attempts_per: 2,
+            bindings: Some(vec![
+                BindingSummary {
+                    tier: Tier::Mid,
+                    agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+                    model: format!("{task}-mid-model"),
+                    pinned: false,
+                },
+                BindingSummary {
+                    tier: Tier::Frontier,
+                    agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+                    model: format!("{task}-frontier-model"),
+                    pinned: true,
+                },
+            ]),
+        };
+        let unauthenticated = RunStarted4 {
+            schema: crate::topology::schema::TOPOLOGY_SCHEMA,
+            upstroke_version: "0.2.0-capacity".to_owned(),
+            run_id: run_id.to_owned(),
+            incarnation: IncarnationId("01CAPACITYINC0000000000000".to_owned()),
+            runner: RunnerPolicy {
+                kind: RunnerKind::Host,
+                policy: RunnerContract::HostV1,
+                image: None,
+                credential_volumes: None,
+                mounts: Vec::new(),
+            },
+            probed_agents: vec![
+                crate::agent::claude::ADAPTER_ID.to_owned(),
+                "copilot".to_owned(),
+            ],
+            shell: ShellKind::Bash,
+            branch: format!("upstroke/run-{run_id}"),
+            integration_ref: GitRef(format!("refs/heads/upstroke/run-{run_id}")),
+            base_sha: CommitSha("a".repeat(40)),
+            execution_root: "/var/lib/upstroke/execution".to_owned(),
+            private_dir: format!("/var/lib/upstroke/runs/{run_id}"),
+            plan_path: "docs/plan.md".to_owned(),
+            config_path: Some("upstroke.toml".to_owned()),
+            plan_hash: plan.source.hash.clone(),
+            normalized_plan_digest: normalized_plan_digest.to_owned(),
+            registry_digest: String::new(),
+            path_policy: PathPolicy {
+                version: PathPolicyVersion::V2,
+                case_fold: true,
+                grammar: PathGrammar::Globset,
+            },
+            limits: TopologyLimits {
+                max_parallel: 1,
+                max_defers: 2,
+                max_merge_repairs: 3,
+            },
+            gates: vec!["fmt".to_owned()],
+            gates_from_config: true,
+            gate_cmds: vec![GateSummary {
+                name: "fmt".to_owned(),
+                cmd: "cargo fmt --check".to_owned(),
+                timeout: Duration::from_secs(60),
+                shell: ShellKind::Bash,
+            }],
+            interaction_mode: "never".to_owned(),
+            chains: plan.tasks.iter().map(|t| chain(t.id.as_str())).collect(),
+            effort_policy: ResolvedEffortPolicy {
+                small: Effort::Low,
+                mid: Effort::High,
+                frontier: Effort::Max,
+                review: Effort::Medium,
+            },
+            reviews: ReviewPlan {
+                enabled: Some(true),
+                alternative_available: Some(true),
+                pass_timeout_secs: Some(900),
+                primary: Some(PassBinding::new(crate::agent::claude::ADAPTER_ID, "opus")),
+                alternative: Some(PassBinding::new("copilot", "gpt")),
+                second_opinion: vec![None; plan.tasks.len()],
+            },
+        };
+        let registry_digest = crate::topology::registry::TaskRegistry::originals_with_agents(
+            plan,
+            &unauthenticated.registry_record(),
+            &unauthenticated.probed_agents,
+        )
+        .expect("the fixture record derives a registry")
+        .digest();
+        RunStarted4 {
+            registry_digest,
+            ..unauthenticated
+        }
+    }
+
+    pub(crate) struct Schema4Run {
+        log: crate::events::EventLog,
+        path: std::path::PathBuf,
+        fold: crate::topology::fold::TopologyFold,
+    }
+
+    impl Schema4Run {
+        fn started(repo: &std::path::Path, run_id: &str) -> Self {
+            let plan = schema_4_plan();
+            let mut plan_bytes = serde_json::to_vec_pretty(&plan).expect("the plan serializes");
+            plan_bytes.push(b'\n');
+            let normalized_plan_digest = crate::events::normalized_plan_digest(&plan_bytes);
+            let public = crate::rundir::public_dir(repo, run_id);
+            let hooks = &mut crate::rundir::NoHooks;
+            crate::rundir::create_public_dir(&public, hooks).expect("the run's public directory");
+            crate::rundir::write_plan(&public, &plan_bytes, hooks).expect("the frozen plan");
+            let path = public.join(crate::rundir::EVENT_LOG);
+            let log = crate::events::EventLog::open(
+                crate::topology::effects::EventSite::OpenLog,
+                &path,
+                &mut Vec::new(),
+            )
+            .expect("open the run's log");
+            let started = schema_4_run_started(run_id, &plan, &normalized_plan_digest);
+            let mut run = Self {
+                log,
+                path,
+                fold: crate::topology::fold::TopologyFold::new(
+                    crate::topology::fold::FrozenInputs {
+                        plan,
+                        normalized_plan_digest,
+                    },
+                ),
+            };
+            run.push(topology(TopologyEventBody::RunStarted {
+                data: Box::new(started),
+            }));
+            run
+        }
+
+        #[track_caller]
+        fn push(&mut self, event: TopologyEvent) {
+            let (line, checked) = crate::events::log::TopologyLine::round_trip(&event)
+                .expect("the event survives its own wire format");
+            let delta = self.fold.plan_transition(&checked).unwrap_or_else(|error| {
+                panic!(
+                    "the fold refuses this fixture's `{}`: {error}",
+                    checked.body.kind()
+                )
+            });
+            self.log
+                .append_topology(line.site(), &line)
+                .expect("append the committed line");
+            self.fold.apply_delta(delta);
+        }
+
+        #[track_caller]
+        fn begin_attempt(&mut self, key: crate::topology::registry::TaskKey, pool: &str) {
+            use crate::topology::events::{
+                AttemptNumber, AttemptStarted4, CommitSha, GenerationId, LeaseGrant, TaskDispatched,
+            };
+            let paths = self
+                .fold
+                .predicted_region(key)
+                .expect("the run has started and registers this task");
+            self.push(topology(TopologyEventBody::TaskDispatched {
+                data: TaskDispatched {
+                    key,
+                    generation: GenerationId(0),
+                    base_sha: CommitSha("a".repeat(40)),
+                    worktree_path: format!("/var/lib/upstroke/tasks/k{}-g0", key.0),
+                    lease: LeaseGrant::Predicted { paths },
+                    source_candidate: None,
+                },
+            }));
+            let binding = self
+                .fold
+                .frozen_rung_binding(key, 0)
+                .expect("the task's ladder has a first rung");
+            self.push(topology(TopologyEventBody::AttemptStarted {
+                data: AttemptStarted4 {
+                    key,
+                    generation: GenerationId(0),
+                    attempt: AttemptNumber(1),
+                    rung: 0,
+                    binding,
+                    pool: Some(pool.to_owned()),
+                    resume_session: None,
+                    materialization_observed: None,
+                },
+            }));
+        }
+
+        fn obliged_passes(&self, key: crate::topology::registry::TaskKey) -> Vec<&'static str> {
+            self.fold
+                .registry()
+                .and_then(|registry| registry.get(key))
+                .expect("the run has started and registers this task")
+                .reviews
+                .obliged_lenses()
+                .into_iter()
+                .map(crate::review::Lens::name)
+                .collect()
+        }
+
+        fn rewritten_with(self, line: &[u8]) {
+            let Self { log, path, .. } = self;
+            drop(log);
+            let mut bytes = crate::events::log::read_bytes(&path).expect("the log it wrote");
+            bytes.extend_from_slice(line);
+            crate::workspace_manager::fixture::write_file(&path, &bytes);
+        }
+    }
+
+    pub(crate) fn schema_4_run_signalling(
+        repo: &std::path::Path,
+        run_id: &str,
+        pool: &str,
+        reset_at: &str,
+    ) -> Schema4Run {
+        let mut run = Schema4Run::started(repo, run_id);
+        run.begin_attempt(ALPHA, pool);
+        run.push(signalled(pool, Some(reset_at)));
+        run.push(finished(failed(
+            settled(Some(pool), Vec::new()),
+            FailureKind::RateLimited,
+            FailureOrigin::Worker,
+        )));
+        run
+    }
+
+    pub(crate) fn schema_4_run_limited_then_drawing(
+        repo: &std::path::Path,
+        run_id: &str,
+        limited: (&str, &str),
+        drawn: (&str, f64),
+    ) -> Schema4Run {
+        let (limited, reset_at) = limited;
+        let (pool, usd) = drawn;
+        let mut run = schema_4_run_signalling(repo, run_id, limited, reset_at);
+        run.begin_attempt(BETA, pool);
+        let passed = crate::events::ReviewRecord {
+            outcome: ReviewPassOutcome::Passed,
+            ..review_on("copilot", None)
+        };
+        run.push(prepared(priced(settled(Some(pool), vec![passed]), usd)));
+        run
+    }
+
+    pub(crate) fn legacy_run_with_a_line_that_is_not_json(repo: &std::path::Path, run_id: &str) {
+        let mut bytes = legacy_line(&legacy_run_started(run_id));
+        bytes.extend_from_slice(NOT_AN_EVENT);
+        let path = crate::rundir::public_dir(repo, run_id).join(crate::rundir::EVENT_LOG);
+        crate::workspace_manager::fixture::write_file(&path, &bytes);
+    }
+
+    fn legacy_run_started(run_id: &str) -> Event {
+        Event::now(EventBody::RunStarted {
+            data: Box::new(crate::events::RunStarted {
+                schema: crate::events::SCHEMA_VERSION,
+                upstroke_version: "0.1.0-capacity".to_owned(),
+                run_id: run_id.to_owned(),
+                branch: format!("upstroke/run-{run_id}"),
+                base_sha: "a".repeat(40),
+                plan_path: "docs/plan.md".to_owned(),
+                config_path: None,
+                plan_hash: "capacity-plan-hash".to_owned(),
+                normalized_plan_digest: None,
+                private_dir: format!("/var/lib/upstroke/runs/{run_id}"),
+                gates: Vec::new(),
+                gates_from_config: false,
+                interaction_mode: "never".to_owned(),
+                chains: Vec::new(),
+                effort_policy: None,
+                gate_cmds: None,
+                reviews: None,
+            }),
+        })
+    }
+
+    fn legacy_line(event: &Event) -> Vec<u8> {
+        let mut line = serde_json::to_vec(event).expect("the event serializes");
+        line.push(b'\n');
+        line
+    }
+
+    fn priced(record: AttemptRecord, cost_usd: f64) -> AttemptRecord {
+        AttemptRecord {
+            cost_usd: Some(cost_usd),
+            ..record
+        }
+    }
+
+    fn priced_review(
+        pass: &str,
+        pool: &str,
+        cost_usd: f64,
+        outcome: ReviewPassOutcome,
+    ) -> crate::events::ReviewRecord {
+        crate::events::ReviewRecord {
+            pass: pass.to_owned(),
+            cost_usd: Some(cost_usd),
+            outcome,
+            ..review_on("copilot", Some(pool))
+        }
+    }
+
+    fn claude_max_pools_file(repo: &std::path::Path) -> std::path::PathBuf {
+        let pools = repo.join("pools.toml");
+        crate::workspace_manager::fixture::write_file(
+            &pools,
+            b"[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n\
+              window = \"5h\"\nsources = [\"signals\", \"self\"]\n",
+        );
+        pools
+    }
+
+    struct NoAdapters;
+
+    impl crate::agent::AdapterSource for NoAdapters {
+        fn get(&self, _id: &str) -> Option<&dyn crate::agent::AgentAdapter> {
+            None
+        }
+    }
+
+    const FIXTURE_NOW: u64 = 1_794_369_600;
+
+    fn capacity_report(repo: &std::path::Path) -> CapacityReport {
+        report(
+            &CapacityOptions {
+                config_path: None,
+                pools_path: Some(claude_max_pools_file(repo)),
+                repo_root: repo.to_path_buf(),
+                scope: None,
+                now_unix: Some(FIXTURE_NOW),
+            },
+            &NoAdapters,
+        )
+        .expect("the capacity report")
+    }
+
+    fn folded(repo: &std::path::Path) -> (Gathered, Vec<String>) {
+        let mut warnings = Vec::new();
+        let gathered = machine::gather(
+            &machine::GatherOptions {
+                scope: Scope::Repo,
+                repo_root: repo,
+                machine_dir: None,
+                pools: &[],
+                now_unix: FIXTURE_NOW,
+            },
+            &mut warnings,
+        );
+        (gathered, warnings)
+    }
+
+    #[test]
+    fn the_gatherer_holds_a_schema_4_logs_signalled_pool_at_its_reset() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-signal");
+        let repo = tree.path();
+        let _run = schema_4_run_signalling(repo, SCHEMA_4_RUN, "claude-max", FIVE_THIRTY);
+
+        let (gathered, warnings) = folded(repo);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            gathered.observations.exhausted,
+            exhausted(&[("claude-max", Some(FIVE_THIRTY))]),
+            "the legacy read refuses a schema-4 log at its second line and held no pool"
+        );
+        assert_eq!((gathered.runs, gathered.unread), (1, 0));
+        assert_eq!(gathered.basis, Basis::Repository);
+
+        let rendered = capacity_report(repo).render();
+        assert!(
+            rendered.contains(&format!(
+                "claude-max: exhausted [signal] resets {FIVE_THIRTY}"
+            )),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "scope: machine — signals and self-metered draw are folded from 1 run across 1 \
+                 repository on this machine"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("warning:"), "{rendered}");
+    }
+
+    #[test]
+    fn a_schema_4_logs_spend_counts_every_settled_attempt_once_worker_and_reviews_alike() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-spend");
+        let repo = tree.path();
+        let mut run = Schema4Run::started(repo, SCHEMA_4_RUN);
+
+        run.begin_attempt(ALPHA, "claude-max");
+        let refused_in_review = failed(
+            priced(
+                settled(
+                    Some("claude-max"),
+                    vec![priced_review(
+                        "review",
+                        "copilot-pro",
+                        0.25,
+                        ReviewPassOutcome::Unavailable,
+                    )],
+                ),
+                0.5,
+            ),
+            FailureKind::RateLimited,
+            FailureOrigin::Reviewer,
+        );
+        run.push(finished(refused_in_review));
+
+        run.begin_attempt(BETA, "claude-max");
+        let passes = run.obliged_passes(BETA);
+        assert_eq!(passes, ["review"], "the fixture's run obliges one pass");
+        let accepted = priced(
+            settled(
+                Some("claude-max"),
+                vec![priced_review(
+                    "review",
+                    "copilot-pro",
+                    0.75,
+                    ReviewPassOutcome::Passed,
+                )],
+            ),
+            1.25,
+        );
+        run.push(prepared(accepted));
+
+        let (gathered, warnings) = folded(repo);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((gathered.runs, gathered.unread), (1, 0));
+        let spent = |usd: f64| Spend {
+            usd: Some(usd),
+            attempts: 2,
+            unpriced: 0,
+        };
+        assert_eq!(
+            gathered.observations.self_spend,
+            BTreeMap::from([
+                ("claude-max".to_owned(), spent(1.75)),
+                ("copilot-pro".to_owned(), spent(1.0)),
+            ]),
+            "one `attempt_finished` and one `candidate_prepared`, each counted once"
+        );
+        assert_eq!(
+            gathered.observations.exhausted,
+            BTreeMap::new(),
+            "the accepted attempt's review passed on the pool the earlier one was refused on"
+        );
+    }
+
+    #[test]
+    fn a_schema_4_logs_interrupted_attempt_counts_once_unpriced_on_the_pool_it_started_on() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-interrupted");
+        let repo = tree.path();
+        let mut run = Schema4Run::started(repo, SCHEMA_4_RUN);
+
+        run.begin_attempt(ALPHA, "claude-max");
+        run.push(finished(failed(
+            priced(settled(Some("claude-max"), Vec::new()), 1.0),
+            FailureKind::RateLimited,
+            FailureOrigin::Worker,
+        )));
+
+        run.begin_attempt(BETA, "claude-max");
+        run.push(interrupted(BETA));
+
+        let (gathered, warnings) = folded(repo);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!((gathered.runs, gathered.unread), (1, 0));
+        assert_eq!(
+            gathered.observations.self_spend,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 2,
+                    unpriced: 1,
+                },
+            )]),
+            "the interrupted attempt drew on the pool it started on, at a cost nothing recorded"
+        );
+
+        let rendered = capacity_report(repo).render();
+        assert!(
+            rendered.contains(
+                "claude-max: exhausted [signal] — upstroke on this machine drew, this month, \
+                 $1.0000? over 2 attempt(s)"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {
+        let settled_on_the_pool = [
+            started(ALPHA, Some("claude-max")),
+            finished(failed(
+                priced(settled(Some("claude-max"), Vec::new()), 1.0),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            )),
+        ];
+        let before = observe_topology(&settled_on_the_pool).self_spend;
+        assert_eq!(
+            before,
+            BTreeMap::from([(
+                "claude-max".to_owned(),
+                Spend {
+                    usd: Some(1.0),
+                    attempts: 1,
+                    unpriced: 0,
+                },
+            )]),
+            "the premise: one settled attempt, priced, on the pool"
+        );
+
+        let mut no_start = settled_on_the_pool.to_vec();
+        no_start.push(interrupted(BETA));
+        assert_eq!(
+            observe_topology(&no_start).self_spend,
+            before,
+            "no `attempt_started` names this attempt, and another attempt's start is not its own"
+        );
+
+        let mut no_pool = settled_on_the_pool.to_vec();
+        no_pool.extend([started(BETA, None), interrupted(BETA)]);
+        assert_eq!(
+            observe_topology(&no_pool).self_spend,
+            before,
+            "its `attempt_started` names no pool"
+        );
+    }
+
+    #[test]
+    fn a_schema_4_logs_integration_review_passes_count_once_on_the_pools_they_drew_on() {
+        use crate::events::ReviewRecord;
+        use crate::topology::events::{
+            CandidateRef, CommitSha, FrozenSpawn, GenerationId, GitRef, InfrastructureKind,
+            MergePrepared, MergeRejected, MergeVerificationCharged, MergeVerificationInterrupted,
+            MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
+            RejectionDisposition, RejectionLeaseEffect, SequenceId, SpawnAdmission,
+            UnavailableCause, UnavailableOutcome, VerificationBasis, VerificationRecord,
+            VerificationSource, VerificationVerdict,
+        };
+        use crate::topology::paths::PathSet;
+        use crate::topology::registry::TaskKey;
+
+        const REPAIR: TaskKey = TaskKey(2);
+        let tree = crate::workspace_manager::fixture::scratch("capacity-schema4-integration");
+        let run = Schema4Run::started(tree.path(), SCHEMA_4_RUN);
+
+        let sha = |digit: &str| CommitSha(digit.repeat(40));
+        let candidate = |key: TaskKey| CandidateRef {
+            key,
+            generation: GenerationId(0),
+            commit_sha: sha("c"),
+            candidate_ref: GitRef(format!("refs/upstroke/candidates/k{}", key.0)),
+        };
+        let pooled = |cost_usd: Option<f64>| ReviewRecord {
+            cost_usd,
+            outcome: ReviewPassOutcome::Passed,
+            ..review_on("copilot", Some("reviewer-pool"))
+        };
+        let verification =
+            |verdict: VerificationVerdict, reviews: Vec<ReviewRecord>| VerificationRecord {
+                verdict,
+                gates_passed: true,
+                reviews,
+                detail: "judged".to_owned(),
+            };
+        let verification_started = |sequence: u32, key: TaskKey| {
+            topology(TopologyEventBody::MergeVerificationStarted {
+                data: MergeVerificationStarted {
+                    sequence: SequenceId(sequence),
+                    candidate: candidate(key),
+                    basis: VerificationBasis::StaleClean {
+                        prepared_ref: GitRef(format!("refs/upstroke/select/prepared/{sequence}")),
+                    },
+                    expected_head: sha("d"),
+                    proposed_sha: sha("e"),
+                },
+            })
+        };
+        let unavailable = |sequence: u32, reviews: Vec<ReviewRecord>| {
+            topology(TopologyEventBody::MergeVerificationUnavailable {
+                data: MergeVerificationUnavailable {
+                    sequence: SequenceId(sequence),
+                    cause: UnavailableCause::Infrastructure {
+                        kind: InfrastructureKind::ReviewerTimeout,
+                    },
+                    outcome: UnavailableOutcome::Deferred { defers: 1 },
+                    reviews,
+                },
+            })
+        };
+        let prepared = topology(TopologyEventBody::MergePrepared {
+            data: Box::new(MergePrepared {
+                sequence: SequenceId(1),
+                disposition: PreparedDisposition::StaleClean,
+                expected_head: sha("d"),
+                proposed_sha: sha("e"),
+                key: ALPHA,
+                generation: GenerationId(0),
+                candidate_sha: candidate(ALPHA).commit_sha,
+                candidate_ref: candidate(ALPHA).candidate_ref,
+                prepared_ref: Some(GitRef("refs/upstroke/select/prepared/1".to_owned())),
+                verification_source: VerificationSource::Verification {
+                    sequence: SequenceId(1),
+                },
+                verification: Some(verification(
+                    VerificationVerdict::Passed,
+                    vec![pooled(Some(2.0)), pooled(None)],
+                )),
+                satisfies: vec![ALPHA],
+            }),
+        });
+        let repair_entry = {
+            let mut entry = run
+                .fold
+                .registry()
+                .and_then(|registry| registry.get(BETA))
+                .expect("the run has started and registers beta")
+                .clone();
+            entry.key = REPAIR;
+            entry
+        };
+        let rejected = topology(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(2),
+                candidate: candidate(BETA),
+                rejecting_head: sha("d"),
+                disposition: RejectionDisposition::CodeRejected {
+                    verification: verification(
+                        VerificationVerdict::Rejected,
+                        vec![pooled(Some(1.0))],
+                    ),
+                },
+                repair: FrozenSpawn {
+                    key: REPAIR,
+                    entry: repair_entry,
+                    admission: SpawnAdmission::Runnable,
+                },
+                lease_effect: RejectionLeaseEffect::CreatesLineage {
+                    root: BETA,
+                    paths: PathSet::RepoWide,
+                },
+            }),
+        });
+        let events = vec![
+            started(ALPHA, Some("claude-max")),
+            finished(failed(
+                priced(settled(Some("claude-max"), Vec::new()), 1.0),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            )),
+            prepared,
+            rejected,
+            verification_started(3, REPAIR),
+            unavailable(3, vec![pooled(Some(0.5))]),
+            verification_started(4, ALPHA),
+            topology(TopologyEventBody::MergeVerificationCharged {
+                data: MergeVerificationCharged {
+                    sequence: SequenceId(4),
+                    reviews: vec![pooled(Some(0.25))],
+                },
+            }),
+            topology(TopologyEventBody::MergeVerificationInterrupted {
+                data: MergeVerificationInterrupted {
+                    sequence: SequenceId(4),
+                    detail: "the coordinator that held this verification did not survive it"
+                        .to_owned(),
+                },
+            }),
+            unavailable(9, vec![pooled(Some(0.125))]),
+        ];
+
+        let observed = observe_topology(&events).self_spend;
+        assert_eq!(
+            observed,
+            BTreeMap::from([
+                (
+                    "claude-max".to_owned(),
+                    Spend {
+                        usd: Some(1.0),
+                        attempts: 1,
+                        unpriced: 0,
+                    },
+                ),
+                (
+                    "reviewer-pool".to_owned(),
+                    Spend {
+                        usd: Some(3.875),
+                        attempts: 6,
+                        unpriced: 1,
+                    },
+                ),
+            ]),
+            "every pass of the four carriers once on the pool it drew on, and the attempt's pool \
+             as its settlement alone left it"
+        );
+
+        let report = crate::engine::RunReport::from_topology(&run.fold, &events, Vec::new());
+        let as_rows: Vec<crate::engine::PoolDrainRow> = observed
+            .iter()
+            .map(|(pool, spend)| crate::engine::PoolDrainRow {
+                pool: pool.clone(),
+                attempts: spend.attempts,
+                cost_usd: spend.usd,
+                unpriced: spend.unpriced,
+            })
+            .collect();
+        assert_eq!(
+            as_rows, report.pool_drain,
+            "the capacity fold and the run report's pool rows read the same log alike"
+        );
+    }
+
+    #[test]
+    fn the_gatherer_folds_a_legacy_log_as_observe_over_read_all_does() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-legacy-latest");
+        let repo = tree.path();
+        let limited = Event::now(EventBody::AttemptFinished {
+            task: "t1".to_owned(),
+            attempt: 1,
+            rung: 0,
+            profile: "p".to_owned(),
+            parking: None,
+            transition: None,
+            prepared_commit: None,
+            data: Box::new(failed(
+                priced(settled(Some("claude-max"), Vec::new()), 0.5),
+                FailureKind::RateLimited,
+                FailureOrigin::Worker,
+            )),
+        });
+        let signal = Event::now(EventBody::PoolExhausted {
+            task: "t1".to_owned(),
+            data: PoolExhausted {
+                pool: "claude-max".to_owned(),
+                agent: crate::agent::claude::ADAPTER_ID.to_owned(),
+                reset_at: Some(FIVE_THIRTY.to_owned()),
+                detail: FIVE_HOUR_LIMIT.to_owned(),
+            },
+        });
+        let path = crate::rundir::public_dir(repo, LEGACY_RUN).join(crate::rundir::EVENT_LOG);
+        let bytes: Vec<u8> = [legacy_run_started(LEGACY_RUN), limited, signal]
+            .iter()
+            .flat_map(legacy_line)
+            .collect();
+        crate::workspace_manager::fixture::write_file(&path, &bytes);
+
+        let as_before = observe(
+            &crate::events::read_all(&path, &mut Vec::new()).expect("the legacy log reads"),
+        );
+        assert_eq!(
+            as_before,
+            Observations {
+                exhausted: exhausted(&[("claude-max", Some(FIVE_THIRTY))]),
+                self_spend: BTreeMap::from([(
+                    "claude-max".to_owned(),
+                    Spend {
+                        usd: Some(0.5),
+                        attempts: 1,
+                        unpriced: 0,
+                    },
+                )]),
+            },
+            "the premise: the legacy fold has something to report"
+        );
+
+        let (gathered, warnings) = folded(repo);
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(gathered.observations, as_before);
+        assert_eq!(
+            (gathered.runs, gathered.repositories, gathered.unread),
+            (1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn a_run_neither_reader_accepts_is_reported_unread_and_shows_nothing_of_it() {
+        let unread = |repo: &std::path::Path, run_id: &str| {
+            let (gathered, warnings) = folded(repo);
+            assert_eq!(
+                gathered.observations,
+                Observations::default(),
+                "{warnings:?}"
+            );
+            assert_eq!(
+                (gathered.runs, gathered.repositories, gathered.unread),
+                (0, 0, 1),
+                "{warnings:?}"
+            );
+            let [warning] = warnings.as_slice() else {
+                panic!("one warning names the run and the error: {warnings:?}");
+            };
+            assert!(
+                warning.contains(&format!("run {run_id}"))
+                    && warning.contains("could not be read")
+                    && warning.contains("nothing from it is shown"),
+                "{warning}"
+            );
+            assert!(!warning.contains("signals only"), "{warning}");
+
+            let rendered = capacity_report(repo).render();
+            assert!(
+                rendered.contains(
+                    "scope: machine — the 1 run found on this machine could not be read, so no \
+                     rate-limit signal and no self-metered draw is shown; a warning names it"
+                ),
+                "{rendered}"
+            );
+            assert!(
+                !rendered.contains("no run on this machine yet"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("warning: {warning}")),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("claude-max: unknown [unknown]"),
+                "{rendered}"
+            );
+            warning.clone()
+        };
+
+        let tree = crate::workspace_manager::fixture::scratch("capacity-unread-legacy");
+        legacy_run_with_a_line_that_is_not_json(tree.path(), LEGACY_RUN);
+        let warning = unread(tree.path(), LEGACY_RUN);
+        assert!(warning.contains("line 2 is not a valid event"), "{warning}");
+
+        let tree = crate::workspace_manager::fixture::scratch("capacity-unread-schema4");
+        schema_4_run_signalling(tree.path(), SCHEMA_4_RUN, "claude-max", FIVE_THIRTY)
+            .rewritten_with(NOT_AN_EVENT);
+        let warning = unread(tree.path(), SCHEMA_4_RUN);
+        assert!(warning.contains("line 6"), "{warning}");
+    }
+
+    #[test]
+    fn a_repository_with_no_run_reports_no_run_and_warns_of_nothing() {
+        let tree = crate::workspace_manager::fixture::scratch("capacity-no-run");
+        let repo = tree.path();
+
+        let (gathered, warnings) = folded(repo);
+        assert_eq!(
+            gathered,
+            Gathered {
+                basis: Basis::Repository,
+                ..Gathered::default()
+            }
+        );
+        assert_eq!(warnings, Vec::<String>::new());
+        assert!(
+            gathered
+                .describe()
+                .starts_with("no run in this repository yet"),
+            "{}",
+            gathered.describe()
+        );
+
+        let rendered = capacity_report(repo).render();
+        assert!(
+            rendered.contains("scope: machine — no run on this machine yet"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("could not be read"), "{rendered}");
     }
 
     #[test]

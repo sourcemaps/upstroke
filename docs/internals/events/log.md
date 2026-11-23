@@ -870,13 +870,21 @@ Take the two halves apart.
 
 ## `pub fn first_line_digest(bytes: &[u8]) -> Option<String> {`
 
-The digest of a log's committed first line, in the `sha256:<hex>` shape the
-records use.
+The digest of a log's first newline-terminated line, without its newline, in
+the `sha256:<hex>` shape the records use; `None` when the log holds no
+complete line.
 
 The bytes are the line **without** its terminating newline — the event's own
-bytes, the thing `run_started_sha256` names. Exposed so the private commit
-record and this barrier compute the same number from one definition rather
-than two that agree by inspection.
+bytes, the thing `run_started_sha256` names. Finding the line is all this
+does: the spelling belongs to `crate::rundir::run_started_sha256`, so the
+value P5b writes into the commit record and the value recovery recomputes
+over the replayed line are produced by one definition rather than two that
+agree by inspection (`SWEEP-CLASSIFY-011`).
+
+The slice up to the newline is taken with a checked `get` rather than an
+index, as §7 asks of input-derived slicing. `end` comes from `position` over
+the same bytes, so the check cannot fail today; it costs nothing and keeps the
+function panic-free if the search ever changes.
 
 ## `pub fn establish_stable_prefix(`
 

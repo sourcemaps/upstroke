@@ -1127,6 +1127,97 @@ mod tests {
         );
     }
 
+    fn claude_max_pools_file(dir: &Path) -> PathBuf {
+        let pools = dir.join("pools.toml");
+        fs::write(
+            &pools,
+            "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \
+             \"claude-code\"\nwindow = \"5h\"\nsources = [\"signals\", \"self\"]\n",
+        )
+        .expect("pools");
+        pools
+    }
+
+    #[test]
+    fn the_capacity_block_shows_the_pool_a_schema_4_run_signalled_as_exhausted() {
+        const RUN: &str = "01VALIDATESCHEMA4000000001";
+        const RESET: &str = "2026-11-11T05:30:00Z";
+        let dir = scratch_root("schema4signal");
+        let mut o = opts("fixtures/sample-plan.md");
+        o.pools_path = Some(claude_max_pools_file(dir.path()));
+        let _run =
+            capacity::tests::schema_4_run_signalling(&o.config_root, RUN, "claude-max", RESET);
+
+        let report = run(&o).expect("validates");
+        let rendered = report.render();
+
+        assert!(
+            rendered.contains(&format!("claude-max: exhausted [signal] resets {RESET}")),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "scope: machine — signals and self-metered draw are folded from 1 run across 1 \
+                 repository on this machine"
+            ),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("no run on this machine yet"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(RUN) || warning.contains("could not be")),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn the_capacity_block_says_a_run_it_could_not_read_could_not_be_read() {
+        const RUN: &str = "01VALIDATEUNREAD0000000001";
+        let dir = scratch_root("unreadrun");
+        let mut o = opts("fixtures/sample-plan.md");
+        o.pools_path = Some(claude_max_pools_file(dir.path()));
+        capacity::tests::legacy_run_with_a_line_that_is_not_json(&o.config_root, RUN);
+
+        let report = run(&o).expect("an unreadable run beside the plan does not refuse a preview");
+        let rendered = report.render();
+
+        assert!(
+            rendered.contains(
+                "scope: machine — the 1 run found on this machine could not be read, so no \
+                 rate-limit signal and no self-metered draw is shown; a warning names it"
+            ),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("no run on this machine yet"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("claude-max: unknown [unknown]"),
+            "rendered:\n{rendered}"
+        );
+        let naming_the_run: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains(&format!("run {RUN}")))
+            .collect();
+        let [warning] = naming_the_run.as_slice() else {
+            panic!("one warning names the run: {:?}", report.warnings);
+        };
+        assert!(
+            warning.contains("line 2 is not a valid event")
+                && warning.contains("nothing from it is shown"),
+            "{warning}"
+        );
+        assert!(!warning.contains("signals alone"), "{warning}");
+    }
+
     #[test]
     fn derived_gates_appear_in_the_preview() {
         let root = scratch_root("gates");

@@ -8,9 +8,8 @@
   `~/.upstroke/runs/`, where they folded the latest run of the repository they were started in;
   the draw counts the current calendar month (UTC), which is what `monthly_allowance` is measured
   against. `[capacity] scope = "repo"`, or `upstroke capacity --scope repo`, folds this
-  repository's runs alone. Both views also read a schema-4 log now: they read it with the
-  sequential reader before, which refuses one, so a run created by the current engine contributed
-  a warning and no figure. Nothing routes on any of this yet.
+  repository's runs alone. A run that cannot be read still shows nothing and is named in a
+  warning, and the scope line now counts such runs. Nothing routes on any of this yet.
 - `upstroke capacity --refresh` is new: the capacity tracker. For each pool that names a
   `usage_provider` in `pools.toml` it asks that provider's documented usage endpoint what the
   account has drawn this month, through a `curl` subprocess, and stores the answer under
@@ -27,6 +26,9 @@
   and a run that takes a setting from the machine-level file says which. The machine-level file
   must be a valid configuration on its own. A repository with no such file beside its pools file
   is read exactly as before.
+- `upstroke capacity` and `validate` now show the usage-limit signals and spend of a schema-4 run
+  when it is the repository's latest. They used to warn that its log was not a valid event and
+  report no run.
 - When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
   that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
   session under its `profile`, instead of waiting for the reset; with every pool of the agent

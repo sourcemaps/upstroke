@@ -90,8 +90,9 @@ use std::path::{Path, PathBuf};
 use crate::error::UpstrokeError;
 
 use super::{
-    CreatingMarker, EVENT_LOG, MARKER, PrivateHalfOwnership, RepoKey, RetainReason, RunDirClass,
-    UnboundShape, classify_run_dir, fs, prove_private_half_ownership, public_dir, runs_root,
+    CreatingMarker, EVENT_LOG, MARKER, PrivateHalfOwnership, QUESTIONS_DIR, RepoKey, RetainReason,
+    RunDirClass, UnboundShape, classify_run_dir, fs, prove_private_half_ownership, public_dir,
+    runs_root,
 };
 
 /// Every run in this repo, oldest first.
@@ -777,7 +778,7 @@ fn find_question_observed(
     let mut matches: Vec<FoundQuestion> = Vec::new();
     for run_id in names_classified(&census, listed_as_run) {
         let public = public_dir(repo_root, &run_id);
-        let Ok(entries) = fs::read_dir(public.join("questions")) else {
+        let Ok(entries) = fs::read_dir(public.join(QUESTIONS_DIR)) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -847,7 +848,7 @@ mod tests {
         listed_as_husk, listed_as_run, public_dir, resolve_in_census, resolve_observed,
         resolve_run_id, unclassified,
     };
-    use crate::rundir::tests::{commit_run, husk_run, question_in, scratch};
+    use crate::rundir::tests::{commit_run, husk_run, question_in, questions_not_a_dir, scratch};
 
     /// The three classifications, crossed with the three readers that filter on
     /// them.
@@ -1476,5 +1477,30 @@ mod tests {
             absent.contains("no question with that id") && absent.contains(UNREAD),
             "an absence is not a fact about a census that could not read every run: {absent}"
         );
+    }
+
+    /// A full question id answers beside runs whose `questions` cannot be
+    /// listed, as `find_question`'s doc states: it names one file. This holds
+    /// that contract against #402's first repair, which returned early on such
+    /// a run and was withdrawn. What a prefix or an absent id should do beside
+    /// one is left to the open finding `PR402-QUESTION-SEARCH-SWALLOWS-READ-ERRORS`.
+    #[test]
+    fn a_full_question_id_answers_beside_runs_whose_questions_cannot_be_listed() {
+        const BEFORE: &str = "01Q00000000000000000000000";
+        const HOLDER: &str = "01Q00000000000000000000001";
+        const AFTER: &str = "01Q00000000000000000000002";
+
+        let tree = scratch("questionsbeside");
+        let repo = tree.path().join("repo");
+        let before = questions_not_a_dir(&repo, BEFORE);
+        question_in(&repo, HOLDER, "q-ONLY");
+        let after = questions_not_a_dir(&repo, AFTER);
+        assert!(before.is_file(), "a file stands at {}", before.display());
+        assert!(after.is_file(), "a file stands at {}", after.display());
+
+        let found = find_question(&repo, "q-ONLY")
+            .expect("a full question id names one file, whatever else went unread");
+        assert_eq!(found.run_id, HOLDER);
+        assert_eq!(found.question_id, "q-ONLY");
     }
 }

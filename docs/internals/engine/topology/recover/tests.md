@@ -830,6 +830,19 @@ two records the creator left, and nothing new.
 `committed.json`'s `run_started_sha256` must equal the digest of the
 committed first line, and a mismatch refuses quoting **both** numbers.
 
+## `fn resume_refuses_commit_record_digest_that_is_not_a_digest_as_malformed() {`
+
+A `committed.json` whose `run_started_sha256` is `refs/heads/master`
+refuses as **malformed**, not as a digest that moved (`SWEEP-CLASSIFY-011`).
+
+The negative assertion is the point. Before the shape check, this value
+reached the equality comparison and was refused as "one of the two moved",
+quoting the log's real digest beside it. So "refuses" alone would pass on
+the unrepaired code. The test asserts that the refusal says "malformed",
+quotes the value, and contains neither "moved" nor the line's digest. Like
+the mismatch above it, the refusal is at (a), before the barrier's
+`Event.OpenLog`.
+
 ## `fn resume_refuses_owner_record_runner_mismatch() {`
 
 `owner.json.runner` must equal `run_started(4).runner` exactly, and the

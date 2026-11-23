@@ -849,13 +849,48 @@ struct RunStartedIdentity {
     run_id: String,
 }
 
+/// What every spelling of the first-line digest starts with.
+const DIGEST_PREFIX: &str = "sha256:";
+
+/// Lowercase hexadecimal digits after [`DIGEST_PREFIX`]: SHA-256's 32 bytes.
+const DIGEST_HEX_DIGITS: usize = 64;
+
 /// The digest of a `run_started` line's exact bytes, for the commit record.
 ///
 /// `run_creation`: "run_started_sha256 = the digest of the exact run_started
 /// line bytes about to be appended".
+///
+/// **This is the one spelling of that digest** (`SWEEP-CLASSIFY-011`):
+/// `sha256:` and the 64 lowercase hex digits of SHA-256 over the line.
+/// [`crate::events::log::first_line_digest`], which writes `committed.json`'s
+/// field at P5b, finds the line in a log and delegates here, so the value
+/// written and the value recovery recomputes come from one `format!`.
+/// [`is_run_started_sha256`] recognises the spelling when a value comes back
+/// off disk.
 #[must_use]
 pub fn run_started_sha256(line: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(line))
+    format!("{DIGEST_PREFIX}{:x}", Sha256::digest(line))
+}
+
+/// Whether `value` is a digest in the spelling [`run_started_sha256`] writes:
+/// `sha256:` followed by exactly 64 lowercase hexadecimal digits.
+///
+/// The shape of `workspace_manager::object::is_object_id`: a predicate over
+/// the string as it was read, rather than a newtype carried through a serde
+/// field. An empty value, a truncated digest, a ref name, bare hex without the
+/// prefix, and an uppercase digit are none of them a digest. Uppercase is
+/// refused where `is_object_id` accepts it because nothing here hands the value
+/// to a parser that folds case: the commit record is compared byte for byte
+/// against [`run_started_sha256`]'s output, and a value that spelling never
+/// produces could only ever be a mismatch.
+#[must_use]
+pub fn is_run_started_sha256(value: &str) -> bool {
+    value.strip_prefix(DIGEST_PREFIX).is_some_and(|hex| {
+        hex.len() == DIGEST_HEX_DIGITS
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 #[cfg(test)]

@@ -490,7 +490,8 @@ Verify both records against the run record (a0) read.
 ### Errors
 
 [`UpstrokeError::Refused`] for an absent private half, an absent
-or unparseable record, or a disagreement in any of the six
+or unparseable record, a commit record whose `run_started_sha256`
+is not a `sha256:` digest, or a disagreement in any of the six
 fields.
 
 ## `pub fn verify(locks: LocksHeld, repo_key: &RepoKey) -> Result<Self, UpstrokeError> {` › `if let Some(field) = started.runner.difference(&owner.runner) {`
@@ -501,6 +502,24 @@ owner.json.runner** — before its RunnerPreflight". The
 comparison is `difference`, which names WHICH field moved:
 "the runner disagrees" is not something an operator can act
 on, and the field is.
+
+## `pub fn verify(locks: LocksHeld, repo_key: &RepoKey) -> Result<Self, UpstrokeError> {` › `if !rundir::is_run_started_sha256(&commit.run_started_sha256) {`
+
+`SWEEP-CLASSIFY-011`: the `sha256:<64 lowercase hex>` spelling is
+checked where `committed.json` is read, and a record whose digest
+is not a digest is refused as **malformed** before it is compared.
+
+Without this the equality check below is the only check, and it
+cannot tell the two failures apart: a value such as
+`refs/heads/master` is unequal to every digest, so it was reported
+as "one of the two moved after the run committed". That sends an
+operator looking for a log that changed under a record that was
+never well-formed. The predicate is
+[`rundir::is_run_started_sha256`], the recogniser for the one
+spelling [`rundir::run_started_sha256`] writes, so the value
+accepted here is exactly the set the comparison could ever match.
+A well-formed digest passes through to the equality check
+unchanged, and its refusal still quotes both digests.
 
 ## `impl RecordsVerified` › `pub fn locks(&self) -> &LocksHeld {`
 
