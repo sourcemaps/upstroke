@@ -13,8 +13,9 @@ failures up an explicit model chain, and commits only what passes.
 loop, and never calls a model API. Agents edit; the engine subprocesses their official CLIs and
 owns git.
 
-The binding invariants are `DESIGN.md` §4 (`design/04_design_invariants.md`). There are seven.
-The ones a change is most likely to trip over:
+The binding invariants are `DESIGN.md` §4 (`design/04_design_invariants.md`); read it in full
+before touching the engine, the event log, or anything that handles capacity or questions. Of its
+seven, the ones a change is most likely to trip over:
 
 - **Agents edit files; the engine owns git.** Agents are told never to commit.
 - **The engine never speaks HTTP.** All model interaction is inside agent subprocesses.
@@ -23,30 +24,20 @@ The ones a change is most likely to trip over:
   replay-then-continue. There is no second path.
 - **Official CLIs only.** No ToS-violating proxies.
 
-Read §4 in full before touching the engine, the event log, or anything that handles capacity or
-questions.
-
 ## Where the project is
 
-`0.1.0` is released: the sequential conductor works end to end. v0.2 is in progress. Its
-parallel-execution machinery (worktree-per-task, the compare-and-swap merge queue, the optional
-container runner, the topology layer) reached master on 2026-09-01, inert by default, and PR12
-activates it: `upstroke run` creates schema-4 runs and `upstroke resume` continues them, while a
-run of schemas 1-3 still resumes, reports and exports on the sequential path.
-`export-decisions` landed 2026-08-12. Still to come: capacity-driven routing (the capacity engine
-ships read-only), more adapters, notifiers. No `0.2.0` tag exists. The build order is `DESIGN.md`
-§21 and it is deliberate; check where the project is before adding something out of sequence.
+`0.1.0` is released and v0.2 is in progress. The build order is `DESIGN.md` §21 and it is
+deliberate; check where the project is before adding something out of sequence.
 
 **`DESIGN.md` is the only living authority for product design**, indexed at the root and split
 into `design/` by section. `CODING_STANDARDS.md` indexes the implementation standards in
 `standards/`. `MAINTAINING.md` is the change lifecycle. When a decision changes the design, the
-section changes in the same pull request; there is no separate decision record to keep in step
-(the decisions, proposals and acceptance directories were retired on 2026-09-03; the DESIGN.md
-index says where each record's substance now lives).
+section changes in the same pull request; there is no separate decision record to keep in step.
 
 ## Gates
 
-CI enforces these on every pull request to master. Run them from the repository root:
+CI enforces these on every pull request to master. Run them from the repository root, and invoke
+the scripts by path from there:
 
 ```bash
 cargo fmt --check
@@ -64,11 +55,8 @@ bash .github/scripts/test-pr-ready-audit.sh
 The crate defines no features today, so `--all-features` is a no-op; use the CI form regardless.
 `1.85.0` is the MSRV and CI pins it; there is **no** `rust-toolchain.toml`, so toolchain selection
 is explicit at call sites. The 6 `test-*.sh` gates in `.github/scripts/` run in CI's `lint` job.
-`test-release-record.sh` needs `jq`. `test-pr-policy.sh` derives its own directory with
-`${BASH_SOURCE[0]%/*}`, which works from any directory except one: invoked by bare name from
-inside `.github/scripts/`, the expansion strips nothing and it fails. Invoke it by path, as above.
-These are CI's commands; a shared build machine may wrap `cargo` and assign target directories
-itself, and its wrapper is the way to run them there.
+`test-release-record.sh` needs `jq`. These are CI's commands; a shared build machine may wrap
+`cargo` and assign target directories itself, and its wrapper is the way to run them there.
 
 ## Hard conventions
 
@@ -94,13 +82,12 @@ Read the `standards/` sections a change touches. In particular:
 
 `MAINTAINING.md` is authoritative. In outline: draft PR early; the ten gates and both required
 contexts (`upstroke-ci`, `upstroke-pr-policy`) green; one frontier review of the exact green head
-(`gpt-5.6-sol` at `max`, the verdict posted to the PR as one SHA-bound comment); triage: serious
-P1s relevant to the change are fixed and re-reviewed; a `MUST` deviation in touched code and any
-finding carrying a failing test, reproduction or mutation witness are fixed whatever their label;
-everything else is fixed or logged as a tech-debt ledger row; enqueue once green, and the merge
-queue lands the merge commit after both contexts pass on the entry it builds. The PR body
-must carry the six sections and the exact canonical ledger header; run `validate-pr-body.sh`
-against it locally.
+(`gpt-5.6-sol` at `max`, the verdict posted to the PR as one SHA-bound comment); triage: serious P1s
+relevant to the change are fixed and re-reviewed; a `MUST` deviation in touched code and any finding
+carrying a failing test, reproduction or mutation witness are fixed whatever their label; everything
+else is fixed or logged as a tech-debt ledger row; enqueue once green, and the merge queue lands the
+merge commit after both contexts pass on the entry it builds. The PR body must carry the six
+sections and the exact canonical ledger header; run `validate-pr-body.sh` against it locally.
 
 Merging is the owner's act, and since 2026-09-12 the delegation of it is standing rather than
 written per PR: the agent doing the work merges once the bar is met, and the body records that the
@@ -147,50 +134,35 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `CODING_STANDARDS.md`, `standards/` | Implementation standards, one section per file; `standards/SWEEP.md` |
 | `MAINTAINING.md` | Change lifecycle, trust boundary, release contract |
 | `CONTRIBUTING.md` | Contributor rules and CLA |
-| `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is also the GitHub Pages source for upstroke.rs, so anything added there is published |
+| `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is the GitHub Pages source for upstroke.rs, so anything added there is published |
 | `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
 | `scripts/pr-ready-audit.sh` | Lane readiness audit: maintains `lane:*` and `ready-to-merge`, enqueues with `--enqueue` |
-| `findings/` | The standing finding ledger, one file per open finding, moved here from under `reviews/` on 2026-09-12; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
-| `reviews/` | `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections, and the dated review records still on master; historical review records moved to the private lab repository on 2026-09-04 |
+| `findings/` | The standing finding ledger, one file per open finding; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
+| `reviews/` | `reviews/FINDINGS.md`, the predecessor ledger, closed to new sections, and the dated review records still on master; historical review records are in the private lab repository |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
-
-`src/` is one crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters,
-with `proc/` for subprocess handling), `engine/` (the conductor), `topology/` (the v0.2 execution
-topology), `runner/` (host and container execution), `events/`, `validate/`, `status/`,
-`effects/`, `connect/`, and flat modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`,
-`capacity.rs`, `rundir.rs`, `workspace.rs`, `workspace_manager.rs`, `export.rs`. Large modules
-are being split into per-concern children; check the tree rather than this list.
+| `src/` | One crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters, with `proc/` for subprocess handling), `engine/` (the conductor), `topology/` (the v0.2 execution topology), `runner/` (host and container execution), `events/`, `validate/`, `status/`, `effects/`, `connect/`, and flat modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`, `capacity.rs`, `rundir.rs`, `workspace.rs`, `workspace_manager.rs`, `export.rs`. Large modules are being split into per-concern children; check the tree rather than this list |
 
 ## Traps that have already cost time
 
-**Exit codes and output disagree.** `codex login status` prints "Not logged in" and exits **0**.
-`git rev-parse <unknown-ref>` echoes its argument to stdout and errors only on stderr. Use
-`git rev-parse --verify --quiet`, and never trust a bare `$?`.
+- **Exit codes and output disagree.** `codex login status` prints "Not logged in" and exits
+  **0**; `git rev-parse <unknown-ref>` echoes its argument to stdout and errors only on stderr.
+  Use `git rev-parse --verify --quiet`, and never trust a bare `$?`.
+- **Non-interactive shells get nothing from `~/.bashrc`.** It opens with
+  `case $- in *i*) ;; *) return;; esac`, and agent subprocesses and `ssh host 'cmd'` are
+  non-interactive; anything they need must be sourced above that guard.
+- **Verify by hash, not by line count.** A one-character edit does not move a line count.
+- **A worker that dies without a report may have left a mutation applied.** Diff against the last
+  verified state before trusting a tree.
+- **Imperative success is not persistent success.** Verify that state survives a reboot.
+- **Concurrent suites must not share an unset `CARGO_TARGET_DIR`.** The container pre-clean key
+  is fixed when it is unset (`src/runner/container/fake.rs`, `R5-SEAMS-006`), so two bare
+  `cargo test` runs on one machine remove each other's live Docker containers; give every
+  concurrent run its own target directory, by a build wrapper that owns them or an explicit
+  `CARGO_TARGET_DIR` per run. CI is unaffected.
+- **`src/export.rs` pins sentences in the docs.** Its tests `include_str!` `README.md`,
+  `MAINTAINING.md`, `design/15_design_event_log_resume_run_layout.md` and
+  `design/25_design_export_decisions_schema.md`; a rewording there fails the suite.
 
-**Non-interactive shells get nothing from `~/.bashrc`.** It opens with
-`case $- in *i*) ;; *) return;; esac`. Agent subprocesses and `ssh host 'cmd'` are
-non-interactive; anything they need must be sourced above that guard.
-
-**Verify by hash, not by line count.** A one-character edit does not move a line count.
-
-**A worker that dies without a report may have left a mutation applied.** Diff against the last
-verified state before trusting a tree.
-
-**Imperative success is not persistent success.** Verify that state survives a reboot.
-
-**Concurrent suites must not share an unset `CARGO_TARGET_DIR`.** The container pre-clean key is
-fixed when the variable is unset (`src/runner/container/fake.rs`, `R5-SEAMS-006`), so two bare
-`cargo test` runs on one machine remove each other's live Docker containers mid-run. Concurrent
-runs need distinct target directories, assigned however the machine assigns them (a build wrapper
-that owns them, or an explicit `CARGO_TARGET_DIR` per run where nothing does); never two runs on
-one unset value. CI is unaffected.
-
-**`src/export.rs` pins sentences in the docs.** Its tests `include_str!` `README.md`,
-`MAINTAINING.md`, `design/15_design_event_log_resume_run_layout.md` and
-`design/25_design_export_decisions_schema.md`; a rewording there fails the suite.
-
-**`reviews/findings/` must not exist.** The finding ledger moved to `findings/` on 2026-09-12 (PR
-#276), and git tracks files, not directories: a branch cut before the move that adds a finding under
-the old prefix merges with no conflict and recreates the directory, holding findings nothing reads.
-`test-docs-consistency.sh` (C5) fails on any tracked path under the old prefix; the remedy is to
-rebase onto `master` and `git mv` the file under `findings/`.
+- **`reviews/findings/` must not exist.** A branch cut before the finding ledger moved to
+  `findings/` can recreate it with no merge conflict, and `test-docs-consistency.sh` (C5) fails on
+  any tracked path under it; rebase onto `master` and `git mv` the file under `findings/`.
