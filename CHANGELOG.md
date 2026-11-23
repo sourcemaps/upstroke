@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `upstroke capacity` and `validate` now show the usage-limit signals and spend of a schema-4 run
+  when it is the repository's latest. They used to warn that its log was not a valid event and
+  report no run.
 - When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
   that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
   session under its `profile`, instead of waiting for the reset; with every pool of the agent

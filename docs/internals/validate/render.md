@@ -94,6 +94,12 @@ strictly more by being allowed to spawn the vendors' CLIs.
 The same reason the review line says "if installed": a preview that reads as
 a promise is worse than one that reads as a plan.
 
+It takes `capacity::LatestRun` whole, because the line under the estimates
+has three forms and needs all of it. A run that was folded is named as the
+source of the draw. A run that exists but could not be read is named as
+that, by id, with estimates resting on configuration alone. Only a
+repository with no run says "no run in this repository yet".
+
 ## `if let Some(binding) = second_opinion {`
 
 §11.3: a second reviewer is a per-task routing decision like any other,

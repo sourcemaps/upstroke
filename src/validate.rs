@@ -211,7 +211,7 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
             render::to_row(task, chain, second)
         })
         .collect();
-    let (observations, run_id) = latest_run_observations(
+    let latest = latest_run_observations(
         &opts.config_root,
         !analysis.config.pools.is_empty(),
         &mut warnings,
@@ -220,7 +220,7 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
         rows,
         warnings,
         strategy: render::strategy_echo(&analysis.config),
-        capacity: render::capacity_echo(&analysis.config, &observations, run_id.as_deref()),
+        capacity: render::capacity_echo(&analysis.config, &latest),
         review: render::review_echo(&reviews, analysis.config.review_cross_family),
         effort: render::effort_echo(&analysis.config),
         gates: analysis.gates.into_iter().map(|gate| gate.name).collect(),
@@ -233,26 +233,16 @@ fn latest_run_observations(
     repo_root: &Path,
     has_pools: bool,
     warnings: &mut Vec<String>,
-) -> (capacity::Observations, Option<String>) {
-    let none = || (capacity::Observations::default(), None);
+) -> capacity::LatestRun {
     if !has_pools {
-        return none();
+        return capacity::LatestRun::default();
     }
-    let Some(run_id) = crate::rundir::latest_run(repo_root) else {
-        return none();
-    };
-    let events_path = crate::rundir::public_dir(repo_root, &run_id).join(crate::rundir::EVENT_LOG);
-    let mut ignored = Vec::new();
-    match crate::events::read_all(&events_path, &mut ignored) {
-        Ok(events) => (capacity::observe(&events), Some(run_id)),
-        Err(error) => {
-            warnings.push(format!(
-                "run {run_id} exists but its event log could not be folded for self-metered \
-                 spend ({error}); the capacity block below rests on rate-limit signals alone"
-            ));
-            none()
-        }
+    let mut read = Vec::new();
+    let latest = capacity::latest_run_observations(repo_root, &mut read);
+    if latest.run_id.is_some() && !latest.folded {
+        warnings.append(&mut read);
     }
+    latest
 }
 
 impl Report {
@@ -1114,6 +1104,96 @@ mod tests {
             rendered.contains("no run in this repository yet"),
             "rendered:\n{rendered}"
         );
+    }
+
+    fn claude_max_pools_file(dir: &Path) -> PathBuf {
+        let pools = dir.join("pools.toml");
+        fs::write(
+            &pools,
+            "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \
+             \"claude-code\"\nwindow = \"5h\"\nsources = [\"signals\", \"self\"]\n",
+        )
+        .expect("pools");
+        pools
+    }
+
+    #[test]
+    fn the_capacity_block_shows_the_pool_a_schema_4_latest_run_signalled_as_exhausted() {
+        const RUN: &str = "01VALIDATESCHEMA4000000001";
+        const RESET: &str = "2026-11-11T05:30:00Z";
+        let dir = scratch_root("schema4signal");
+        let mut o = opts("fixtures/sample-plan.md");
+        o.pools_path = Some(claude_max_pools_file(dir.path()));
+        let _run =
+            capacity::tests::schema_4_run_signalling(&o.config_root, RUN, "claude-max", RESET);
+
+        let report = run(&o).expect("validates");
+        let rendered = report.render();
+
+        assert!(
+            rendered.contains(&format!("claude-max: exhausted [signal] resets {RESET}")),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(&format!(
+                "self-metered draw is folded from run {RUN}, the latest in this repository"
+            )),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("no run in this repository yet"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains(RUN) || warning.contains("could not be")),
+            "warnings: {:?}",
+            report.warnings
+        );
+    }
+
+    #[test]
+    fn the_capacity_block_says_a_latest_run_it_could_not_read_could_not_be_read() {
+        const RUN: &str = "01VALIDATEUNREAD0000000001";
+        let dir = scratch_root("unreadrun");
+        let mut o = opts("fixtures/sample-plan.md");
+        o.pools_path = Some(claude_max_pools_file(dir.path()));
+        capacity::tests::legacy_run_with_a_line_that_is_not_json(&o.config_root, RUN);
+
+        let report = run(&o).expect("an unreadable run beside the plan does not refuse a preview");
+        let rendered = report.render();
+
+        assert!(
+            rendered.contains(&format!(
+                "the latest run in this repository ({RUN}) could not be read, so estimates rest \
+                 on configuration alone"
+            )),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("no run in this repository yet"),
+            "rendered:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("claude-max: unknown [unknown]"),
+            "rendered:\n{rendered}"
+        );
+        let naming_the_run: Vec<&String> = report
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains(&format!("run {RUN}")))
+            .collect();
+        let [warning] = naming_the_run.as_slice() else {
+            panic!("one warning names the run: {:?}", report.warnings);
+        };
+        assert!(
+            warning.contains("line 2 is not a valid event")
+                && warning.contains("nothing from it is shown"),
+            "{warning}"
+        );
+        assert!(!warning.contains("signals alone"), "{warning}");
     }
 
     #[test]
