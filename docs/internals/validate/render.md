@@ -98,6 +98,13 @@ account of what it folded.
 The same reason the review line says "if installed": a preview that reads as
 a promise is worse than one that reads as a plan.
 
+It takes `capacity::Gathered` whole, because the `scope:` line under the
+estimates is `Gathered::describe`'s and needs all of it. Runs that were
+folded are counted, with the repositories they belong to. Runs that were
+found and could not be read are counted as that, beside the warnings that
+name them. Only a scope with no run at all says "no run on this machine
+yet", or "in this repository" under the repository scope.
+
 ## `if let Some(binding) = second_opinion {`
 
 §11.3: a second reviewer is a per-task routing decision like any other,

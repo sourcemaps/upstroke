@@ -731,14 +731,8 @@ agent = \"claude-code\"
     mod fold {
         use std::time::Duration;
 
-        use crate::events::{
-            AttemptRecord, Event, EventBody, FailureRecord, PoolExhausted, RunStarted,
-        };
+        use crate::events::{AttemptRecord, Event, EventBody, FailureRecord, RunStarted};
         use crate::ladder::{FailureKind, FailureOrigin};
-        use crate::topology::events::{
-            AttemptFinished4, AttemptNumber, AttemptSettlement, GenerationId, LeaseDisposition,
-            SettlementTransition, TopologyEvent, TopologyEventBody,
-        };
 
         pub(super) fn record(pool: &str, usd: Option<f64>, limited: bool) -> AttemptRecord {
             AttemptRecord {
@@ -804,61 +798,6 @@ agent = \"claude-code\"
             }
         }
 
-        fn topology(ts: &str, body: TopologyEventBody) -> TopologyEvent {
-            TopologyEvent {
-                ts: ts.to_owned(),
-                body,
-            }
-        }
-
-        pub(super) fn topology_started(ts: &str) -> TopologyEvent {
-            topology(
-                ts,
-                TopologyEventBody::RunStarted {
-                    data: Box::new(crate::engine::topology::settle::tests::run_started()),
-                },
-            )
-        }
-
-        pub(super) fn topology_signalled(ts: &str, pool: &str, reset_at: &str) -> TopologyEvent {
-            topology(
-                ts,
-                TopologyEventBody::PoolExhausted {
-                    data: PoolExhausted {
-                        pool: pool.to_owned(),
-                        agent: "claude-code".to_owned(),
-                        reset_at: Some(reset_at.to_owned()),
-                        detail: "limit".to_owned(),
-                    },
-                },
-            )
-        }
-
-        pub(super) fn topology_finished(
-            ts: &str,
-            attempt: u32,
-            record: AttemptRecord,
-        ) -> TopologyEvent {
-            topology(
-                ts,
-                TopologyEventBody::AttemptFinished {
-                    data: Box::new(AttemptFinished4 {
-                        key: crate::topology::registry::TaskKey(0),
-                        generation: GenerationId(0),
-                        attempt: AttemptNumber(attempt),
-                        record: Box::new(AttemptRecord { attempt, ..record }),
-                        settlement: AttemptSettlement::Closed {
-                            transition: SettlementTransition::Deferred {
-                                defers: 1,
-                                reason: "deferred".to_owned(),
-                            },
-                            lease: LeaseDisposition::PredictedReleased,
-                        },
-                    }),
-                },
-            )
-        }
-
         pub(super) fn lines<T: serde::Serialize>(events: &[T]) -> String {
             events
                 .iter()
@@ -875,13 +814,22 @@ agent = \"claude-code\"
     /// holds a sequential run, found by listing its own run directory, and
     /// `elsewhere` a schema-4 run, found only through the owner record its
     /// private half keeps under the machine directory.
+    ///
+    /// The schema-4 run is a real one: its log is appended through the event
+    /// funnel and accepted by the fold line by line, because the gatherer
+    /// reads it with the checked observer, which replays it. Its fixture
+    /// stamps every event `2026-11-11T03:00:00Z`. It met a usage limit on
+    /// `claude-max` and then landed an attempt that drew $20 on `api`.
     struct TwoRepositories {
         _tree: ScratchTree,
+        _elsewhere: crate::capacity::tests::Schema4Run,
         machine: PathBuf,
         here: PathBuf,
+        gone: PathBuf,
     }
 
     const RESET: &str = "2026-11-23T15:00:00Z";
+    const ELSEWHERE_RUN: &str = "01TRACKERELSEWHERE00000001";
 
     impl TwoRepositories {
         fn new(tag: &str) -> Self {
@@ -897,8 +845,31 @@ agent = \"claude-code\"
             )
             .expect("the pools file");
 
+            let run = crate::capacity::tests::schema_4_run_limited_then_drawing(
+                &elsewhere,
+                ELSEWHERE_RUN,
+                ("claude-max", RESET),
+                ("api", 20.0),
+            );
+            let private = machine.join("runs").join(ELSEWHERE_RUN);
+            std::fs::create_dir_all(&private).expect("the run's private half");
+            std::fs::write(
+                private.join(crate::rundir::OWNER_RECORD),
+                serde_json::json!({
+                    "run_id": ELSEWHERE_RUN,
+                    "repo_key": "0123456789abcdef",
+                    "public_dir": crate::rundir::public_dir(&elsewhere, ELSEWHERE_RUN),
+                    "incarnation": "i1",
+                    "runner": {"a field": "this reader does not need"},
+                })
+                .to_string(),
+            )
+            .expect("the owner record");
+
             let fixture = Self {
+                gone: tree.path().join("gone"),
                 _tree: tree,
+                _elsewhere: run,
                 machine,
                 here,
             };
@@ -916,42 +887,19 @@ agent = \"claude-code\"
                     ),
                 ],
             );
+            fixture
+        }
 
-            let public = elsewhere.join(".upstroke").join("runs").join("01ELSEWHERE");
-            std::fs::create_dir_all(&public).expect("the other repository's run directory");
-            std::fs::write(
-                public.join(crate::rundir::EVENT_LOG),
-                fold::lines(&[
-                    fold::topology_started("2026-11-22T09:00:00Z"),
-                    fold::topology_finished(
-                        "2026-11-22T10:00:00Z",
-                        1,
-                        fold::record("api", Some(20.0), false),
-                    ),
-                    fold::topology_signalled("2026-11-23T10:00:00Z", "claude-max", RESET),
-                    fold::topology_finished(
-                        "2026-11-23T10:00:00Z",
-                        2,
-                        fold::record("claude-max", None, true),
-                    ),
-                ]),
-            )
-            .expect("the other repository's log");
-            let private = fixture.machine.join("runs").join("01ELSEWHERE");
-            std::fs::create_dir_all(&private).expect("the run's private half");
+        /// An owner record under the machine directory, as a run's private
+        /// half keeps one.
+        fn owner_record(&self, directory: &str, run_id: &str, public_dir: &Path) {
+            let private = self.machine.join("runs").join(directory);
+            std::fs::create_dir_all(&private).expect("a private half");
             std::fs::write(
                 private.join(crate::rundir::OWNER_RECORD),
-                serde_json::json!({
-                    "run_id": "01ELSEWHERE",
-                    "repo_key": "0123456789abcdef",
-                    "public_dir": public,
-                    "incarnation": "i1",
-                    "runner": {"a field": "this reader does not need"},
-                })
-                .to_string(),
+                serde_json::json!({"run_id": run_id, "public_dir": public_dir}).to_string(),
             )
-            .expect("the owner record");
-            fixture
+            .expect("an owner record");
         }
 
         fn legacy_run(&self, run_id: &str, events: &[crate::events::Event]) {
@@ -1028,7 +976,7 @@ agent = \"claude-code\"
         assert_eq!(
             subscription.remaining,
             crate::capacity::Remaining::Exhausted,
-            "a limit another repository's run met an hour ago is this pool's state"
+            "a limit another repository's run met is this pool's state until something serves"
         );
         assert_eq!(subscription.reset_at.as_deref(), Some(RESET));
 
@@ -1109,44 +1057,49 @@ agent = \"claude-code\"
     #[test]
     fn a_run_whose_log_cannot_be_read_is_named_and_the_rest_are_still_folded() {
         let fixture = TwoRepositories::new("tracker-machine-unread");
-        let private = fixture.machine.join("runs").join("01GONE");
-        std::fs::create_dir_all(&private).expect("a private half");
-        std::fs::write(
-            private.join(crate::rundir::OWNER_RECORD),
-            serde_json::json!({
-                "run_id": "01GONE",
-                "public_dir": fixture.machine.join("no-such-repository"),
-            })
-            .to_string(),
-        )
-        .expect("an owner record whose repository was deleted");
-        let mislabelled = fixture.machine.join("runs").join("01MISLABELLED");
-        std::fs::create_dir_all(&mislabelled).expect("a private half");
-        std::fs::write(
-            mislabelled.join(crate::rundir::OWNER_RECORD),
-            serde_json::json!({"run_id": "01OTHER", "public_dir": fixture.here}).to_string(),
-        )
-        .expect("an owner record naming another run");
+        fixture.owner_record(
+            "01GONE",
+            "01GONE",
+            &crate::rundir::public_dir(&fixture.gone, "01GONE"),
+        );
+        fixture.owner_record("01MISLABELLED", "01OTHER", &fixture.here);
+        fixture.owner_record(
+            "01MISPLACED",
+            "01MISPLACED",
+            &fixture.machine.join("not-a-run-directory"),
+        );
         std::fs::create_dir_all(fixture.machine.join("runs").join("01LEGACY"))
             .expect("a private half with no owner record");
 
         let report = fixture.report(None);
-        assert_eq!((report.gathered.runs, report.gathered.unread), (2, 1));
-        assert_eq!(report.warnings.len(), 2, "{:?}", report.warnings);
-        assert!(
+        assert_eq!(
+            (
+                report.gathered.runs,
+                report.gathered.repositories,
+                report.gathered.unread
+            ),
+            (2, 2, 1)
+        );
+        assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
+        let warned = |needle: &str| {
             report
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("run 01GONE could not be folded")),
-            "{:?}",
+                .any(|warning| warning.contains(needle))
+        };
+        assert!(
+            warned("run 01GONE could not be read") && warned("nothing from it is shown"),
+            "a run whose repository was deleted is unread, and named: {:?}",
             report.warnings
         );
         assert!(
-            report
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("names run `01OTHER`")),
-            "{:?}",
+            warned("names run `01OTHER`"),
+            "a record naming another run than its directory is not followed: {:?}",
+            report.warnings
+        );
+        assert!(
+            warned("not-a-run-directory") && warned("so it is not followed"),
+            "nor is one whose public directory is not a run directory: {:?}",
             report.warnings
         );
         assert_eq!(
@@ -1155,6 +1108,14 @@ agent = \"claude-code\"
                 .as_ref()
                 .and_then(|drawn| drawn.usd),
             Some(30.0)
+        );
+        let rendered = report.render();
+        assert!(
+            rendered.contains(
+                "on this machine; the draw counts this calendar month (UTC); 1 more run could \
+                 not be read and nothing from it is shown (a warning names it)"
+            ),
+            "the scope line counts what the warnings name: {rendered}"
         );
     }
 

@@ -1,16 +1,17 @@
 //! Capacity evidence: what one event log says about pools, in a form that can
 //! be folded across runs (DESIGN.md §13).
 //!
-//! An event log speaks about capacity in three ways: a `pool_exhausted`
+//! An event log speaks about capacity in four ways: a `pool_exhausted`
 //! signal, a settled attempt whose record says which pools served and which
-//! refused, and a review pass that drew on a pool. `observe` and
-//! `exhausted_pools_of` used to read those straight off one log each. Tracking
-//! capacity for the machine means reading them off every run of every
-//! repository, in the order they happened, and a log's events cannot be
-//! interleaved with another log's while they are still two different event
-//! types. So each log is first reduced to [`Evidence`], which names pools and
-//! nothing else, and [`fold`] is the one place the rules are applied, whether
-//! the evidence came from one log or from fifty.
+//! refused, an interrupted attempt that drew on the pool it started on, and a
+//! review pass that drew on a pool. Tracking capacity for the machine means
+//! reading those off every run of every repository, in the order they
+//! happened, and a log's events cannot be interleaved with another log's
+//! while they are still two different event types. So each log is first
+//! reduced to [`Evidence`], which names pools and nothing else, and [`fold`]
+//! is the one place the rules are applied, whether the evidence came from one
+//! log or from fifty: `observe`, `observe_topology` and `exhausted_pools_of`
+//! are one call each into it.
 //!
 //! Everything here is a pure function over values someone else read.
 
@@ -100,6 +101,18 @@ fn promoted(record: &AttemptRecord) -> What {
     }
 }
 
+/// One attempt that drew on `pool` and recorded no cost.
+fn unpriced(pool: &str) -> What {
+    What::Work {
+        served: Vec::new(),
+        limited: None,
+        draws: vec![Draw {
+            pool: pool.to_owned(),
+            usd: None,
+        }],
+    }
+}
+
 fn reviews(reviews: &[ReviewRecord]) -> What {
     What::Work {
         served: Vec::new(),
@@ -146,10 +159,16 @@ pub fn of_legacy(events: &[Event]) -> Vec<Evidence> {
 /// Review passes of a merge verification draw on pools without settling an
 /// attempt. They are evidence of spend and of nothing else, on the same four
 /// events `engine::topology::select::Spend::replay` charges.
+///
+/// An interrupted attempt settles with no record, so nothing says what it
+/// cost. It still drew: it is one unpriced draw on the pool its
+/// `attempt_started` named, and none where that start is missing or named no
+/// pool.
 #[must_use]
 pub fn of_topology(events: &[TopologyEvent]) -> Vec<Evidence> {
     let mut out = Vec::new();
     let mut held: Vec<Evidence> = Vec::new();
+    let mut started_on = BTreeMap::new();
     for event in events {
         let when = at(&event.ts);
         let dated = |what| Evidence { at: when, what };
@@ -162,6 +181,21 @@ pub fn of_topology(events: &[TopologyEvent]) -> Vec<Evidence> {
             body => {
                 out.append(&mut held);
                 match body {
+                    TopologyEventBody::AttemptStarted { data } => {
+                        started_on.insert(
+                            (data.key, data.generation, data.attempt),
+                            data.pool.as_ref(),
+                        );
+                    }
+                    TopologyEventBody::AttemptInterrupted { data } => {
+                        let pool = started_on
+                            .get(&(data.key, data.generation, data.attempt))
+                            .copied()
+                            .flatten();
+                        if let Some(pool) = pool {
+                            out.push(dated(unpriced(pool)));
+                        }
+                    }
                     TopologyEventBody::CandidatePrepared { data } => {
                         out.push(dated(promoted(&data.attempt)));
                     }

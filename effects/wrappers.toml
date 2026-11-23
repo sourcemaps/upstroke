@@ -238,6 +238,7 @@ effect_free = [
     "classify_run_dir",
     "first_line",
     "first_line_within",
+    "is_run_started_sha256",
     "run_started_sha256",
 ]
 
@@ -1817,6 +1818,7 @@ effect_free = [
     # A `const fn` over the provider enum.
     "needs_account",
     "observe",
+    "observe_topology",
     "parse",
     "parse_duration",
     "pool_exhausted_to_record",

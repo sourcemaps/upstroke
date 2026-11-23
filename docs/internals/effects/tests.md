@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 142 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 153 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2121,7 +2121,14 @@ capture: `MUT-TEST-WINDOWS-HOSTED-CAPTURE-STEP-DELETED` and
 `MUT-TEST-WINDOWS-HOSTED-CAPTURE-EXIT-SWALLOWED`. Nothing reached the
 `checkout_complaints` guard that a job checks out exactly once, at step 0,
 whose deletion left all 138 green: `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-TWICE`
-and `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST`. The test asserts no
+and `MUT-TEST-WINDOWS-HOSTED-CHECKOUT-NOT-FIRST`. That made 142. Eight
+came with the legs' times, for the build and the harness loop (each under
+`ci_test_windows_hosted_job_complaints` in the workflow notes), and two
+when the loop came to keep each harness's code before it copies the
+harness's outputs: `MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`. One more came when the
+step read the build's errors in a `try`:
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`. The test asserts no
 count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
@@ -2150,11 +2157,11 @@ matrix to the legs it derives from `TEST_LEGS`
 One relation the oracle's pins do not state, each being against its own
 constant: `TEST_SHARD_COMMAND`, the suite step every leg runs, is
 `TEST_COMMAND` followed by ` -- ${{ matrix.tests }}` and nothing else. So a
-leg runs, over the selection its matrix entry hands it, the command the
-Windows shards run over theirs
-([`the_windows_leg_counts_the_tests_it_ran`] holds the shards' line to the
-same constant), and the two constants cannot drift apart with both pins
-holding.
+leg runs, over the selection its matrix entry hands it, the suite the
+Windows shards build from the same command and run over theirs
+([`the_windows_leg_counts_the_tests_it_ran`] holds the shards' build line
+to the same constant), and the two constants cannot drift apart with both
+pins holding.
 
 ## `fn the_hosted_windows_leg_still_links_every_test_binary() {`
 
@@ -2185,9 +2192,11 @@ touching the workflow at all. A `rust-toolchain.toml` overrides the rustup
 default the pinned toolchain action sets, so every bare `cargo` command runs
 a compiler the workflow never names -- the current-stable witness included,
 and the MSRV floor with it. A `.cargo/config.toml` can bind
-`target.<triple>.runner`, which Cargo applies to `cargo test`: every Windows
-harness builds and a wrapper reports success without executing one, on the
-one platform whose tests no other leg runs.
+`target.<triple>.runner`, which Cargo applies to `cargo test`: every harness
+of a leg that runs `cargo test` builds and a wrapper reports success without
+executing one. The Windows legs, whose tests no other leg runs, have built
+with `--no-run` and started their harnesses themselves since they report
+their tests' times, so a runner no longer reaches them.
 
 Neither exists, and this is what keeps it that way. Absence rather than a
 parse: adding either is a deliberate act, and the same change must decide
@@ -2203,45 +2212,123 @@ root `workspace.default-members = [...]` are one table to Cargo and three
 different strings to a line scan, which is how the first two versions of
 this check read and how each was shown a spelling it missed.
 
-## `fn windows_suite_start(selection: &str) -> String {`
+## `const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";`
 
-Line 4 of the Windows suite script, as `TEST_COMMAND` makes it: the
-command's first word is the program `Start-Process` is given, and the rest
-is its argument list, with `selection` after it inside the same quotes. The
-shards' line is the one made of ` -- ${{ matrix.tests }}`. The guest's was
-the one made of no selection, until its script went with its job on
-2026-11-20. The rest of the line is fixed text: the
-process handed back, its two streams sent to the files line 3 names, its
-handle taken, `WaitForExit()`, and its exit kept as `$code`.
+What the Windows shards hand each test harness after the leg's selection,
+so that libtest ends the result line of each test the leg runs with the
+time it took, as `test <name> ... ok <0.123s>`; an ignored test is not run,
+and its line carries no time. libtest writes the time apart from the
+result, so a child a test starts on the harness's console can write between
+them and move the time to the next line; the `mklink` that `link_dir` in
+`src/rundir/tests.rs` starts was one, and `link_dir` now captures its
+output. The packing of tests into legs (`WINDOWS_SHARD_FILTERS`) is to be
+weighed by those times in a later change (`MAINTAINING.md` step 3).
+`--report-time` is unstable: libtest takes it only after
+`-Z unstable-options`, and on a stable compiler takes that only where
+`RUSTC_BOOTSTRAP` is set in the harness's own environment, which line 7 of
+the shards' script sets after the build. The `test result:` lines the count
+reads are the same with the times as without them.
+
+One constant for its two readers: [`windows_suite_start`] puts it into the
+line [`the_windows_leg_counts_the_tests_it_ran`] compares, and the sixth
+complaint of [`windows_suite_wait_complaints`] asks that the harnesses'
+argument list end with it.
+
+## `fn windows_suite_build_arguments() -> String {`
+
+What `Start-Process` is handed to build the Windows suite, as
+`TEST_COMMAND` makes it: the command's first word as the program, and the
+rest as its argument list, with
+`--no-run --message-format=json-render-diagnostics` after it inside the
+same quotes. `--no-run` has Cargo compile and link every harness
+`--all-targets` selects and run none of them. The message format writes
+one JSON message per line to standard output, which the script reads for
+the harnesses' paths, and leaves the compiler's diagnostics rendered as
+text on standard error, which the script prints when the build fails.
+
+Its own function because two readers need it: the line
+[`windows_suite_build`] makes, and the third complaint of
+[`windows_suite_wait_complaints`], which asks that the line starting the
+build hold it.
+
+## `fn windows_suite_build() -> String {`
+
+Line 4 of the shards' script, as `TEST_COMMAND` makes it: `cargo` started
+as a process with [`windows_suite_build_arguments`], its standard output
+sent to the file line 3 names for the build's messages and its standard
+error to the suite's, its handle taken, `WaitForExit()`, and its exit kept
+as `$code`.
 
 [`the_windows_leg_counts_the_tests_it_ran`] compares a whole line of the
-script with this one, so the command the Windows suite job starts cannot
-drift from `TEST_COMMAND`, and nothing can be added to its arguments, with
-the script's pin holding.
+script with this one, so the command the shards build with cannot drift
+from `TEST_COMMAND`, and nothing can be added to its arguments, with the
+script's pin holding.
+
+The build is one Cargo, before `RUSTC_BOOTSTRAP` is set, for every harness
+the leg then runs. `--no-run` is what makes it a build: without it Cargo
+runs every harness it built over the whole suite, with no selection and no
+times, before the step runs the shard. And it is what lets the step start
+the harnesses itself, which is the one way to hand them the variable
+without handing it to Cargo, whose build the variable would change (the
+fourth complaint's heading, under [`windows_suite_wait_complaints`]).
+
+## `fn windows_suite_start(selection: &str) -> String {`
+
+Line 7 of the shards' script: `RUSTC_BOOTSTRAP` set in the step's process,
+then each harness in `$harnesses` started in turn as a process, with
+`selection` and then [`WINDOWS_SUITE_TIMES`] as its one quoted argument
+list. The shards' line is the one made of `${{ matrix.tests }}`. The rest
+of the line is fixed text: the two streams sent to `.part` files beside the
+suite's, the handle taken, `WaitForExit()`, the harness's exit kept as
+`$code`, the two files appended to the suite's, each in a `try` of its own
+whose `catch` prints the failure and throws again only where `$code` is
+zero, and the loop left at the first harness whose exit is not zero.
+
+[`the_windows_leg_counts_the_tests_it_ran`] compares a whole line of the
+script with this one, so nothing can be added to the harnesses' arguments,
+and the variable cannot move off this line, with the script's pin holding.
+
+Until the legs reported their tests' times this function made line 4 of
+the script: `cargo` started with `TEST_COMMAND`'s arguments and the
+selection after them, the shards' made of ` -- ${{ matrix.tests }}`. The
+guest's was the one made of no selection, until its script went with its
+job on 2026-11-20.
 
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {`
 
-What the Windows suite script must do about the process it starts, read from
-its text, as the ones it does not do. Six:
+What the Windows suite script must do about the processes it starts, read
+from its text, as the ones it does not do. Ten:
 
-- It waits on that process with `WaitForExit()`, after `Start-Process`, and
-  `Start-Process` is given no `-Wait`, which waits for the process's
-  descendants as well.
-- It pipes nothing into `Tee-Object`.
-- It exits with the code it kept from that process before it counts.
-- It lists the `upstroke*` processes still running before that exit, and
-  throws for them after it and before the count. So a failed suite's
-  processes are listed too, and Windows is asked to stop them, and a suite
-  that passed and left one fails.
-- Its first two lines are the compiler questions and their refusal, each
-  whole, and after them it holds `cargo` once, on the one line that starts
-  a process.
-- It reads the suite's output and lists those processes inside a `try`
-  whose `catch` keeps Cargo's exit code.
+1. It waits on each process it starts with its handle taken and then
+   `WaitForExit()`, and nothing in it is `-Wait`, in any spelling, which
+   waits for the process's descendants as well.
+2. It pipes nothing into `Tee-Object`.
+3. It builds the harnesses with `TEST_COMMAND`, `--no-run` and the JSON
+   message format, keeps Cargo's exit, and on the next line, when the build
+   failed, reads the build's errors in a `try` and exits with it.
+4. It sets `RUSTC_BOOTSTRAP` only after the build, and before it starts the
+   harnesses.
+5. It collects, on the line before it starts them, every harness the build
+   reported, and refuses to go on with none.
+6. It hands each harness [`WINDOWS_SUITE_TIMES`] after the leg's selection.
+7. Its loop stops at the first harness that fails and keeps that harness's
+   code, and the script exits with it before it counts. The loop keeps
+   each harness's code as soon as `WaitForExit()` returns, before it copies
+   the harness's two outputs, each copy in a `try` of its own whose `catch`
+   throws only for a harness that passed.
+8. It lists the `upstroke*` processes still running before that exit, and
+   throws for them after it and before the count. So a failed suite's
+   processes are listed too, and Windows is asked to stop them, and a suite
+   that passed and left one fails.
+9. Its first two lines are the compiler questions and their refusal, each
+   whole, and after them it holds `cargo` once, on the line that starts the
+   build, and starts two processes in all.
+10. It reads the suite's output and lists those processes inside a `try`
+    whose `catch` keeps the suite's exit code.
 
-The order in the first four is read from where each fragment first occurs
-in the script. The last two are read line by line, and each has a heading
-below.
+The second is a search of the whole text, and the eighth is read from where
+each of its fragments first occurs in the script. Each of the others has a
+heading below.
 [`the_windows_leg_counts_the_tests_it_ran`] asks it of
 `WINDOWS_SHARD_WITNESS`, the shards' script and the one script left. Until
 2026-11-20 it was asked of two, the guest's and the shards', by a test each.
@@ -2249,19 +2336,221 @@ The script is pinned whole by the oracle, so these are relations a pin does
 not state: a script edited back to a pipeline, with its constant edited to
 match, passes the pin and fails here.
 
+Until the legs reported their tests' times there were six, for a script
+that started one process, `cargo`, over the leg's selection: the first,
+which then asked only that `WaitForExit()` follow the one `Start-Process`
+and that no `-Wait` be written; the second; an exit with Cargo's code before
+the count, which the seventh asks of the loop now; and the eighth, ninth
+and tenth, as they stood for one process. The third to the sixth came with
+the build and the loop.
+
 Measured once, unplanned, while there were two scripts: with the space after
 `$passed =` lost from both constants and not from the workflow, the guest's
-script failed the third and fourth of these, and the oracle's clean-workflow
-check failed beside them as an unpinned script. The fifth and sixth are
-measured by
+script failed the exit before the count and the eighth, and the oracle's
+clean-workflow check failed beside them as an unpinned script. All but the
+second and the eighth are measured by
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`].
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let waited = |line: &str| {`
+
+The first complaint: every process waited on. On each line, every
+`Start-Process`, in any letter case, must be the right side of an
+assignment to a variable, as `$build = ` and `$suite = ` are, and the
+statement it opens must be followed straight away by
+`; $null = <it>.Handle; <it>.WaitForExit();`, with the same variable.
+Taking the handle while the process runs is what lets `ExitCode` read the
+exit once it has ended. Without it the code can read empty; an empty
+`$code` is not equal to zero, so the script takes its exit, and `exit`
+given nothing exits zero, before the count (`WINDOWS_SHARD_WITNESS` in the
+CI model notes). The predecessor asked
+only that the first `Start-Process ` come before the first
+`; $suite.WaitForExit(); `, which a second process started and not waited
+on passes, and asked nothing of the handle.
+
+`waits_for_descendants`, beside it, refuses `-Wait` anywhere in the text:
+every word after a dash, in any letter case, that is two letters or more
+and a prefix of `wait`, so `-Wa` and `-Wai` as well, which PowerShell
+accepts as `-Wait` for `Start-Process`. The dash may be an en dash, an em
+dash or a horizontal bar, which PowerShell reads as a hyphen. `-Wait` waits
+for the process's descendants as well as the process, so a test process
+left running would hold the step open, which is the hang the script is
+written against. That is PowerShell's documented rule; it was not executed
+here. The script holds no other word the search would take for one.
+
+Measured by three edits in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]: the
+harnesses started with `-Wait` as well, the build with `-Wa`, and a
+harness waited on without its handle taken first.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let builds_whole = build_at.is_some_and(|at| {`
+
+The third complaint: the build whole. The first line holding
+`$build = Start-Process ` must hold it followed by
+[`windows_suite_build_arguments`], must end by keeping `$build.ExitCode` as
+`$code`, and must be followed by
+`if ($code -ne 0) { try { Get-Content $err } catch { "reading the build's errors failed: $_" }; exit $code }`,
+whole.
+
+`--no-run`, because without it `cargo test` runs every harness it built,
+over the whole suite and with no times, and only then does the loop run the
+leg's shard: each leg runs the whole suite, and its own shard again. The
+exit on the next line is the build's own: Cargo can fail having linked
+some harnesses, whose messages are already in the file, and a script that
+went on would collect those, run them, and could pass. The build's
+standard error is printed first, since the diagnostics that say why are
+there, and it is read inside a `try`: GitHub runs a `pwsh` step with
+`$ErrorActionPreference = 'stop'`, so a read that fails outside one ends
+the step with PowerShell's error, not Cargo's code, and without the
+errors. The `catch` prints the failure, and the exit after it is Cargo's
+code either way. Its message names no `cargo`, which `holds_cargo` would
+count against the line (the ninth complaint). When the build was split
+from the run the line read the errors bare, where `cffdb983` had read
+them inside the `try` whose `catch` keeps the code, until a review found
+it. That is read from the text; no run showed it.
+
+Measured by three edits in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]:
+`--no-run` removed, the next line's exit removed, and that line put back
+as it stood, reading the errors outside a `try`. In the workflow alone the
+first is `MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE` and the third
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`
+(`ci_test_windows_hosted_job_complaints` in the workflow notes).
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let bootstraps_after_the_build = build_at.is_some_and(|at| {`
+
+The fourth complaint: `RUSTC_BOOTSTRAP` set after the build, and before the
+harnesses. At least one line names the variable, every line that does, in
+any letter case, comes after the line that starts the build, and its
+setting, `$env:RUSTC_BOOTSTRAP = '1'; `, first occurs before the first
+`$suite = Start-Process `.
+
+The harnesses need it. libtest takes [`WINDOWS_SUITE_TIMES`]' `-Z` on a
+stable compiler only where the variable is set in its own process, and a
+harness started by `Start-Process` inherits the step's environment.
+
+The build must not have it, and that is why the variable reaches only the
+harnesses the build made, and what they start. Set in the step before the
+build, or on the build's own line, it reaches Cargo, and through Cargo
+every compiler and build script the build runs. Three crates this one
+builds have build scripts that read it: `anyhow`, `thiserror` and
+`proc-macro2`. The first two probe for `error_generic_member_access`, the
+third for `proc_macro_span`. Each compiles its probe without the variable
+first and, where that fails, as it does on a stable compiler, and the
+variable is set, compiles it again with it, and turns the feature on where
+that compiles. Each also has Cargo run it again whenever the variable
+changes. Under the variable the three, and every harness built over them,
+are built otherwise than the `test` job's legs and a user's machine build
+them, from a tree nobody changed, on these ten legs alone. That is read
+from the three build scripts at the versions `Cargo.lock` held on
+2026-11-21; no build here was made with the variable set.
+
+So it is set on the loop's line, after the build has ended and been exited
+on, and no `cargo` follows it in the step (the ninth complaint). A later
+step is a process of its own and does not inherit it.
+
+Every line that names it, not only the first, because the loop's line sets
+it again: a script that also sets it above the build, its loop unchanged,
+still sets it after the build, and builds in bootstrap mode all the same.
+Measured by two edits in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], each
+made to the script with the loop's setting taken off (`unhoisted`, under
+that test): the variable set on the line before the build, and on the
+build's own line before the build. In the workflow alone,
+`MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD` and
+`MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-ON-THE-BUILD-LINE` set it in the same
+two places and keep the loop's setting too.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let collected = run_at`
+
+The fifth complaint: the harnesses collected whole. The line before the
+first `$suite = Start-Process ` must be `collects`, character for
+character: every message in the build's file whose `reason` is
+`compiler-artifact`, compared case-sensitively, whose `profile.test` is
+true and which names an `executable`, and a throw when there are none.
+Those three together are the test harnesses and nothing else Cargo built:
+a library and a build script name no executable, and a binary built to be
+run, not tested, is not in a test's profile. A `harness = false` `[[test]]`
+or `[[bench]]` target built by `cargo test --no-run` reports `profile.test`
+true with an executable, so the collection selects it: a probe the operator
+ran on 2026-11-23 with Rust 1.97.1 (`evidence/harness-false-probe.json` in
+the operator's kit).
+
+A narrower filter runs some of the leg's harnesses and is judged by a count
+the rest can clear. With the throw gone the lines after it still fail a
+leg whose build reported no harness, on an output file that was never
+written or a count below the floor, but by a cause they do not name; the
+throw names it. Measured by one edit in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
+throw removed; in the workflow alone,
+`MUT-TEST-WINDOWS-HOSTED-EMPTY-HARNESS-LIST-ALLOWED`.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let timed = run_at.is_some_and(|at| {`
+
+The sixth complaint: the times asked for. On the line that starts the
+harnesses, the argument list, from `-ArgumentList '` to its closing quote,
+must end with a space and [`WINDOWS_SUITE_TIMES`]. With the space, a list
+that is the times alone, the selection dropped, fails it too; what the
+selection is, is the exact line's to hold
+([`the_windows_leg_counts_the_tests_it_ran`]).
+
+The times are the one thing this step does that nothing downstream judges.
+Without them every leg runs its shard, clears its floor and is green; what
+is lost is the record a later change is to pack the legs from, on all ten
+at once, and no check would fail to say so. Measured by one edit in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
+two arguments removed; in the workflow alone,
+`MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED`.
+
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `if !follows(stops, exits) || !follows(exits, counts) {`
+
+The seventh complaint: a failed harness's code kept, and kept first. The
+loop's text from `$suite.WaitForExit();` to its end (`stops`), whole, must
+come before the script's `if ($code -ne 0) { exit $code }`, and that before
+the count. That text keeps the harness's exit as `$code` as soon as
+`WaitForExit()` returns, then appends the harness's standard output and
+then its standard error to the suite's files, each copy in a `try` of its
+own whose `catch` prints the failure and throws again only where `$code` is
+zero, and then leaves the loop where `$code` is not zero.
+
+Cargo's own `test` stops at the first harness that fails, and so does the
+loop. Going on past it, a harness that passes afterwards overwrites `$code`
+with zero; stopping without keeping it leaves the build's zero. Either way
+`exit $code` does not fire after a failed test, and the leg is judged by
+its count alone, which the harnesses that passed can clear. Until the build
+was split from the run, the same complaint asked that the line keeping
+Cargo's exit as `$code` come before that exit.
+
+The code comes before the copies because GitHub runs a `pwsh` step with
+`$ErrorActionPreference = 'stop'`, so a copy that fails ends the script
+where it fails unless something catches it. Until the loop kept the code
+first, the two copies stood bare before it, and this complaint read the
+loop's end from `; $code = $suite.ExitCode;` on: a harness that exited 101
+and whose output could not be copied ended the step on PowerShell's error.
+Not a false green, since the step failed, but the harness's code was never
+kept and its standard error never printed, so the leg's log said that a
+file could not be read, not which test failed. That is read from the text;
+no run showed it. Now a copy that fails is printed, and for a harness that
+failed the loop goes on and stops on the harness's code; for a harness that
+passed the copy's `catch` throws again, since there is then nothing to
+count from.
+
+Measured by four edits in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]: the
+`break` taken away; the `break` kept with the harness's code read for it
+and not kept; the code kept only after the two copies; and the standard
+output copied outside a `try` of its own. In the workflow alone,
+`MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS`,
+`MUT-TEST-WINDOWS-HOSTED-LOOP-DROPS-THE-FAILED-CODE`,
+`MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`.
 
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let holds_cargo = |line: &str| {`
 
 How many times a line holds `cargo`: every occurrence of those five letters,
-in any letter case, once the words `Cargo compiled the harnesses` are set
-aside. Those words are where the floor's refusal names the tool, on a line
-that starts nothing, and they are set aside as those exact words.
+in any letter case, once the words `Cargo compiled the harnesses` and
+`Cargo built no test harness` are set aside. Those words are where the
+floor's refusal and the empty collection's refusal name the tool, on lines
+that start nothing, and they are set aside as those exact words.
 
 Any letter case, because PowerShell does not distinguish case in a command's
 name, so `Cargo test` is the suite again. That is PowerShell's documented
@@ -2289,7 +2578,7 @@ under the next heading.
 
 ## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let opens_whole = lines.first().copied() == Some(questions)`
 
-The fifth complaint: Cargo once. It is drawn unless all four of these hold:
+The ninth complaint: Cargo once. It is drawn unless all four of these hold:
 
 1. Line 1 is the compiler-questions line, whole: `questions`, character
    for character. That is the first line of `WINDOWS_SHARD_WITNESS`.
@@ -2298,17 +2587,32 @@ The fifth complaint: Cargo once. It is drawn unless all four of these hold:
    patterns, as the script writes them, and plain in the message. The
    version is not typed out as `1.97.1`, so moving the compiler edits the
    constant and the script and leaves this function alone.
-3. Each later line holds `cargo`, in any letter case, once if it holds
-   `Start-Process`, and never otherwise (`holds_cargo`, above, with the
-   words `Cargo compiled the harnesses` set aside).
-4. `Start-Process`, in any letter case, occurs once in the script.
+3. Of the lines after them, the one that starts the build holds `cargo`, in
+   any letter case, once, and no other holds it at all (`holding_cargo`,
+   counted by `holds_cargo`, above, must be exactly that line once).
+4. `Start-Process`, in any letter case, occurs twice in the script: the
+   build's, and the loop's, which starts each harness in turn.
+
+Until the legs reported their tests' times the third asked that each later
+line hold `cargo` once if it held `Start-Process` and never otherwise, and
+the fourth that `Start-Process` occur once: the script started one process,
+Cargo over the leg's selection. Now Cargo builds and the loop runs, so the
+one `cargo` is the build's, and a `cargo` on any other line is refused for
+a second reason as well: after line 7 it runs with `RUSTC_BOOTSTRAP` set,
+and builds in bootstrap mode whatever it was started for (the fourth
+complaint's heading). Measured by three edits added with the build in
+[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]: a
+second copy of the build's line, a second copy of the loop's, and
+`TEST_COMMAND` run on the loop's line once the variable is set. In the
+workflow alone, `MUT-TEST-WINDOWS-HOSTED-CARGO-AFTER-BOOTSTRAP`, the
+doctests run on a line of their own after the loop.
 
 This is a refusal the script lost when the suite became a process that is
 waited on. While the suite was a pipeline, the script could run `cargo test`
 on one line only. After the change,
 [`the_windows_leg_counts_the_tests_it_ran`] required exactly one line equal
-to [`windows_suite_start`]'s, which says nothing of a different line that
-runs the suite again. The review of that change showed it: with
+to the one [`windows_suite_start`] then made, which says nothing of a
+different line that runs the suite again. The review of that change showed it: with
 `cargo test --all-targets --all-features` appended after the floor's
 refusal, in `ci.yml` and in the guest's constant together, every oracle
 test passed over a script that runs the whole suite twice.
@@ -2319,9 +2623,9 @@ Cargo, and a count that told the two apart had to exempt spellings
 (`PR389-INDIRECT-SECOND-SUITE-RUN-UNREFUSED`, under `holds_cargo`). Held
 whole, neither line can have anything joined to it, and with both out of
 the count no later `cargo` is skipped for what precedes it: a line that
-reads `$cargo` is refused as one that types `cargo` is. Line 4 is held
-whole as well, but not here: [`the_windows_leg_counts_the_tests_it_ran`]
-compares it with [`windows_suite_start`]'s.
+reads `$cargo` is refused as one that types `cargo` is. Lines 4 and 7 are
+held whole as well, but not here: [`the_windows_leg_counts_the_tests_it_ran`]
+compares them with [`windows_suite_build`]'s and [`windows_suite_start`]'s.
 
 The rule reads letters, and it is for an edit made in good faith: a second
 run left in the script by a change that meant something else, in any
@@ -2339,10 +2643,11 @@ function bounds neither. Whoever edits both can edit this rule beside them,
 and the diff that does so is the one the owner reads before it merges
 (`MAINTAINING.md` step 7).
 
-## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let kept = lines`
+## `fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {` › `let after = |offset: usize| run_at.and_then(|at| lines.get(at + offset).copied());`
 
-The sixth complaint: exit unmasked. Three lines in a row, counted from the
-line that ends by keeping Cargo's exit as `$code`:
+The tenth complaint: exit unmasked. Three lines in a row, counted from the
+line that starts the harnesses, which is the line that keeps the suite's
+exit as `$code`:
 
 - the next line opens `try { Get-Content $err; ` and holds the listing of
   the `upstroke*` processes, so the reading and the listing are both inside
@@ -2352,20 +2657,32 @@ line that ends by keeping Cargo's exit as `$code`:
   failure again;
 - the line after that is `if ($code -ne 0) { exit $code }`.
 
+Until the build was split from the run the three were counted from the line
+that ended by keeping Cargo's exit as `$code` (`kept`, which this closure
+replaced): the one process then started, and the one whose exit was kept.
+
 GitHub runs a `pwsh` step with `$ErrorActionPreference = 'stop'`, so a file
 `Get-Content` cannot read, or a `Get-CimInstance` that fails, ends the
 script where it fails. Before the `try`, the reading and the listing were
-lines 5 and 6 and Cargo's exit was line 7. A listing that failed after
-Cargo exited 101 would then have ended the step with PowerShell's error in
-place of 101. A frontier review read that from the text; no run showed it.
-With the two inside the `try` and the exit on the line after the `catch`, a
-failed suite exits with Cargo's code whatever the reading and the listing
-did. A suite that passed is not excused: the `catch` throws again, because
-nothing was read or listed, so nothing can be counted.
+lines 5 and 6 of the script as it then stood, and Cargo's exit was line 7.
+A listing that failed after Cargo exited 101 would then have ended the step
+with PowerShell's error in place of 101. A frontier review read that from
+the text; no run showed it. With the two inside the `try` and the exit on
+the line after the `catch`, the reading and the listing cannot replace the
+failing harness's code. Nor can the loop's copies, but that is the seventh
+complaint's to hold, not this one's: the loop keeps a harness's code
+before it copies the harness's logs, each copy has its own `try`, and a
+copy that fails is printed, and is fatal only for a harness that passed.
+Until the loop kept the code first, a copy that failed after a harness
+exited 101 ended the step on PowerShell's error before the code was kept,
+so a failed suite did not then exit with its failing harness's code
+whatever the reading did. A suite that passed is not excused: the `catch`
+throws again, because nothing was read or listed, so nothing can be
+counted, and so does a copy's `catch` for a harness that passed.
 
 The closing brace of the `try` is not read. PowerShell accepts a `catch`
-only straight after a `try` block, so a line 5 that closed its `try` early
-and went on would not parse with line 6 as it must be. That too is
+only straight after a `try` block, so a line 8 that closed its `try` early
+and went on would not parse with line 9 as it must be. That too is
 PowerShell's documented rule and was not executed here.
 
 ## `fn the_windows_leg_counts_the_tests_it_ran() {`
@@ -2378,42 +2695,44 @@ the shards' to it line by line.
 
 The test reads the three compiler questions: asking Cargo which compiler it
 will run, the step's PATH which `rustc` it names, and the step's PATH
-which `cargo` it has. The fixtures' own PATH is Cargo's to build, and a
-split there fails the rlib-linked fixtures rather than passing them
-(`WINDOWS_SHARD_WITNESS` in the CI model notes). The script is pinned as
-text by the oracle; this test holds what the text must agree with outside
-itself -- the compiler version in the three questions to the constant, line
-4 to `TEST_COMMAND`, line 10 to the matrix's floor -- and requires the
-compiler check to come before the suite, since a refusal after the run has
-already spent the run on the wrong compiler.
+which `cargo` it has. The fixtures' own PATH is the step's, since the step
+starts the harnesses itself (`WINDOWS_SHARD_WITNESS` in the CI model notes).
+The script is pinned as text by the oracle; this test holds what the text
+must agree with outside itself -- the compiler version in the three
+questions to the constant, line 4 to `TEST_COMMAND`, line 7 to the leg's
+selection and [`WINDOWS_SUITE_TIMES`], line 13 to the matrix's floor -- and
+requires the compiler check to come before the build, since a refusal
+after it has already built the suite on the wrong compiler.
 
-The suite is one line of that text, the one [`windows_suite_start`] makes of
-` -- ${{ matrix.tests }}`: `cargo` started as a process with
-`TEST_COMMAND`'s arguments and the leg's selection after them, waited on,
-its exit kept. The test requires that line exactly once, and the compiler
-check before it. It also requires the six
-things [`windows_suite_wait_complaints`] reads of the script: that it waits
-on the process it starts, pipes nothing into `Tee-Object`, exits with
-Cargo's code before it counts, throws when a test process is left running,
-opens with the compiler questions and their refusal, each whole, and holds
-`cargo` after them once, on the one line that starts a process, and reads
-and lists inside the `try` whose `catch` keeps Cargo's code. The reason for
-the first four is under `WINDOWS_SHARD_WITNESS` in the CI model notes: two
-runs, 43719719561 and 44277078005, in which a shard reported its tests and
-did not end. The last two came from the review of that change, and
-[`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`] measures
-them.
+The build is one line of that text, the one [`windows_suite_build`] makes:
+`cargo` started as a process with `TEST_COMMAND`'s arguments and `--no-run`
+after them, waited on, its exit kept. The run is another, the one
+[`windows_suite_start`] makes of `${{ matrix.tests }}`: `RUSTC_BOOTSTRAP`
+set, then each harness the build reported started as a process with the
+leg's selection and the times after it, waited on, its exit kept, and the
+loop left at the first that fails. The test requires each of the two lines
+exactly once (`carried`), and the compiler check before the build. It also
+requires the ten things [`windows_suite_wait_complaints`] reads of the
+script, listed there. The reason for waiting on each process, piping
+nothing and throwing for a process left running is under
+`WINDOWS_SHARD_WITNESS` in the CI model notes: two runs, 43719719561 and
+44277078005, in which a shard reported its tests and did not end. Cargo
+once and the unmasked exit came from the review of that change. The build
+whole, the variable after it, the harnesses collected, the times and the
+loop's stop came with the times, and the reason for each is under its
+heading there. [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`]
+measures all but two of the ten.
 
 One exact line is not one run of the suite. The count of lines equal to
 [`windows_suite_start`]'s sees copies of that line and no other line that
-runs Cargo, which is what the fifth of the six refuses.
+runs Cargo or a harness, which is what the ninth of the ten refuses.
 
-Line 10 must open `if ($passed -lt ${{ matrix.floor }}) { throw `. No floor
+Line 13 must open `if ($passed -lt ${{ matrix.floor }}) { throw `. No floor
 is a number in the text: the matrix hands each leg its own, and the oracle
 holds the matrix to `WINDOWS_SHARD_FLOORS`. Without this assertion those
 could be floors no leg tests, with the workflow and the constant edited
-together and the pin holding. The eleventh line, which prints the count, is
-held by the oracle's pin alone.
+together and the pin holding. The fourteenth line, which prints the count,
+is held by the oracle's pin alone.
 
 Every other assertion here reads `ci.yml` and concludes what CI was *asked*
 to do. Cargo can be asked for this suite and execute none of it: a
@@ -2422,7 +2741,10 @@ to do. Cargo can be asked for this suite and execute none of it: a
 environment hands each compiled harness to a wrapper that exits zero, and a
 root `[workspace]` whose `default-members` name another crate builds no
 harness of this one. Three of those are written where nothing reading this
-repository can see them, and Cargo is free to add a fourth route.
+repository can see them, and Cargo is free to add a fourth route. Since the
+legs report their tests' times the runner routes no longer reach them:
+Cargo builds with `--no-run`, and the step starts the harnesses itself. The
+`[workspace]` route still does.
 
 So each leg counts instead of enumerating: a shard that did not execute
 reports no `test result: ok.` line, and a leg that cannot reach its floor
@@ -2434,8 +2756,8 @@ edit to `ci.yml` deletes this step as easily as any other, and the decision
 record says where the boundary actually is. It is a defence against the
 machine. The count was written for the guest, which was provisioned outside
 the repository, so that its Cargo home and its environment were in no diff.
-A Cargo target runner or a `[workspace]` selection reaches GitHub's runners
-the same way, and this is each leg saying it ran what it says it ran.
+A `[workspace]` selection reaches GitHub's runners the same way, and this is
+each leg saying it ran what it says it ran.
 
 The floor line was measured on 2026-11-17, as line 6 of the script as it
 then stood: with it testing `$passed -lt 0` in the workflow and in
@@ -2444,24 +2766,31 @@ check passed, as an equality whose two sides moved together must, and the
 assertion on that line failed. The assertion was then
 `the_hosted_windows_twin_runs_the_guests_suite_on_the_guests_compiler`'s,
 and is this test's now. It has not been mutated since the script became
-eleven lines.
+eleven lines, nor since it became fourteen, when the floor moved to line
+13.
 
 ## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {`
 
-The fifth and sixth complaints of [`windows_suite_wait_complaints`],
-executed on the shards' script, `WINDOWS_SHARD_WITNESS`. The script as the
-workflow runs it draws no complaint, and each of eight edits to it draws
-exactly one, the one the edit is made for. Until 2026-11-20 the same eight
-were made to the guest's script as well.
+The complaints of [`windows_suite_wait_complaints`] that the oracle's pin
+cannot refuse, executed on the shards' script, `WINDOWS_SHARD_WITNESS`:
+every one but the second and the eighth. The script as the workflow runs it
+draws no complaint, and each of twenty-four edits to it draws exactly one,
+the one the edit is made for. The test's name is for the ninth and the
+tenth, which were all it executed until the legs reported their tests'
+times. Until 2026-11-20 its edits, eight then, were made to the guest's
+script as well.
 
-Seven edits run the suite a second time and draw the fifth complaint:
+Nine edits run the suite a second time and draw the ninth complaint:
 
 - `cargo test --all-targets --all-features` on a line of its own after the
   count, which is the edit the review made to `ci.yml` and the guest's
   constant together;
 - the same command joined to line 1 with `; `;
 - the same command on a line of its own, with `Cargo` capitalised;
-- a second copy of the script's own `Start-Process` line;
+- a second copy of the script's line that builds the harnesses;
+- a second copy of its line that runs them;
+- the same command on the loop's line, after `RUSTC_BOOTSTRAP` is set,
+  where it would build in bootstrap mode as well;
 - `& (($cargo -split ' ')[0]) test --all-targets --all-features` as a last
   line, which is the edit round two's frontier pass over #389 made to
   `ci.yml` and the guest's constant together
@@ -2474,14 +2803,45 @@ and line 2 reads. The first is refused by the count of `cargo` on the lines
 after line 2, and the other two by lines 1 and 2 being held whole. A second
 run the text never spells is not among the edits, and is not refused
 (`PR389-UNSPELLED-SECOND-SUITE-RUN-UNREFUSED`, deferred, under
-[`windows_suite_wait_complaints`]).
+[`windows_suite_wait_complaints`]). Until the build was split from the run
+there was one copied line, the script's one `Start-Process` line; the copy
+of each of its two now, and the command on the loop's line, came with the
+split.
 
-The eighth edit takes the `try` and its `catch` away and draws the sixth
+The tenth edit takes the `try` and its `catch` away and draws the tenth
 complaint.
 
-Exactly one complaint, not at least one. So the test also shows that none
-of the first four complaints refuses any of these edits, which is why the
-last two were added.
+Eleven edits came with the build and the loop, each drawing the complaint
+written for it:
+
+- the first, three: the harnesses started with `-Wait` as well, the build
+  with `-Wa`, which PowerShell takes for `-Wait`, and a harness waited on
+  without its handle taken first;
+- the third, two: the build without `--no-run`, and without its exit on
+  the next line;
+- the fourth, two: `RUSTC_BOOTSTRAP` set on the line before the build, and
+  on the build's own line before the build, each in `unhoisted` (below);
+- the fifth, one: the refusal of an empty list of harnesses removed;
+- the sixth, one: the harnesses started without
+  `-Z unstable-options --report-time`;
+- the seventh, two: the loop going on past a harness that failed, and
+  stopping at it without keeping its code.
+
+Two more, each drawing the seventh, came when the loop came to keep each
+harness's code before it copies the harness's two outputs: the code kept
+only after the copies, and the standard output copied outside a `try` of
+its own.
+
+One more, drawing the third, came when the build's errors came to be read
+in a `try`: the line after the build put back as it stood, reading them
+outside one.
+
+Exactly one complaint, not at least one. So the test also shows that each
+edit is refused by the complaint written for it and by no other: a second
+run or a masked exit by none of the first eight, which is why the ninth
+and tenth were added, and a build in bootstrap mode, untimed harnesses or
+a loop that passes a failure by none of the complaints that stood before
+them.
 
 The edits are made to the constant's text and nothing is written. An edit
 to `ci.yml` alone is the pin's to refuse
@@ -2490,19 +2850,43 @@ are edits that move the workflow and its constant together, which the pin
 passes. The test runs no PowerShell: it shows what the function says of a
 text, not what the script does on a runner.
 
+## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {` › `let replaced = |text: &str, from: &str, to: &str| -> String {`
+
+Every edit that came with the build, but the two copied lines, is made
+through this: it requires the text it replaces to occur exactly once in the
+text it edits, and replaces that one occurrence. Without the requirement, an edit whose text the script
+no longer held would leave the script as it was, and the test would fail
+saying the function missed an edit that was never made; one whose text
+occurred twice would be made at the first only, which may not be the place
+the edit is named for. With it, a script that moved under an edit fails
+the test saying which text it no longer holds once.
+
+## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {` › `let unhoisted = replaced(script, "$env:RUSTC_BOOTSTRAP = '1'; foreach", "foreach");`
+
+The script with the loop's `RUSTC_BOOTSTRAP` taken off, which the two edits
+for the fourth complaint start from. Each then sets the variable once,
+before the build: the setting moved, not added to. Set there, the variable
+still reaches the harnesses, so a check that asked only whether it was set
+before they start would pass both; the fourth complaint reads where it is
+set against the build. The workflow's rows,
+`MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD` and
+`MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-ON-THE-BUILD-LINE`, add the setting and
+keep the loop's, which the same complaint refuses because it reads every
+line that names the variable.
+
 ## `fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {` › `let unwrapped: String = script`
 
 The script without its `try`: the `catch` line is dropped, and `try { ` and
-the block's closing ` }` are taken off the line before it. Line 5 then
+the block's closing ` }` are taken off the line before it. Line 8 then
 reads `Get-Content $err; $log = Get-Content $out; $log; $left = ...` to the
-end of the listing, and Cargo's exit is line 6: the reading and the listing
-are outside any `try` again, ahead of the exit.
+end of the listing, and the suite's exit is line 9: the reading and the
+listing are outside any `try` again, ahead of the exit.
 
 The assertion after it is on the edit, not on the function: the result is
-one line shorter and its line 5 opens that way. Without it, a script whose
-line 5 no longer ended as the stripping expects would lose its `catch` line
+one line shorter and its line 8 opens that way. Without it, a script whose
+line 8 no longer ended as the stripping expects would lose its `catch` line
 alone, and the complaint would be drawn by an edit other than the one the
-row names.
+row names. The line was 5 until the build was split from the run.
 
 ## `fn the_hosted_windows_shards_run_the_suite_on_the_compiler_they_install() {`
 
@@ -2527,8 +2911,9 @@ guest's but for the shard, by line: lines 1 to 3 and 5 to 9 the guest's,
 line 4 the guest's with the selection added, and line 10 a test of the
 matrix's floor. Both relations went with the guest's job and the picker.
 What the second held of the shards' script by itself is
-[`the_windows_leg_counts_the_tests_it_ran`]'s now: line 4, line 10 and the
-six things about the process it starts.
+[`the_windows_leg_counts_the_tests_it_ran`]'s now, as the script stands
+since the legs reported their tests' times: line 4, the build; line 7, the
+run; line 13, the floor; and the ten things about the processes it starts.
 
 Measured, before the shards and under the test's earlier name, by setting
 the job's install back to `stable` in the workflow and restoring it: this

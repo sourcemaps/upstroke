@@ -5527,14 +5527,37 @@ fn no_repository_file_overrides_what_ci_compiles_or_runs() {
     );
 }
 
-fn windows_suite_start(selection: &str) -> String {
+const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";
+
+fn windows_suite_build_arguments() -> String {
     let (program, arguments) = TEST_COMMAND
         .split_once(' ')
         .expect("the pinned test command is a program and its arguments");
     format!(
-        "$suite = Start-Process -FilePath {program} -ArgumentList '{arguments}{selection}' \
-         -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; \
-         $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode"
+        "-FilePath {program} -ArgumentList '{arguments} --no-run \
+         --message-format=json-render-diagnostics' "
+    )
+}
+
+fn windows_suite_build() -> String {
+    format!(
+        "$build = Start-Process {}-NoNewWindow -PassThru -RedirectStandardOutput $built \
+         -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); \
+         $code = $build.ExitCode",
+        windows_suite_build_arguments()
+    )
+}
+
+fn windows_suite_start(selection: &str) -> String {
+    format!(
+        "$env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) {{ $suite = Start-Process \
+         -FilePath $h -ArgumentList '{selection} {WINDOWS_SUITE_TIMES}' -NoNewWindow -PassThru \
+         -RedirectStandardOutput \"$out.part\" -RedirectStandardError \"$err.part\"; \
+         $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try {{ Get-Content \
+         \"$out.part\" | Add-Content $out }} catch {{ \"copying the output of $h failed: $_\"; \
+         if ($code -eq 0) {{ throw }} }}; try {{ Get-Content \"$err.part\" | Add-Content $err }} \
+         catch {{ \"copying the errors of $h failed: $_\"; if ($code -eq 0) {{ throw }} }}; \
+         if ($code -ne 0) {{ break }} }}"
     )
 }
 
@@ -5559,13 +5582,50 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
          workflow\" }}"
     );
     let catches = "catch { if ($code -ne 0) { \"reading the suite's output or listing the processes it left failed: $_\" } else { throw } }";
+    let builds = "$build = Start-Process ";
+    let build_exits = "if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors failed: $_\" }; exit $code }";
+    let collects = "$harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw \"Cargo built no test harness, so this shard would run nothing\" }";
+    let bootstraps = "$env:RUSTC_BOOTSTRAP = '1'; ";
+    let runs = "$suite = Start-Process ";
+    let stops = "$suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the output of $h failed: $_\"; if ($code -eq 0) { throw } }; try { Get-Content \"$err.part\" | Add-Content $err } catch { \"copying the errors of $h failed: $_\"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }\n";
     let lines: Vec<&str> = script.lines().collect();
+    let line_of = |text: &str| lines.iter().position(|line| line.contains(text));
+    let build_at = line_of(builds);
+    let run_at = line_of(runs);
     let mut out = Vec::new();
-    if !follows("Start-Process ", "; $suite.WaitForExit(); ") || script.contains(" -Wait ") {
+
+    let waited = |line: &str| {
+        line.to_ascii_lowercase()
+            .match_indices("start-process")
+            .all(|(at, _)| {
+                let started = line[..at]
+                    .strip_suffix(" = ")
+                    .and_then(|before| before.rsplit([' ', '{', ';', '(']).next())
+                    .filter(|name| name.len() > 1 && name.starts_with('$'));
+                let statement_ends = line[at..].find(';').map(|end| &line[at + end..]);
+                started.zip(statement_ends).is_some_and(|(name, rest)| {
+                    rest.starts_with(&format!("; $null = {name}.Handle; {name}.WaitForExit();"))
+                })
+            })
+    };
+    let waits_for_descendants = script
+        .to_lowercase()
+        .split(['-', '\u{2013}', '\u{2014}', '\u{2015}'])
+        .skip(1)
+        .any(|after_a_dash| {
+            let word: String = after_a_dash
+                .chars()
+                .take_while(char::is_ascii_alphanumeric)
+                .collect();
+            word.len() > 1 && "wait".starts_with(&word)
+        });
+    if !lines.iter().all(|line| waited(line)) || waits_for_descendants {
         out.push(
-            "does not wait on the process it starts with `WaitForExit()` and with nothing \
-             else: `Start-Process -Wait` waits for the process's descendants too, so a test \
-             process left running would hold the step open",
+            "does not wait on each process it starts with `$null = <it>.Handle` and then \
+             `<it>.WaitForExit()`, and with nothing else: without the handle taken first, \
+             `ExitCode` can read empty once the process has exited, and `Start-Process -Wait`, \
+             however abbreviated, waits for the process's descendants too, so a test process \
+             left running would hold the step open",
         );
     }
     if script.contains("Tee-Object") {
@@ -5575,50 +5635,117 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
              the step open after the last result line",
         );
     }
-    if !follows("; $code = $suite.ExitCode\n", exits) || !follows(exits, counts) {
+    let builds_whole = build_at.is_some_and(|at| {
+        lines[at].contains(&format!("{builds}{}", windows_suite_build_arguments()))
+            && lines[at].ends_with("; $code = $build.ExitCode")
+            && lines.get(at + 1).copied() == Some(build_exits)
+    });
+    if !builds_whole {
         out.push(
-            "does not exit with the code of the process it waited on before it counts, so a \
-             failed suite is judged by its count",
+            "does not build the test harnesses with `cargo test --all-targets --all-features \
+             --no-run`, its messages written as JSON, and, on the next line when the build \
+             fails, read the build's errors in a `try` and exit with Cargo's code: without \
+             `--no-run` Cargo runs the whole suite itself, with no times, before the harnesses \
+             run the shard again, a build that failed after it linked some harnesses runs those \
+             and can pass, and a read of the errors that fails outside a `try` ends the step \
+             with PowerShell's error, not Cargo's code",
+        );
+    }
+    let sets_bootstrap: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.to_ascii_lowercase().contains("rustc_bootstrap"))
+        .map(|(index, _)| index)
+        .collect();
+    let bootstraps_after_the_build = build_at.is_some_and(|at| {
+        !sets_bootstrap.is_empty() && sets_bootstrap.iter().all(|line| *line > at)
+    }) && follows(bootstraps, runs);
+    if !bootstraps_after_the_build {
+        out.push(
+            "does not set `RUSTC_BOOTSTRAP` only after the line that builds the harnesses and \
+             before it starts them: set on that line or before it, it reaches Cargo and every \
+             compiler Cargo runs, and the build is not the one the other legs make",
+        );
+    }
+    let collected = run_at
+        .and_then(|at| at.checked_sub(1))
+        .and_then(|at| lines.get(at).copied())
+        == Some(collects);
+    if !collected {
+        out.push(
+            "does not collect, on the line before it starts them, every test harness Cargo's \
+             build reported, and refuse to go on with none, so a shard can run some of its \
+             harnesses, or none, and still be judged by its count",
+        );
+    }
+    let timed = run_at.is_some_and(|at| {
+        lines[at]
+            .split_once(runs)
+            .and_then(|(_, start)| start.split_once("-ArgumentList '"))
+            .and_then(|(_, listed)| listed.split_once('\''))
+            .is_some_and(|(arguments, _)| arguments.ends_with(&format!(" {WINDOWS_SUITE_TIMES}")))
+    });
+    if !timed {
+        out.push(
+            "does not hand each test harness `-Z unstable-options --report-time` after the \
+             leg's selection, so the shard reports no test's time",
+        );
+    }
+    if !follows(stops, exits) || !follows(exits, counts) {
+        out.push(
+            "does not stop at the first test harness that fails and exit with that harness's \
+             code before it counts, having kept the code as `WaitForExit()` returns and only \
+             then copied the harness's two outputs, each in a `try` whose `catch` throws only \
+             for a harness that passed: the text from `WaitForExit()` to the loop's end is read \
+             whole and must come before the exit line, or a failed harness is judged by its \
+             count, by the code of a harness that ran after it, or by a failed copy's error, \
+             its own code never kept and its errors never printed",
         );
     }
     if !follows(lists, exits) || !follows(exits, throws) || !follows(throws, counts) {
         out.push(
-            "does not list the `upstroke*` processes left running before it exits with \
-             Cargo's code and throw for them after, so a test that leaves a process running \
+            "does not list the `upstroke*` processes left running before it exits with the \
+             suite's code and throw for them after, so a test that leaves a process running \
              passes unreported",
         );
     }
     let holds_cargo = |line: &str| {
         line.replace("Cargo compiled the harnesses", "")
+            .replace("Cargo built no test harness", "")
             .to_ascii_lowercase()
             .matches("cargo")
             .count()
     };
     let opens_whole = lines.first().copied() == Some(questions)
         && lines.get(1).copied() == Some(refusal.as_str());
-    let cargo_elsewhere = lines
+    let holding_cargo: Vec<(usize, usize)> = lines
         .iter()
+        .enumerate()
         .skip(2)
-        .any(|line| holds_cargo(line) != usize::from(line.contains("Start-Process")));
+        .map(|(index, line)| (index, holds_cargo(line)))
+        .filter(|(_, held)| *held > 0)
+        .collect();
+    let cargo_builds_alone = build_at.is_some_and(|at| holding_cargo == [(at, 1)]);
     let starts = script.to_ascii_lowercase().matches("start-process").count();
-    if !opens_whole || cargo_elsewhere || starts != 1 {
+    if !opens_whole || !cargo_builds_alone || starts != 2 {
         out.push(
             "is not the compiler questions on line 1 and their refusal on line 2, each whole, and \
-             after them `cargo`, in any letter case, once on the one line that starts a process \
-             and on no other, so the suite can run twice and be counted from either run",
+             after them `cargo`, in any letter case, once on the one line that starts the build \
+             and on no other, with two processes started in all, the build and each harness in \
+             turn: a `cargo` on any other line can run the suite again, or run under \
+             `RUSTC_BOOTSTRAP` once the loop has set it, so the suite can run twice and be \
+             counted from either run",
         );
     }
-    let kept = lines
-        .iter()
-        .position(|line| line.ends_with("$code = $suite.ExitCode"));
-    let after = |offset: usize| kept.and_then(|kept| lines.get(kept + offset).copied());
+    let after = |offset: usize| run_at.and_then(|at| lines.get(at + offset).copied());
     let reads_and_lists = after(1)
         .is_some_and(|line| line.starts_with("try { Get-Content $err; ") && line.contains(lists));
     if !reads_and_lists || after(2) != Some(catches) || after(3) != Some(exits.trim_end()) {
         out.push(
             "does not read the suite's output and list the processes it left inside the `try` \
-             whose `catch` keeps Cargo's code, with Cargo's exit on the next line, so a failure \
-             while reading the output or listing processes can replace Cargo's exit code",
+             whose `catch` keeps the suite's code, with that code's exit on the next line, so a \
+             failure while reading the output or listing processes can replace the suite's exit \
+             code",
         );
     }
     out
@@ -5626,16 +5753,28 @@ fn windows_suite_wait_complaints(script: &str) -> Vec<&'static str> {
 
 #[test]
 fn the_windows_leg_counts_the_tests_it_ran() {
-    let one_shard = windows_suite_start(" -- ${{ matrix.tests }}");
-    let cargo_lines = WINDOWS_SHARD_WITNESS
-        .lines()
-        .filter(|line| *line == one_shard)
-        .count();
+    let build = windows_suite_build();
+    let one_shard = windows_suite_start("${{ matrix.tests }}");
+    let carried = |pinned: &str| {
+        WINDOWS_SHARD_WITNESS
+            .lines()
+            .filter(|line| *line == pinned)
+            .count()
+    };
     assert_eq!(
-        cargo_lines, 1,
-        "the shards' suite step does not start `{TEST_COMMAND}` as a process, with the leg's \
-         `matrix.tests` handed to libtest and nothing else, on exactly one line, so a shard \
-         does not run its share of the suite the other legs run"
+        carried(&build),
+        1,
+        "the shards' suite step does not build the harnesses with `{TEST_COMMAND} --no-run` \
+         as a process, on exactly one line, so Cargo runs the suite itself, or builds a suite \
+         the other legs do not"
+    );
+    assert_eq!(
+        carried(&one_shard),
+        1,
+        "the shards' suite step does not start each test harness Cargo built as a process, \
+         with the leg's `matrix.tests` handed to libtest and then `{WINDOWS_SUITE_TIMES}` and \
+         nothing else, on exactly one line, so a shard does not run its share of the suite the \
+         other legs run"
     );
     let unmet = windows_suite_wait_complaints(WINDOWS_SHARD_WITNESS);
     assert!(
@@ -5657,15 +5796,15 @@ fn the_windows_leg_counts_the_tests_it_ran() {
         );
     }
     assert!(
-        WINDOWS_SHARD_WITNESS.find("-notmatch") < WINDOWS_SHARD_WITNESS.find(&one_shard),
-        "the compiler check comes after the suite, so the suite has already run on the wrong \
-         compiler by the time the step refuses"
+        WINDOWS_SHARD_WITNESS.find("-notmatch") < WINDOWS_SHARD_WITNESS.find(&build),
+        "the compiler check comes after the build, so the suite has already been built on the \
+         wrong compiler by the time the step refuses"
     );
-    let floor = WINDOWS_SHARD_WITNESS.lines().nth(9);
+    let floor = WINDOWS_SHARD_WITNESS.lines().nth(12);
     let refuses = "if ($passed -lt ${{ matrix.floor }}) { throw ";
     assert!(
         floor.is_some_and(|line| line.starts_with(refuses)),
-        "line 10 of the shards' suite step, {floor:?}, does not refuse a count below the leg's \
+        "line 13 of the shards' suite step, {floor:?}, does not refuse a count below the leg's \
          `matrix.floor`, so the floors the oracle holds the matrix to are floors no leg tests"
     );
 }
@@ -5673,7 +5812,13 @@ fn the_windows_leg_counts_the_tests_it_ran() {
 #[test]
 fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
     let twice = "so the suite can run twice and be counted from either run";
-    let masked = "can replace Cargo's exit code";
+    let masked = "can replace the suite's exit code";
+    let waits = "does not wait on each process it starts";
+    let builds = "does not build the test harnesses with";
+    let bootstraps = "does not set `RUSTC_BOOTSTRAP` only after the line that builds";
+    let collects = "does not collect, on the line before it starts them";
+    let times = "`-Z unstable-options --report-time` after the";
+    let stops = "does not stop at the first test harness that fails";
     let home = "the shards'";
     let script = WINDOWS_SHARD_WITNESS;
     let clean = windows_suite_wait_complaints(script);
@@ -5682,10 +5827,24 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
         "{home} suite step, as the workflow runs it:\n{}",
         clean.join("\n")
     );
-    let start = script
-        .lines()
-        .find(|line| line.contains("Start-Process"))
-        .unwrap_or_else(|| panic!("{home} suite step starts no process"));
+    let line_with = |text: &str| {
+        script
+            .lines()
+            .find(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{home} suite step has no line holding `{text}`"))
+    };
+    let build = line_with("$build = Start-Process");
+    let run = line_with("$suite = Start-Process");
+    let replaced = |text: &str, from: &str, to: &str| -> String {
+        assert_eq!(
+            text.matches(from).count(),
+            1,
+            "{home} suite step does not hold `{from}` exactly once, so the mutation that \
+             replaces it measures nothing"
+        );
+        text.replacen(from, to, 1)
+    };
+    let unhoisted = replaced(script, "$env:RUSTC_BOOTSTRAP = '1'; foreach", "foreach");
     let unwrapped: String = script
         .lines()
         .filter(|line| !line.starts_with("catch { "))
@@ -5698,11 +5857,11 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
         .collect();
     assert!(
         unwrapped.lines().count() + 1 == script.lines().count()
-            && unwrapped.lines().nth(4).is_some_and(|line| {
+            && unwrapped.lines().nth(7).is_some_and(|line| {
                 line.starts_with("Get-Content $err; $log = Get-Content $out; $log; $left = ")
             }),
-        "{home} suite step has no `try` on line 5 and `catch` on line 6 to remove, so the \
-         last mutation below is not the one it is named for:\n{unwrapped}"
+        "{home} suite step has no `try` on line 8 and `catch` on line 9 to remove, so the \
+         mutation below that removes them is not the one it is named for:\n{unwrapped}"
     );
     let indirect = "& (($cargo -split ' ')[0]) test --all-targets --all-features";
     let joined_to = |line: usize| -> String {
@@ -5735,8 +5894,23 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
             twice,
         ),
         (
-            "a second copy of the line that starts the suite",
-            format!("{script}{start}\n"),
+            "a second copy of the line that builds the harnesses",
+            format!("{script}{build}\n"),
+            twice,
+        ),
+        (
+            "a second copy of the line that runs the harnesses",
+            format!("{script}{run}\n"),
+            twice,
+        ),
+        (
+            "the suite run again by `cargo` once `RUSTC_BOOTSTRAP` is set, on the line that \
+             sets it",
+            replaced(
+                script,
+                "$env:RUSTC_BOOTSTRAP = '1'; ",
+                &format!("$env:RUSTC_BOOTSTRAP = '1'; {TEST_COMMAND}; "),
+            ),
             twice,
         ),
         (
@@ -5758,6 +5932,120 @@ fn the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit() {
             "the `try` and its `catch` removed from around the reading and the listing",
             unwrapped,
             masked,
+        ),
+        (
+            "the harnesses waited on with `-Wait` as well",
+            replaced(
+                script,
+                "-NoNewWindow -PassThru -RedirectStandardOutput \"$out.part\"",
+                "-NoNewWindow -Wait -PassThru -RedirectStandardOutput \"$out.part\"",
+            ),
+            waits,
+        ),
+        (
+            "the build waited on with `-Wa`, which abbreviates `-Wait`, as well",
+            replaced(
+                script,
+                "-RedirectStandardOutput $built",
+                "-Wa -RedirectStandardOutput $built",
+            ),
+            waits,
+        ),
+        (
+            "the harness waited on without its handle taken first",
+            replaced(script, "$null = $suite.Handle; ", ""),
+            waits,
+        ),
+        (
+            "the build started without `--no-run`",
+            replaced(script, " --no-run", ""),
+            builds,
+        ),
+        (
+            "the build's failure not exited on",
+            replaced(
+                script,
+                "if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors \
+                 failed: $_\" }; exit $code }\n",
+                "",
+            ),
+            builds,
+        ),
+        (
+            "the build's errors read outside a `try`",
+            replaced(
+                script,
+                "if ($code -ne 0) { try { Get-Content $err } catch { \"reading the build's errors \
+                 failed: $_\" }; exit $code }\n",
+                "if ($code -ne 0) { Get-Content $err; exit $code }\n",
+            ),
+            builds,
+        ),
+        (
+            "`RUSTC_BOOTSTRAP` set on the line before the build",
+            replaced(
+                &unhoisted,
+                "$out = Join-Path",
+                "$env:RUSTC_BOOTSTRAP = '1'; $out = Join-Path",
+            ),
+            bootstraps,
+        ),
+        (
+            "`RUSTC_BOOTSTRAP` set on the build's own line, before the build",
+            replaced(
+                &unhoisted,
+                "$build = Start-Process",
+                "$env:RUSTC_BOOTSTRAP = '1'; $build = Start-Process",
+            ),
+            bootstraps,
+        ),
+        (
+            "the refusal of an empty collection of harnesses removed",
+            replaced(
+                script,
+                "; if ($harnesses.Count -eq 0) { throw \"Cargo built no test harness, so this \
+                 shard would run nothing\" }",
+                "",
+            ),
+            collects,
+        ),
+        (
+            "the harnesses started without `-Z unstable-options --report-time`",
+            replaced(script, " -Z unstable-options --report-time'", "'"),
+            times,
+        ),
+        (
+            "the loop going on past a harness that failed",
+            replaced(script, "; if ($code -ne 0) { break } }", " }"),
+            stops,
+        ),
+        (
+            "the loop stopping at a failed harness without keeping its code",
+            replaced(
+                &replaced(script, "$code = $suite.ExitCode; ", ""),
+                "if ($code -ne 0) { break } }",
+                "if ($suite.ExitCode -ne 0) { break } }",
+            ),
+            stops,
+        ),
+        (
+            "the harness's code kept only after its two outputs are copied",
+            replaced(
+                &replaced(script, "$code = $suite.ExitCode; ", ""),
+                "; if ($code -ne 0) { break } }",
+                "; $code = $suite.ExitCode; if ($code -ne 0) { break } }",
+            ),
+            stops,
+        ),
+        (
+            "the harness's standard output copied outside a `try` of its own",
+            replaced(
+                script,
+                "try { Get-Content \"$out.part\" | Add-Content $out } catch { \"copying the \
+                 output of $h failed: $_\"; if ($code -eq 0) { throw } }",
+                "Get-Content \"$out.part\" | Add-Content $out",
+            ),
+            stops,
         ),
     ] {
         let complaints = windows_suite_wait_complaints(&mutated);

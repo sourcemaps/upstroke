@@ -550,18 +550,21 @@ measured this on the guest's job went with it on 2026-11-20.
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
 Exactly one suite step, under `test-windows-hosted-command`. The whole step,
-not the command inside it. The command says which suite Cargo was asked
-for; the lines before it are what say which compiler runs it, and the lines
-after it are what say the suite ran. An equality over the step is what
-stops those lines being dropped, or the floor lowered to a number an
-unexecuted shard clears. Measured,
+not the commands inside it. The build and the harness loop say which suite
+is built and run; the lines before them are what say which compiler builds
+it, and the lines after them are what say the suite ran. An equality over
+the step is what stops those lines being dropped, or the floor lowered to a
+number an unexecuted shard clears. Measured,
 `MUT-TEST-WINDOWS-HOSTED-COMPILER-CHECK-DROPPED`,
 `MUT-TEST-WINDOWS-HOSTED-WITNESS-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-FLOOR-DROPPED`.
 
-A step whose cargo line dropped the selection, or named a filter of its own
-where the pinned text reads `matrix.tests`, is an unpinned script here, and
-the count of suite steps is zero. Measured,
+A step whose harness loop dropped the selection from the harnesses'
+arguments, or named a filter of its own where the pinned text reads
+`matrix.tests`, is an unpinned script here, and the count of suite steps is
+zero. Until the legs reported their tests' times both rows edited the line
+that started `cargo` over the selection; they edit the loop's line now, and
+measure the same thing. Measured,
 `MUT-TEST-WINDOWS-HOSTED-SHARD-SELECTION-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED`. The second is the one no floor
 refuses: every leg runs the tests whose names contain `engine::`, and by the
@@ -575,13 +578,94 @@ tests, 1,295 by those counts, against a last floor of 734.
 
 The same equality holds how the step runs the suite and what it does about a
 test process left running. `MUT-TEST-WINDOWS-HOSTED-SUITE-PIPED-AGAIN` makes
-line 4 a pipeline into `Tee-Object` again, and
-`MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED` removes line 8, the throw for
-such a process. Each edits the workflow alone and is refused under
+line 7 pipe each harness into `Tee-Object`, as the step once piped Cargo,
+and `MUT-TEST-WINDOWS-HOSTED-SURVIVOR-ALLOWED` removes line 11, the throw
+for such a process.
+
+It holds how the step builds the suite and times it as well, which is what
+the build was split from the run for: Cargo builds once, with `--no-run`
+and without `RUSTC_BOOTSTRAP`, and the step then runs each harness itself
+with the variable set, which libtest needs before it reports a test's time
+on a stable compiler. Why the variable must not reach the build is under
+`WINDOWS_SHARD_WITNESS` in the CI model notes: three crates' build scripts
+read it. One row for each way the step can lose that.
+
+`MUT-TEST-WINDOWS-HOSTED-BUILD-RUNS-THE-SUITE` starts the build without
+`--no-run`. Cargo then runs every harness over the whole suite, untimed,
+before the loop runs the shard again; on 2026-11-15 the whole suite alone
+took 3,311 to 4,292 s in the harness on this runner, more than a leg's 40
+minutes.
+
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED` puts back the line
+after the build as it stood before it read the build's errors in a `try`:
+`if ($code -ne 0) { Get-Content $err; exit $code }`. Under
+`$ErrorActionPreference = 'stop'` a build that failed and whose errors file
+cannot be read then ends the step with PowerShell's error, not Cargo's
+code, and without the errors that say what failed. Not a false green, since
+the step still fails, but the leg's log says a file could not be read and
+not why the build failed.
+
+`MUT-TEST-WINDOWS-HOSTED-EMPTY-HARNESS-LIST-ALLOWED` removes the refusal of
+an empty list of harnesses. Not a false green while the lines after it
+hold: with no harness run there is no output to read and no count to clear
+the floor. The row is there so that a build whose messages name no harness
+is refused for that, by a throw that says so.
+
+`MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED` starts the harnesses
+without `-Z unstable-options --report-time`. Every leg runs its shard,
+clears its floor and is green, and no log carries a test's time: the times
+the step exists to record are lost on all ten legs, and no exit code or
+floor shows it.
+
+`MUT-TEST-WINDOWS-HOSTED-LOOP-PASSES-A-FAILED-HARNESS` takes the loop's
+`break` away, so a harness that passes after one that failed overwrites
+`$code` with zero, `exit $code` does not fire, and the leg is judged by its
+count, which the harnesses that passed can clear.
+
+`MUT-TEST-WINDOWS-HOSTED-LOOP-DROPS-THE-FAILED-CODE` keeps the `break` and
+drops the code: `$code` still holds the build's zero, with the same result.
+Cargo's own `test` stops at the first harness that fails, and the loop is
+held to doing the same and keeping that harness's code.
+
+`MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` keeps a harness's code
+only after the loop copies its two outputs. Under
+`$ErrorActionPreference = 'stop'` a harness that exits 101 and whose
+standard output cannot be read then ends the step on the copy's error,
+which the copy's `catch` throws again because `$code` still holds the
+build's zero or the last harness's. Not a false green, since the step still
+fails, but the failing harness's code is never kept and its standard error
+never printed.
+
+`MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED` takes the `try` and `catch`
+away from the copy of a harness's standard output: a `.part` file that
+cannot be read ends the step on PowerShell's error, with the same result
+for a harness that failed. The loop is held to keeping the code as soon as
+`WaitForExit()` returns, and to a `try` for each copy whose `catch` throws
+only for a harness that passed.
+
+`MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-BEFORE-THE-BUILD` sets
+`RUSTC_BOOTSTRAP` on a line of its own above the build, where the loop's
+line still sets it again. The build then runs in bootstrap mode, and the
+three build scripts turn on nightly features the other legs' builds leave
+off, from a tree nobody changed.
+
+`MUT-TEST-WINDOWS-HOSTED-BOOTSTRAP-ON-THE-BUILD-LINE` sets it on the
+build's own line, ahead of the `Start-Process` that builds: the same build
+in bootstrap mode, written where a reading that asked only whether a line
+above the build sets the variable would pass it.
+
+`MUT-TEST-WINDOWS-HOSTED-CARGO-AFTER-BOOTSTRAP` runs a `cargo` after the
+variable is set: the doctests, which `--all-targets` leaves out, on a line
+of their own after the loop. The step's process still holds the variable,
+so that Cargo builds in bootstrap mode. A later step would not, since it
+runs in a process of its own; this line is in the step that sets it.
+
+Each row in this section edits the workflow alone and is refused under
 `test-windows-hosted-command`. The same edit made to the workflow and to
 [`WINDOWS_SHARD_WITNESS`] together is not this pin's to refuse:
 `windows_suite_wait_complaints` in `super` reads those relations from the
-constant.
+constant, and `the_windows_leg_counts_the_tests_it_ran` holds its build
+line, its loop line and its floor line to what the model makes them.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let selected = field(step, "with").and_then(|with| scalar(with, "toolchain"));`
 
@@ -1014,7 +1098,10 @@ Every way the workflow's own `env:` is not the pinned mapping.
 The whole map, as an equality. A guard per name can only refuse names
 somebody thought of, and the dangerous ones are the others: a Cargo target
 runner bound here makes `cargo test` build every harness and run none, on
-one target, which no other platform's leg would notice. Refusing the map
+one target, which no other platform's leg would notice. The Windows legs'
+suite step no longer runs its harnesses through `cargo test`: it builds
+with `--no-run` and starts them itself, which a runner does not reach. The
+two capture steps after it still run `cargo test`. Refusing the map
 wholesale refuses that class rather than that instance.
 Measured, `MUT-WORKFLOW-ENV-TARGET-RUNNER`.
 

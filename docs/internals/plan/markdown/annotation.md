@@ -275,8 +275,9 @@ What an upstroke comment says about its task. Every field is absent until
 the comment sets it, and `assemble` fills what is absent from the
 heuristics: a slug for the id, the title keywords for the kind, document
 order for the dependencies.
-Clone supports the unchanged `Draft::annotation` callers in `assemble`;
-removing those copies belongs to their separate ownership cleanup.
+`assemble` no longer needs Clone: it borrows each draft's annotation to
+reserve explicit ids and moves it into the task. Dropping the derive is
+left to its own change.
 
 ## `pub(super) id: Option<String>,`
 
