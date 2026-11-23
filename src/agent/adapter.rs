@@ -297,7 +297,12 @@ pub fn reset_at_from_limit_message(text: &str, now_unix: u64) -> Option<String> 
             nearest = Some(at);
         }
     }
-    Some(crate::util::rfc3339_utc(u64::try_from(nearest?).ok()?))
+    let nearest = nearest?;
+    let (year, _, _) = crate::util::civil_from_days(nearest.div_euclid(86_400));
+    if !(0..=9_999).contains(&year) {
+        return None;
+    }
+    Some(crate::util::rfc3339_utc(u64::try_from(nearest).ok()?))
 }
 
 enum LimitsReset<'a> {
@@ -850,6 +855,7 @@ mod tests {
     const FEB_27_2027: u64 = 1_803_686_400;
     const FEB_27_2028: u64 = 1_835_222_400;
     const FEB_27_2029: u64 = 1_866_844_800;
+    const JAN_1_10000: u64 = 253_402_300_800;
 
     fn reset(text: &str, now: u64) -> Option<String> {
         reset_at_from_limit_message(text, now)
@@ -871,6 +877,11 @@ mod tests {
         ] {
             assert_eq!(crate::util::rfc3339_utc(now), midnight);
         }
+        assert_eq!(
+            u64::try_from(crate::util::days_from_civil(10_000, 1, 1) * 86_400).ok(),
+            Some(JAN_1_10000),
+            "10000-01-01T00:00:00Z, counted in days since `rfc3339_utc` has no four-digit year for it"
+        );
     }
 
     #[test]
@@ -1299,6 +1310,52 @@ mod tests {
         );
         assert_eq!(reset(FIVE_HOUR, u64::MAX), None);
         assert_eq!(reset(FABLE, u64::MAX), None);
+    }
+
+    #[test]
+    fn a_reset_in_the_year_10000_gives_none() {
+        assert_eq!(reset(FIVE_HOUR, JAN_1_10000), None);
+        for (text, now) in [
+            ("resets 5:30am (UTC)", JAN_1_10000 - HOUR),
+            ("resets Jan 1, 9am (UTC)", JAN_1_10000),
+            ("resets Jan 2, 9am (UTC)", JAN_1_10000 - DAY / 2),
+        ] {
+            assert_eq!(reset(&after_a_limit(text), now), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_reset_on_the_last_day_of_9999_is_four_digits() {
+        let dec_31_9999 = JAN_1_10000 - DAY;
+        for (text, now, expected) in [
+            (
+                FIVE_HOUR.to_owned(),
+                dec_31_9999 + 3 * HOUR,
+                "9999-12-31T05:30:00Z",
+            ),
+            (
+                after_a_limit("resets 11:59pm (UTC)"),
+                JAN_1_10000 - 1,
+                "9999-12-31T23:59:00Z",
+            ),
+            (
+                after_a_limit("resets Dec 31, 11pm (UTC)"),
+                dec_31_9999 + 12 * HOUR,
+                "9999-12-31T23:00:00Z",
+            ),
+            (
+                after_a_limit("resets Dec 31, 11pm (UTC)"),
+                JAN_1_10000 + 30 * 60,
+                "9999-12-31T23:00:00Z",
+            ),
+            (
+                after_a_limit("resets 11pm (UTC)"),
+                JAN_1_10000 + 30 * 60,
+                "9999-12-31T23:00:00Z",
+            ),
+        ] {
+            assert_eq!(reset(&text, now).as_deref(), Some(expected), "{text}");
+        }
     }
 
     #[test]

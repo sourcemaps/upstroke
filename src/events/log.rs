@@ -10,8 +10,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use sha2::{Digest, Sha256};
-
 use super::{Event, EventBody};
 use crate::error::UpstrokeError;
 use crate::topology::effects::{
@@ -865,7 +863,7 @@ impl StablePrefix {
 #[must_use]
 pub fn first_line_digest(bytes: &[u8]) -> Option<String> {
     let end = bytes.iter().position(|byte| *byte == b'\n')?;
-    Some(format!("sha256:{:x}", Sha256::digest(&bytes[..end])))
+    Some(crate::rundir::run_started_sha256(bytes.get(..end)?))
 }
 
 pub fn establish_stable_prefix(

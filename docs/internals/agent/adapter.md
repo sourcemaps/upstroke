@@ -600,6 +600,23 @@ they fall on character boundaries. The clock arithmetic is checked: a
 gives `None`. So does a nearest candidate before 1970, which has no unix
 time to format; only a clock read near the epoch can meet one.
 
+So does a nearest candidate whose year is outside 0000 to 9999, and that
+check comes before `util::rfc3339_utc` is called, so it is never handed an
+instant whose year it cannot write in four digits. RFC 3339 has only a
+four-digit year, and `rfc3339_utc` writes the year with `{year:04}`, which
+pads to four digits and does not stop there: the five-hour message read at
+10000-01-01T00:00:00Z had 05:30 that morning as its nearest candidate and
+returned `10000-01-01T05:30:00Z`, a `reset_at` a strict reader of the
+`pool_exhausted` event refuses. That was finding
+`PR380-RESET-PARSER-NON-RFC3339-YEAR`. The check is on the chosen
+candidate, not on `now_unix` nor on the other candidates: `Dec 31, 11pm`
+read at 00:30 on 1 January 10000 is still 9999-12-31T23:00:00Z, and a
+candidate in 10000 that is not the nearest changes nothing. Only a clock
+read in 9999 or later can meet the bound (`Feb 29` read anywhere in 9999 is
+29 February 10000), and since an instant before 1970 is refused anyway, it
+is the upper end that is met. `util::rfc3339_utc` itself
+is unchanged; its other callers format the clock.
+
 ## `enum LimitsReset<'a> {`
 
 What a text says about its limit's reset, before any of it is parsed:
@@ -1028,7 +1045,10 @@ The reset tests read their messages at fixed instants, never at the
 clock's. Each constant is a UTC midnight written as a literal, and
 `the_reset_fixtures_are_the_midnights_they_are_named_for` checks each
 against the date it is named for, so a miscounted constant fails there,
-by name, rather than as a wrong reset further down.
+by name, rather than as a wrong reset further down. `JAN_1_10000` is
+checked there by its day count from `util::days_from_civil` instead,
+since its year has five digits and `util::rfc3339_utc` writing it is not
+what the check is for.
 
 ## `mod tests` › `fn after_a_limit(reset: &str) -> String {`
 
@@ -1248,6 +1268,28 @@ now gives `None`, and the same Japanese before the five-hour message gives
 05:30: the multibyte prefix still does not move the offsets the limit's end
 is carried by. The full-width minute is read after a limit for the same
 reason as `after_a_limit`'s other texts.
+
+## `mod tests` › `fn a_reset_in_the_year_10000_gives_none() {`
+
+Finding `PR380-RESET-PARSER-NON-RFC3339-YEAR`. The five-hour message read
+at 10000-01-01T00:00:00Z (`JAN_1_10000`) gives `None`: its nearest candidate
+is 05:30 that morning, whose year has five digits, and this test failed
+while that came back as `10000-01-01T05:30:00Z`. So does a time-only
+`5:30am` read at 23:00 on 31 December 9999, whose nearest candidate is the
+next morning's, in 10000, and so do `Jan 1, 9am` read at that midnight and
+`Jan 2, 9am` read at noon on 31 December 9999, both nearest in 10000.
+
+## `mod tests` › `fn a_reset_on_the_last_day_of_9999_is_four_digits() {`
+
+The other side of the bound. The five-hour message read at 03:00 on
+31 December 9999 is `9999-12-31T05:30:00Z`, and `11:59pm` read at its last
+second is `9999-12-31T23:59:00Z`, the last minute a reset can name. `Dec 31,
+11pm` read at noon that day is that evening, though one of its candidates is
+in 10000. Read at 00:30 on 1 January 10000, `Dec 31, 11pm` and a time-only
+`11pm` are both the evening before, in 9999: a clock past the bound does
+not refuse a reset that is not. A check that refused a reset at or after the
+last day of 9999, or one that looked at `now_unix` rather than the chosen
+reset, fails here.
 
 ## `mod built_program_tests` › `struct Boundary {`
 

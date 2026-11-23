@@ -372,6 +372,18 @@ pub mod chain {
 
                 let commit: CommitRecord =
                     read_record(&private.join(rundir::COMMIT_RECORD), &run_id)?;
+                if !rundir::is_run_started_sha256(&commit.run_started_sha256) {
+                    return Err(UpstrokeError::Refused {
+                        message: format!(
+                            "the commit record at `{}` is malformed: its `run_started_sha256` \
+                             is `{}`, which is not a `sha256:` digest. A record whose digest is \
+                             not a digest proves nothing about the committed first line, so \
+                             nothing derived from it is acted on.",
+                            private.display(),
+                            commit.run_started_sha256
+                        ),
+                    });
+                }
                 let digest = rundir::run_started_sha256(root.first_line());
                 if commit.run_started_sha256 != digest {
                     return Err(UpstrokeError::Refused {

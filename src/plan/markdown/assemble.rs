@@ -5,40 +5,40 @@ use super::hints::push_unique;
 use crate::ir::{Artifact, ArtifactId, Task, TaskId, TaskKind};
 
 pub(super) fn assemble(drafts: Vec<Draft>) -> Vec<Task> {
-    let annotated: Vec<_> = drafts
-        .into_iter()
-        .map(|draft| {
-            let ann = draft.annotation();
-            (draft, ann)
-        })
-        .collect();
-    let mut taken: Vec<String> = annotated
+    let mut taken: Vec<String> = drafts
         .iter()
-        .filter_map(|(_, ann)| ann.id.clone())
+        .filter_map(|draft| draft.annotation.id.clone())
         .collect();
     let mut previous_id: Option<TaskId> = None;
-    let mut tasks = Vec::with_capacity(annotated.len());
-    for (draft, ann) in annotated {
+    let mut tasks = Vec::with_capacity(drafts.len());
+    for draft in drafts {
+        let Draft {
+            title,
+            body,
+            acceptance,
+            hints,
+            annotation: ann,
+        } = draft;
         let id = match ann.id {
             Some(explicit) => explicit,
-            None => unique_slug(&draft.title, &mut taken),
+            None => unique_slug(&title, &mut taken),
         };
-        let kind = ann.kind.unwrap_or_else(|| heuristic_kind(&draft.title));
+        let kind = ann.kind.unwrap_or_else(|| heuristic_kind(&title));
         let depends_on: Vec<TaskId> = match ann.depends {
             Some(ids) => ids.iter().map(|s| TaskId::from(s.as_str())).collect(),
             None => previous_id.take().into_iter().collect(),
         };
         let mut path_hints = ann.paths;
-        for hint in &draft.hints {
+        for hint in &hints {
             push_unique(&mut path_hints, hint);
         }
         let task = Task {
             id: TaskId(id),
             kind,
-            title: draft.title,
-            body: draft.body,
+            title,
+            body,
             depends_on,
-            acceptance: draft.acceptance,
+            acceptance,
             path_hints,
             suggested_tier: ann.tier,
             min_tier: ann.min,

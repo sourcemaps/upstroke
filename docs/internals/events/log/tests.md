@@ -30,6 +30,13 @@ Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
 carries this module's review clause -- effects only inside site-taking APIs,
 no writable handle returned. `decisions.effect_site_inventory.mechanism` (2).
 
+## `use sha2::{Digest, Sha256};`
+
+The digest oracles in this module are computed here, with `sha2` directly,
+rather than through `rundir::run_started_sha256`, which `first_line_digest`
+delegates to: an oracle spelled by the function under test would agree with
+it by definition.
+
 ## `fn scratch(tag: &str) -> ScratchTree {`
 
 ---------------------------------------------------------------------------

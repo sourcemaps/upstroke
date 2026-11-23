@@ -1564,6 +1564,47 @@ fn resume_refuses_commit_record_digest_mismatch() {
 }
 
 #[test]
+fn resume_refuses_commit_record_digest_that_is_not_a_digest_as_malformed() {
+    let fixture = Fixture::build(
+        "commit-digest-malformed",
+        Damage {
+            commit: Some(|commit| {
+                commit.run_started_sha256 = "refs/heads/master".to_owned();
+            }),
+            ..Damage::default()
+        },
+    );
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+
+    let (outcome, _) = resume(&fixture, &harness, &given);
+
+    let text = message(&outcome.expect_err("a commit record whose digest is a ref name refuses"));
+    assert!(
+        text.contains("malformed") && text.contains("is not a `sha256:` digest"),
+        "the refusal calls the record malformed, naming the field's shape: {text}"
+    );
+    assert!(
+        text.contains("refs/heads/master"),
+        "the refusal quotes the value the record holds: {text}"
+    );
+    let actual = rundir::run_started_sha256(&fixture.first_line);
+    assert!(
+        !text.contains("moved") && !text.contains(&actual),
+        "a value that is not a digest is not reported as a digest that moved: {text}"
+    );
+    assert!(
+        !harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .touched(EffectSiteId::Event(EventSite::OpenLog)),
+        "a malformed commit record is refused at (a), before the barrier's Event.OpenLog"
+    );
+}
+
+#[test]
 fn resume_refuses_owner_record_runner_mismatch() {
     let fixture = Fixture::build(
         "owner-runner",
