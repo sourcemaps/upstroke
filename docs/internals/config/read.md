@@ -66,6 +66,22 @@ unknown fields, the refusal names the typo and the accepted seven sections, and
 the regression through `load_captured`, on a capture built in memory, lives in
 the parent's suite beside the struct.
 
+## `pub(super) fn read_machine_settings(`
+
+The machine-level settings file (§17), parsed twice from one captured text:
+as [`RawRepoConfig`], which is what refuses an unknown section with the
+line and column of the typo, and as a plain table, which is what
+`layers::merge` lays the repository's file over. An absent file is `None`,
+never an error: the machine level is optional. A refusal says the file is
+the machine-level one, since an operator who is told only a path under their
+home directory may not remember why a run in some repository read it.
+
+## `pub(super) fn settings_table(`
+
+The repository's settings file as a plain table, for the merge. An absent
+file is an empty table, so a repository with no file of its own takes the
+machine's settings whole.
+
 ## `pub(super) fn read_pools(`
 
 Read `~/.upstroke/pools.toml` into typed pools (§17).
@@ -103,6 +119,19 @@ indistinguishable from "no pool" by the time it reaches the engine
 (`pool_option` maps `""` to `None`), so the attribution would vanish
 while the pool still matched for routing. Same reasoning as the
 non-empty `[[gates]]` `name`.
+
+## `let usage = UsageSource::from_keys(`
+
+The three usage keys (§17), validated by the one function `connect` also
+carries them through, so a file `connect` wrote is a file this reads. A
+refusal is prefixed with the pool's table and is otherwise
+`UsageKeyDefect`'s own text, which never repeats a `usage_token_env` that is
+not a variable's name.
+
+A pool that names a provider has `provider-endpoint` among its sources
+whether or not the file lists it. The provider key is the opt-in; requiring
+the source to be listed as well would be two switches for one decision, and
+`connect`, which writes `sources`, would then have to write one of them.
 
 ## `fn converts_exactly(units: i64) -> bool {`
 

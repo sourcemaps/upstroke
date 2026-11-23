@@ -2552,6 +2552,23 @@ fn charge_allowance(&mut self) {}
                  `ContainerRuntime::start`",
             ),
             (
+                "src/tracker/transport.rs",
+                1,
+                0,
+                0,
+                "the capacity tracker's request to `curl` (DESIGN.md §13): \
+                 `CommandSpec::stdin` carries curl's config, the address and \
+                 the headers with the credential's last, so that the \
+                 credential is in no argument. It is a spec field, on a \
+                 probe-role request the CLI hands to a host Runner of its own \
+                 for `capacity --refresh`. No run's Runner and no container \
+                 ever carries it, so no role grid varies it; what holds its \
+                 shape is \
+                 `tracker::transport::tests::the_request_goes_to_curl_on_standard_input_and_the_secret_is_in_no_argument`, \
+                 which drives the transport over a recording Runner and \
+                 asserts the exact bytes and the empty environment overlay",
+            ),
+            (
                 "src/workspace.rs",
                 1,
                 8,

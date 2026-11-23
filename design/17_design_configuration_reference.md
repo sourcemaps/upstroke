@@ -1,6 +1,6 @@
 ## 17. Configuration reference
 
-Config splits along its natural seam (v2.1): **pools are user-level** — subscriptions travel with the person, discovered and written by `upstroke connect` — while **routing and gates are repo-level overrides** on derived defaults. A fresh repo runs with zero config.
+Config has two scopes (v2.1, widened 2026-11-23). The **machine level** is one directory, `~/.upstroke/`, and holds what is the operator's rather than a repository's: `pools.toml`, because subscriptions travel with the person — **pools are user-level**, discovered and written by `upstroke connect` — and an optional `upstroke.toml` of settings wanted in every repository on the machine. The **repo level** is the repository's own `upstroke.toml`: **routing and gates are repo-level overrides** on derived defaults. Both settings files are one schema, and the repository's is laid over the machine's and wins wherever both speak ("Two scopes", below). A fresh repo on a fresh machine runs with zero config.
 
 `~/.upstroke/pools.toml` (written by `connect`, hand-editable):
 
@@ -24,6 +24,13 @@ monthly_allowance = "auto"
 kind = "unmetered"
 agent = "aider"
 endpoint = "http://homeserver:11434/v1"
+
+[pools.anthropic-api]               # a pool the capacity tracker can ask about (§13)
+kind = "api-key"
+agent = "claude-code"
+monthly_allowance = 200             # dollars: what a reported spend is measured against
+usage_provider = "anthropic-cost"   # which documented usage endpoint `capacity --refresh` asks
+usage_token_env = "ANTHROPIC_ADMIN_KEY"  # the NAME of the variable holding the key, never the key
 ```
 
 **What `connect` writes.** The file above is an operator's. The one `upstroke connect` writes is a
@@ -39,9 +46,14 @@ pools, and `connect` itself on its next run — and it has this shape:
   `local-logs` or `provider-endpoint`; `safety_margin = 0.15` and `reserve = 0.20`, §13's defaults.
   Then the operator's own keys, written only when the existing file held them under the same pool
   name: `profile`, `monthly_allowance` as a number (`"auto"` is the reader's default and is not
-  written) and `endpoint`. `connect` invents none of the three. An allowance must be a positive,
+  written), `endpoint`, and the three usage keys, `usage_provider`, `usage_token_env` and
+  `usage_account`. `connect` invents none of the six. An allowance must be a positive,
   finite number or the string `"auto"`. An invalid allowance produces a warning and leaves the
-  discovered `auto` default; valid `profile` and `endpoint` values are still carried.
+  discovered `auto` default; valid `profile` and `endpoint` values are still carried. The usage
+  keys are carried as a set or not at all: where the reader would refuse them (below), a warning
+  says why, without repeating a value that may be a credential, and none of the three is written.
+  `sources` stays the two connect discovers; the reader takes a named `usage_provider` as the
+  `provider-endpoint` source's opt-in, so the written file need not list it.
 - Comments carry what discovery found: a header naming the version, the write time (RFC 3339, UTC)
   and where the model roster came from; per agent, the auth state — one of *signed in*, *NOT signed
   in* and *could not be determined*, never the second for the third — each discovery note on its
@@ -71,6 +83,25 @@ probe under the profile. It does not check sign-in, so a profile that is not sig
 pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). The legacy
 (schema 1–3) coordinator refuses any pool that names a profile.
 
+**What the usage keys do.** They opt a pool into the capacity tracker (§13), and only an operator
+writes them. `usage_provider` names which documented usage endpoint `upstroke capacity --refresh`
+asks for this pool: `anthropic-cost`, `openai-cost`, `github-ai-credits` or
+`github-premium-requests`, spelled exactly; any other value is refused at load, naming the four.
+`usage_token_env` is the **name** of the environment variable the tracker reads the credential
+from at the moment it asks. The credential itself never belongs in the file, and a value that is
+not a variable's name (letters, digits and underscores, not starting with a digit) is refused
+without being repeated, since the usual way to get there is pasting the key. `usage_account` is
+the account, where the provider reports per account (a GitHub login); it is placed in the
+request's address, so it is refused unless it is letters, digits, `.`, `_` and `-`. A usage key
+with no `usage_provider` is refused, because the likeliest cause is that key misspelled. A
+provider with no `usage_token_env`, or with no account it needs, loads with a warning and is
+skipped at refresh: neither is a reason to refuse a run. A pool that names a provider has
+`provider-endpoint` among its `sources` whether or not the file lists it; `provider-endpoint`
+listed with no provider is, as before, parsed and not read. Every amount a provider reports is
+measured against `monthly_allowance`, so that key is what turns a report into a ceiling, and it
+must be in the provider's units: dollars for the two cost endpoints, AI credits or premium
+requests for GitHub's.
+
 **When it is rewritten.** Two comparisons against the file already there, because two questions
 are asked. *May* it be replaced: only if both complete TOML documents parse to equal tables, or
 `--force` is given; otherwise `connect` refuses, prints the file it would have written, and exits
@@ -84,8 +115,8 @@ than a missing file is reported even with `--force`.
 *Should* it be rewritten: if anything but the first generated write-time header differs,
 comments included, so a login between two runs updates the auth comment while an
 unchanged machine leaves the file, and the date on it, alone. `--force` carries `profile`,
-`monthly_allowance` and `endpoint` over from the pools of the same name in the existing file and
-replaces everything else; a file that does not parse carries nothing. Invalid allowances are
+`monthly_allowance`, `endpoint` and the three usage keys over from the pools of the same name in
+the existing file and replaces everything else; a file that does not parse carries nothing. Invalid allowances are
 omitted with the warning described above. Repeated connects using the same writer leave an
 unchanged machine's file alone once its settings and nonvolatile content match.
 
@@ -94,7 +125,38 @@ unchanged machine's file alone once its settings and nonvolatile content match.
 `monthly_allowance` and `endpoint` — and the default pool name, the agent's id, are frozen. A
 change adds a new key beside the old one, which is still read. The default pool name never
 changes, so carrying an operator's keys by pool name keeps working from one version to the next.
-The reader still warns on an unknown key and refuses an unknown value.
+The reader still warns on an unknown key and refuses an unknown value. `usage_provider`,
+`usage_token_env` and `usage_account` were added beside the ten on 2026-11-23, under that rule,
+and are frozen with them.
+
+**Two scopes: the machine level and the repo level.** Every setting below can be written in
+either file. The machine-level `upstroke.toml` sits beside the pools file, `~/.upstroke/upstroke.toml`,
+and is what a repository with no settings of its own runs under; the repository's `upstroke.toml`
+is laid over it. The rules:
+
+- **A table merges key by key**, at every depth, so `[engine] max_per_pool` from the machine and
+  `[engine] shell` from the repository both stand, and an inline table such as
+  `review = { tier = "frontier" }` merges the same way.
+- **Anything else replaces whole**: a scalar, and an array. `[[gates]]`, `[[pins]]`,
+  `[[routing.overrides]]` and `notify` are arrays, so a repository that writes any `[[gates]]`
+  runs exactly its own and none of the machine's. Appending would make a repository's gates depend
+  on a file outside it, with no way for the repository to take one away.
+- **The machine-level file must be a valid configuration on its own.** It is read and checked
+  first, as the whole of a configuration, and a refusal names it; a `[runner] kind = "container"`
+  there with the `image` left to each repository is refused, because a repository with no file
+  would run under it. The merged result is then checked and a refusal names the repository's file,
+  adding that the machine-level file is applied beneath it, since the cause can be a key that file
+  supplied or the two together.
+- **What the machine file decided is said.** A run, a `validate` and a `capacity` whose settings
+  include a machine-level key the repository left alone warn once, naming both files and each
+  such key by its dotted path (`engine.max_parallel`, `gates`). A machine-level file that decides
+  nothing says nothing. A warning about a machine-level key names the machine-level file.
+- **The machine level is the pools file's directory.** `connect --pools` and `capacity --pools`
+  name another pools file, and the settings file, the usage reports and the run index (§13, §15)
+  are then looked for beside it. A pools file kept in a repository's own root puts the
+  machine-level settings at that repository's `upstroke.toml`: that is one file and one layer.
+- **A resume reads both files as they are today**, as it already read the repository's (§15).
+  The run's record names only the repository's file.
 
 Repo-level `upstroke.toml` — overrides only; everything below has a derived default:
 
@@ -111,6 +173,9 @@ shell           = "powershell"      # gate shell; default = platform native
 mode      = "on_block"              # never | on_block | on_milestone
 notify    = ["cli", "desktop"]      # + "telegram", "slack" in v0.2
 ask_before = { frontier_escalation_over_usd = 5.0 }
+
+[capacity]
+scope = "machine"                   # machine | repo: which runs feed the capacity views (§13)
 
 [budgets]
 run_usd  = 15.0                     # API-equivalent; omit = unlimited
@@ -162,7 +227,7 @@ cmd  = "cargo test"
 timeout_secs = 1200
 ```
 
-**What the repo-level file refuses.** A mistake that would silently delete a control is an error at load, before a lock, a workspace or a run directory exists; a mistake that only degrades what the run can say about itself is a warning that names the key. So: an unknown top-level section name (anything outside `routing`, `pins`, `gates`, `engine`, `interaction`, `budgets`, `runner`) is an error naming it and the accepted seven, the same treatment as the sections below it — a misspelled section used to disappear whole, with no warning, deleting the largest unit a typo can delete. An unknown key in `[runner]`, `[engine]`, `[budgets]`, `[interaction]`, its `ask_before` table, `[routing.strategy]`, or a `[[gates]]` entry is an error naming the accepted keys — `[engine]` included, because `on_task_failure` and `shell` sit in that table beside the ceilings, and `on_task_failur = "continue"` left to a warning is a halted run the operator asked to continue; an unrecognised `kind`, `on_task_failure`, `mode`, `second_opinion` or effort value is an error, while an unrecognised `shell` warns and takes the platform default, and an unrecognised `[routing.strategy]` `mode` warns and is echoed as written; a zero ceiling, timeout or `attempts_per` is an error, as is a gate `timeout_secs` the run record cannot hold (more than 18,446,744,073,709,551 seconds, since `run_started` records it in milliseconds as a 64-bit count), a budget ceiling that is not a positive finite number of dollars, or an `ask_before` threshold that is negative or not finite; and two `[[gates]]` entries may not share a `name`, compared without regard to ASCII case because a case-insensitive filesystem keeps one log file for both, since the name is what a gate's log file and its failure report carry. A resume reads `[[gates]]` by what its log records (§15): a run whose log records its gates takes them from the record, so today's section is compared with them and never refused over — every shape above is a warning naming the recorded gates as what runs — while a run whose log predates the gate record settles its gates from today's file on that resume and reads the section exactly as a fresh run does. Nothing else in the file reads differently on a resume except the `[engine]` ceilings, which warn there rather than refuse.
+**What a settings file refuses.** The same rules bind the machine-level file and the repository's. A mistake that would silently delete a control is an error at load, before a lock, a workspace or a run directory exists; a mistake that only degrades what the run can say about itself is a warning that names the key. So: an unknown top-level section name (anything outside `routing`, `pins`, `gates`, `engine`, `interaction`, `budgets`, `runner`, `capacity`) is an error naming it and the accepted eight, the same treatment as the sections below it — a misspelled section used to disappear whole, with no warning, deleting the largest unit a typo can delete. An unknown key in `[runner]`, `[engine]`, `[budgets]`, `[capacity]`, `[interaction]`, its `ask_before` table, `[routing.strategy]`, or a `[[gates]]` entry is an error naming the accepted keys — `[engine]` included, because `on_task_failure` and `shell` sit in that table beside the ceilings, and `on_task_failur = "continue"` left to a warning is a halted run the operator asked to continue; an unrecognised `kind`, `on_task_failure`, `mode`, `second_opinion`, `[capacity]` `scope` or effort value is an error, while an unrecognised `shell` warns and takes the platform default, and an unrecognised `[routing.strategy]` `mode` warns and is echoed as written; a zero ceiling, timeout or `attempts_per` is an error, as is a gate `timeout_secs` the run record cannot hold (more than 18,446,744,073,709,551 seconds, since `run_started` records it in milliseconds as a 64-bit count), a budget ceiling that is not a positive finite number of dollars, or an `ask_before` threshold that is negative or not finite; and two `[[gates]]` entries may not share a `name`, compared without regard to ASCII case because a case-insensitive filesystem keeps one log file for both, since the name is what a gate's log file and its failure report carry. A resume reads `[[gates]]` by what its log records (§15): a run whose log records its gates takes them from the record, so today's section is compared with them and never refused over — every shape above is a warning naming the recorded gates as what runs — while a run whose log predates the gate record settles its gates from today's file on that resume and reads the section exactly as a fresh run does. Nothing else in the file reads differently on a resume except the `[engine]` ceilings, which warn there rather than refuse.
 
 **Which CLIs a schema-4 run needs.** Before a schema-4 run commits anything, it probes the shell and every agent its chains and its review plan name. A probe that fails stops the run's creation at P4, before its commit record, naming the CLI. So every CLI the review plan names must be installed where the run executes its roles: on `PATH` for the host runner, in the image for the container runner.
 

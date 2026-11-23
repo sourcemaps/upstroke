@@ -67,6 +67,34 @@ Repo config path (default: ./upstroke.toml, optional)
 
 Pools file path (default: ~/.upstroke/pools.toml)
 
+## `enum Command` › `refresh: bool,`
+
+First ask each pool's usage_provider over HTTPS (through curl) and store what
+it reports. Only this flag reaches a network; run and resume never do
+
+This is the capacity tracker (DESIGN.md §13), and the arm below is its one
+caller: `upstroke::tracker::refresh` is on the effect denylist, this file's
+allowance of `disallowed_methods` is what admits the call, and
+`tracker::tests::only_the_cli_reaches_the_tracker` fails if any other
+production file names the module. The arm supplies the two things the tracker
+is deliberately not given the means to reach for itself: a host Runner to
+start `curl` through, and the one read of the process environment, for the
+variable a pool names in `usage_token_env`.
+
+## `enum Command` › `scope: Option<Scope>,`
+
+Which runs feed the estimates, overriding [capacity] scope: every run on this
+machine, or this repository's alone
+
+## `enum Scope {`
+
+The flag's two values. A type of this file rather than `capacity::Scope`
+with a `ValueEnum` derive, so that the library's vocabulary does not depend
+on the argument parser; `chosen` maps one to the other. It is a private
+method and not a `From` impl because `effects/wrappers.toml` classifies this
+file's callables by bare name, and a second `from` beside `Interaction`'s
+would be a name two callables bear.
+
 ## `enum Command` › `Validate {`
 
 Parse a plan, resolve routing, and print the task table (no execution)
@@ -399,7 +427,10 @@ boundary cannot grow in silence. `connect` and `capacity` both probe the
 installed agent CLIs through the adapter probes in `connect::run_with` and
 `capacity::report`; neither
 drives a run, so neither is the "coordinator" whose ambient job INV-18
-names.
+names. Since 2026-11-23 `capacity --refresh` also starts `curl`, once per
+pool that names a usage provider, through the same host Runner: it is the
+same command, so the count stands at two, and it is the only child any
+command starts in order to reach a network.
 
 ## `mod tests` › `fn a_write_command_refuses_before_any_effect_when_containment_fails() {`
 

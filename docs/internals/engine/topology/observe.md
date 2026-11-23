@@ -73,6 +73,22 @@ the runs left was accepted, and `answer` wrote that question's answer. `status`
 and `status --follow` now report the read's error rather than handing a
 schema-4 log to the legacy reader.
 
+## `pub fn committed_events(bytes: &[u8], log: &Path) -> Result<Vec<TopologyEvent>, UpstrokeError> {`
+
+The committed lines of a schema-4 log as events, and nothing more: no fold,
+no replay, no plan. It is this module's one call of `TopologyFold::parse_log`,
+which `checked_replay` reaches through it, so the census that holds this
+module to one such call still counts one.
+
+It is public for one reader that wants the events and has no use for a fold:
+`capacity::machine`, which folds every run on the machine for pool evidence
+(DESIGN.md §13). That reader cannot take the checked replay, and should not
+want it. A replay needs the run's frozen plan from its private half, and a
+run whose private half is gone still drew on a pool; and what the reader
+derives is an estimate that authorizes nothing, so the entitlement a replay
+establishes is not one it needs. Like everything here it never truncates,
+syncs or locks, and a torn tail is simply not parsed.
+
 ## `fn stable_read(log: &Path, public: &Path) -> Result<(Vec<u8>, bool), UpstrokeError> {`
 
 Eight attempts, as legacy `status` allows its own: two reads and two liveness

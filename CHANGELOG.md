@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+- Capacity is now tracked for the machine rather than for a repository. `upstroke capacity` and the
+  `validate` and `--dry-run` preview fold the rate-limit signals and the self-metered draw of
+  every run on the machine, found through each schema-4 run's private half under
+  `~/.upstroke/runs/`, where they folded the latest run of the repository they were started in;
+  the draw counts the current calendar month (UTC), which is what `monthly_allowance` is measured
+  against. `[capacity] scope = "repo"`, or `upstroke capacity --scope repo`, folds this
+  repository's runs alone. Both views also read a schema-4 log now: they read it with the
+  sequential reader before, which refuses one, so a run created by the current engine contributed
+  a warning and no figure. Nothing routes on any of this yet.
+- `upstroke capacity --refresh` is new: the capacity tracker. For each pool that names a
+  `usage_provider` in `pools.toml` it asks that provider's documented usage endpoint what the
+  account has drawn this month, through a `curl` subprocess, and stores the answer under
+  `~/.upstroke/capacity/usage/`, where the capacity views read it as a ceiling that can lower an
+  estimate and never raise one. The providers are `anthropic-cost`, `openai-cost`,
+  `github-ai-credits` and `github-premium-requests`; the credential is read from the environment
+  variable named by `usage_token_env`, and `usage_account` names the account where a provider
+  reports per account. `upstroke connect` carries the three keys across a rewrite and writes none
+  itself. This is the only command that reaches a network, and `run` and `resume` never call it:
+  the engine still speaks no HTTP, and the binary links no HTTP client.
+- Settings now have a machine level. An `upstroke.toml` beside the pools file
+  (`~/.upstroke/upstroke.toml`) is read beneath every repository's own: tables merge key by key,
+  a scalar or an array (`[[gates]]`, `[[pins]]`) from the repository replaces the machine's whole,
+  and a run that takes a setting from the machine-level file says which. The machine-level file
+  must be a valid configuration on its own. A repository with no such file beside its pools file
+  is read exactly as before.
 - When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
   that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
   session under its `profile`, instead of waiting for the reset; with every pool of the agent

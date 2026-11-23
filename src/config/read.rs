@@ -10,6 +10,7 @@ use super::{
     Allowance, FileSnapshot, Path, PathBuf, Pool, PoolKind, RawPool, RawPools, RawRepoConfig,
     Source, UpstrokeError, capacity,
 };
+use crate::capacity::UsageSource;
 
 pub(super) fn read_repo_config(
     snapshot: &FileSnapshot,
@@ -31,6 +32,41 @@ pub(super) fn read_repo_config(
             message: e.to_string(),
         }),
     }
+}
+
+pub(super) struct MachineSettings {
+    pub(super) raw: RawRepoConfig,
+    pub(super) table: toml::Table,
+    pub(super) path: PathBuf,
+}
+
+pub(super) fn read_machine_settings(
+    snapshot: &FileSnapshot,
+) -> Result<Option<MachineSettings>, UpstrokeError> {
+    let path = snapshot.path().to_path_buf();
+    let Some(text) = snapshot.text()? else {
+        return Ok(None);
+    };
+    let refused = |error: toml::de::Error| UpstrokeError::Config {
+        path: path.clone(),
+        message: format!(
+            "{error} (this is the machine-level settings file, read for every repository on \
+             this machine)"
+        ),
+    };
+    let raw: RawRepoConfig = toml::from_str(&text).map_err(refused)?;
+    let table: toml::Table = toml::from_str(&text).map_err(refused)?;
+    Ok(Some(MachineSettings { raw, table, path }))
+}
+
+pub(super) fn settings_table(snapshot: &FileSnapshot) -> Result<toml::Table, UpstrokeError> {
+    let Some(text) = snapshot.text()? else {
+        return Ok(toml::Table::new());
+    };
+    toml::from_str(&text).map_err(|error: toml::de::Error| UpstrokeError::Config {
+        path: snapshot.path().to_path_buf(),
+        message: error.to_string(),
+    })
 }
 
 pub(super) fn read_pools(
@@ -97,7 +133,7 @@ fn parse_pool(
         config_error(format!(
             "[pools.{name}]: {e} (expected `kind` and `agent` strings, with optional `window`, \
              `weekly`, `sources`, `safety_margin`, `reserve`, `monthly_allowance`, `endpoint`, \
-             and `profile`)"
+             `profile`, `usage_provider`, `usage_token_env`, and `usage_account`)"
         ))
     })?;
 
@@ -200,6 +236,21 @@ fn parse_pool(
         ));
     }
 
+    let usage = UsageSource::from_keys(
+        raw.usage_provider.as_deref(),
+        raw.usage_token_env.as_deref(),
+        raw.usage_account.as_deref(),
+    )
+    .map_err(|defect| config_error(format!("[pools.{name}] {defect}")))?;
+    if let Some(usage) = &usage {
+        for gap in usage.gaps() {
+            warnings.push(format!("[pools.{name}] {gap}"));
+        }
+        if !sources.contains(&Source::ProviderEndpoint) {
+            sources.push(Source::ProviderEndpoint);
+        }
+    }
+
     let usable = has_adapter(&agent);
     if !usable {
         warnings.push(format!(
@@ -220,6 +271,7 @@ fn parse_pool(
         monthly_allowance,
         endpoint: raw.endpoint,
         profile: raw.profile,
+        usage,
         usable,
     })
 }

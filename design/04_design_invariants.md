@@ -1,7 +1,7 @@
 ## 4. Invariants
 
 1. **Agents edit files; the engine owns git.** Agents are instructed never to commit. The engine creates branches, stages, commits, and (v0.2) merges.
-2. **The engine never speaks HTTP.** All model interaction happens inside agent subprocesses.
+2. **The engine never speaks HTTP.** All model interaction happens inside agent subprocesses. The capacity tracker (§13) is not the engine: it is the one command that asks a provider's documented usage endpoint, through a `curl` subprocess, and nothing in `run` or `resume` calls it. A run reads the reports the tracker stored, as it reads any file; it never asks for one, and never waits on one.
 3. **Ground truth is the diff, not the transcript.** Gates check, reviewers judge, and feedback quotes `git diff` captured by the engine.
 4. **Every state transition is an event.** State is derived by replaying `events.jsonl`. Resume = replay + continue.
 5. **Official CLIs only.** No ToS-violating proxies, ever — the trust wedge is part of the product.

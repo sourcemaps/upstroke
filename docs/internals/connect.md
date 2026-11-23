@@ -208,13 +208,26 @@ particular is the entire point of §13's multi-account seam, and
 `monthly_allowance` is the only thing that makes a self-metered estimate
 possible at all (`Auto` yields `Unknown`).
 
-## `fn apply(self, pool: &mut Pool) -> Result<(), InvalidAllowance> {`
+Since 2026-11-23 there are six: `usage_provider`, `usage_token_env` and
+`usage_account` opt a pool into the capacity tracker (§13, §17), and they are
+an operator's for the same reason the first three are. Which billing endpoint
+answers for a pool, and which environment variable holds the key, are not
+things discovery can find, and `connect` writes none of them itself.
 
-Move the operator's valid keys into the new pool. An invalid allowance
-leaves the discovered Auto default and reports why to the caller, which
-adds the pool name to the visible warning.
+## `fn apply(self, pool: &mut Pool) -> Vec<String> {`
 
-## `pool.monthly_allowance = allowance_of(&value)?;`
+Move the operator's valid keys into the new pool, and say what was not
+moved. Each returned line is one problem, worded without the pool's name,
+which the caller adds to make the visible warning.
+
+An invalid allowance leaves the discovered Auto default. The usage keys are
+carried as a set or not at all: `capacity::UsageSource::from_keys` is the
+reader's own validation, so a set it refuses is one the configuration reader
+would refuse too, and writing it would produce a pools file that no command
+loads. The refusal's text never repeats a `usage_token_env` that is not a
+name, since a key pasted there is the usual way to get one.
+
+## `Err(error) => problems.push(format!("{error}; using auto")),`
 
 The error identifies this setting; run_with supplies the pool
 context and decides how to report the rejected value.

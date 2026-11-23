@@ -20,6 +20,17 @@ Three things live here: the pool types `~/.upstroke/pools.toml` parses into,
 the estimator that turns observations into a per-pool remaining figure, and
 the fold that collects those observations from a run's event log.
 
+Since 2026-11-23 the module has three children, each with its own rustdoc in
+its source rather than a notes file. `src/capacity/evidence.rs` is where the
+fold's rules are applied: a log is first reduced to evidence that names pools
+and nothing else, so that the logs of several runs can be put in one sequence,
+and `observe` and `exhausted_pools_of` below are one call each into it.
+`src/capacity/machine.rs` gathers that evidence from every run on the machine
+and reads the provider reports the capacity tracker stored.
+`src/capacity/usage.rs` is the schema of those reports. The tracker itself,
+the one module that speaks HTTP, is `src/tracker.rs`, and nothing in this
+module or its children starts its transport: they read what it wrote.
+
 §13's sequencing is the reason no estimate routes anything yet: v0.1 ships
 the estimator so `upstroke capacity` and the dry-run preview can show what each
 strategy *would* do, and v0.2 wires it into the binder once the estimates
@@ -33,7 +44,8 @@ exhausted, and a worker's rate limit fails over to another such pool (see
 agent's first pool, which still names the pool of its reviews and selects the
 profile its review and probe processes run under.
 
-The estimator is a pure function over plain values ([`estimate`]), so every
+The estimator is a pure function over plain values ([`estimate`], and
+[`estimate_gathered`] over what the machine-level gatherer read), so every
 rule in §13 is exercisable with no CLI installed and no file on disk. Only
 collection touches the world, and even that is a fold over events someone
 else read.
@@ -46,10 +58,13 @@ Three properties hold by construction and are pinned by tests:
    `max(0, raw × (1 − safety_margin) − reserve)` — the margin covers usage
    on other machines that local parsing cannot see, and the reserve is
    headroom the engine leaves for the operator's own interactive work.
-3. **Trust order is ranked and fixed.** `Signal > SelfMetered > Assumed >
-   Unknown` ([`Confidence`]), and a lower-ranked source can never overwrite
-   a higher one — a rate-limit signal is ground truth, and a self-metered
-   guess must not talk it back up.
+3. **Trust order is ranked and fixed.** `Signal > SelfMetered > Reported >
+   Assumed > Unknown` ([`Confidence`]), and a lower-ranked source can never
+   overwrite a higher one — a rate-limit signal is ground truth, and a
+   self-metered guess must not talk it back up. A provider's report
+   (`Reported`) is the case the rule was sharpened for: it may *lower* a
+   self-metered ceiling, since both are ceilings and the lower of two true
+   ceilings is true, and it may never raise one.
 
 ### Credential profiles
 
@@ -139,7 +154,11 @@ discard ground truth, which is why an unknown entry errors.
 ## `pub enum Source` › `ProviderEndpoint,`
 
 (4) Provider usage endpoints — fragile, never load-bearing. Parsed in
-v0.1, never read.
+v0.1 and never read there. Read since 2026-11-23, for a pool that names a
+`usage_provider`: the capacity tracker (`src/tracker.rs`) asks the endpoint
+and stores what it reports, and `src/capacity/machine.rs` reads that back.
+Listed with no provider named, it is still parsed and not read, and the
+estimate says so.
 
 ## `pub enum Source` › `LocalLogs,`
 
@@ -154,11 +173,6 @@ the operator's interactive sessions. Parsed in v0.1, never read.
 
 (1) Rate-limit signals from the CLIs — ground truth.
 
-## `impl Source` › `pub fn read_in_v0_1(self) -> bool {`
-
-Whether v0.1 actually reads this source. The two that are only parsed
-get a note on the estimate rather than a pretend number.
-
 ## `pub enum Allowance {`
 
 `monthly_allowance = "auto"` or a number of units.
@@ -166,6 +180,69 @@ get a note on the estimate rather than a pretend number.
 `Auto` is honest rather than convenient: it means the size of the allowance
 is not known to upstroke, which is different from it being zero and different
 again from it being unlimited.
+
+## `pub enum UsageProvider {`
+
+The provider usage endpoints the capacity tracker knows, as the configuration
+vocabulary names them. The enum is here, with the other pool vocabulary, and
+what each variant means on the wire is `src/tracker/provider.rs`'s: a match
+there is exhaustive, so a variant added here does not compile until it has a
+request and a parser.
+
+**The admission rule is DESIGN.md §13's**: an endpoint its provider documents,
+taking a credential the provider issues for the purpose. The four here meet
+it. The subscription-window endpoints that most usage tools read do not —
+Claude Code's is undocumented and takes the Claude.ai OAuth credential, which
+Anthropic's terms reserve for its own applications — and are absent on
+purpose, not for want of a parser.
+
+## `impl UsageProvider` › `pub fn parse(s: &str) -> Option<Self> {`
+
+Exact. `PoolKind::parse` and `Source::parse` trim and fold case, and this
+does not, for a reason of its own: `connect` carries the key across a rewrite
+by writing the parsed value back, so a spelling the reader accepted and the
+writer would not reproduce is a file `connect` refuses to replace on its next
+run, for a difference the operator cannot see.
+
+## `impl UsageProvider` › `pub const fn needs_account(self) -> bool {`
+
+Whether the endpoint reports per account, and so needs `usage_account` in its
+address. GitHub's billing usage does; the two organization cost endpoints
+answer for the organization the key belongs to.
+
+## `pub enum UsageKeyDefect {`
+
+Why three strings from a pools file are not a usage source. The messages are
+the configuration reader's refusals and `connect`'s warnings alike, which is
+why they live here and not in either.
+
+`TokenEnvNotAName` deliberately does not say what was written. The value of
+`usage_token_env` is a variable's name, and the usual way for it not to be
+one is that a key was pasted there; an error that quoted it would put the key
+on a terminal and in whatever captured the output.
+
+## `impl UsageSource` › `pub fn from_keys(`
+
+The one validation of the usage keys, shared by the configuration reader and
+by `connect`'s carry, so that `connect` cannot write a file the reader then
+refuses. A key with no provider is a refusal rather than a no-op because the
+likeliest cause is `usage_provider` misspelled, which is otherwise a pool
+that is silently never asked.
+
+## `impl UsageSource` › `pub fn gaps(&self) -> Vec<String> {`
+
+What a valid source still lacks for a refresh: no credential variable, or no
+account where the provider needs one. Warnings and not refusals, because the
+tracker's inputs are not a reason to refuse a run, and the tracker says the
+same thing itself when it skips the pool.
+
+## `pub fn names_an_account(text: &str) -> bool {`
+
+Letters, digits, `.`, `_` and `-`, not starting with `.` or `-`. The account
+is placed in the request's address, so the check is what stands between a
+pools file and a path the operator did not mean. `src/tracker/provider.rs`
+checks it again where the address is built: constructing a `UsageSource`
+confers no authority (CODING_STANDARDS.md §14).
 
 ## `pub const DEFAULT_SAFETY_MARGIN: f64 = 0.15;`
 
@@ -195,6 +272,12 @@ and displayed, and acted on for Claude Code on the host runner of a
 schema-4 run, which sets it as `CLAUDE_CONFIG_DIR` on the work, review
 and probe processes of the agent whose bound pool this is (see the
 module docs).
+
+## `pub struct Pool` › `pub usage: Option<UsageSource>,`
+
+Which provider usage endpoint the capacity tracker asks for this pool, and
+with what: `usage_provider`, `usage_token_env` and `usage_account` (§17).
+`None` for every pool `connect` writes; only an operator opts a pool in.
 
 ## `pub struct Pool` › `pub usable: bool,`
 
@@ -272,7 +355,13 @@ the source of truth). Attempts that name no pool contribute nothing — an
 unattributed cost belongs to no subscription, and guessing which would be
 worse than leaving the pool unmeasured.
 
-## `pub fn observe(events: &[Event]) -> Observations {` › `EventBody::PoolExhausted { data, .. } => {`
+## `pub fn observe(events: &[Event]) -> Observations {` › `evidence::fold(&evidence::of_legacy(events), 0)`
+
+The fold itself is `src/capacity/evidence.rs`'s since 2026-11-23, so that the
+rules below are written once and apply alike to one run's log and to every
+run on the machine. `of_legacy` reduces the log to its `pool_exhausted`
+signals and its settled attempts; `fold` applies them in order; the `0` is
+"count every draw", since one run's fold has no period to cut at.
 
 A signal sets its pool's reset to its own: the latest signal wins. The
 engine writes a second `pool_exhausted` for a pool already exhausted only
@@ -280,7 +369,7 @@ when a later refusal names a different reset — the five-hour limit
 clearing into the weekly one — and that later time is the one the
 estimate must report, not the five-hour reset already past. A rate-limited
 settlement, unlike a signal, never replaces a known reset (see
-`retire_signals`).
+[The fold's rules](#pub-mod-evidence) below).
 
 ## `pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {`
 
@@ -289,11 +378,13 @@ resumed `TopologyRun` starts from it, as the legacy resume starts its
 `exhausted_pools` from `observe`. Without it the resumed run forgets every
 signal its log holds, and the next refusal naming the same reset writes a
 second `pool_exhausted`. `observe` reads `Event`, not `TopologyEvent`, so
-this is a sibling rather than a change to it.
+this is a sibling rather than a change to it: the two differ in how a log
+becomes evidence (`evidence::of_legacy`, `evidence::of_topology`) and share
+the fold that applies it.
 
 The rules are `observe`'s. A `pool_exhausted` sets its pool's reset. A
 settled attempt's record retires the pools it proves serving and marks a
-rate-limited pool with no reset if none is recorded (`retire_signals`). An
+rate-limited pool with no reset if none is recorded. An
 accepted attempt settles as `candidate_prepared`, not `attempt_finished`,
 and its record retires the same way, as the live run's `record_promoted`
 does. `attempt_interrupted` carries no record and changes nothing.
@@ -310,16 +401,21 @@ event is `attempt_finished`, the record retires first and the signal is
 recorded after. If it is anything else, or the log ends there, the signal
 is recorded at once. That is the stop this ordering leaves: the signal is
 durable, the settlement is not, and the resume holds the pool at that
-reset.
+reset. The holding is `evidence::of_topology`'s: it emits a held signal after
+the settlement that follows it, so the order it hands the fold is the order
+the live run applied, and the fold needs no notion of holding.
 
 It is effect-free in `effects/wrappers.toml`.
 
-## `fn record_signals<'a>(`
+## `pub mod evidence;`
 
-Record each held `pool_exhausted`: its pool, at its reset. A later one for
-the same pool replaces the earlier, as in `observe`.
-
-## `fn retire_signals`
+**The fold's rules.** They were three private functions of this file until
+2026-11-23 — `record_signals`, `retire_signals` and the body of `observe` —
+and are `evidence::fold` now. What follows is their record, kept because the
+reasons outlive the names. In `fold`'s terms: a `What::Signal` records its
+pool at its reset, a later one for the same pool replacing the earlier; a
+`What::Work` first retires the pools it proves served, then marks the pool
+it proves refused.
 
 Withdraw the exhausted mark from any pool this attempt proves is serving
 again.
@@ -334,9 +430,11 @@ successful attempts it had served since.
 
 Events arrive in order, so a later signal re-marks a pool this retired —
 which is right: the pool went down again. The retiring half is
-`retire_served_pools`, which the live engine calls too.
+`retire_served_pools`, which the live engine calls too; both it and the
+fold take the pools from `served_pools`, so the two cannot disagree about
+which a record proves.
 
-## `fn retire_signals` › `if let Some(pool) = limited_pool(record) {`
+**The refused pool is marked from the settlement.** `limited_pool` names it.
 
 In a legacy log the attempt settlement itself is the durable source of a
 rate-limit signal. The legacy writer, which runs only when a run of
@@ -349,9 +447,8 @@ the signal durable and the settlement not, and `exhausted_pools_of` holds
 the pool at the signal's reset. In either log a rate-limited settlement
 that no signal accompanies still marks its pool here.
 
-## `fn retire_signals` › `exhausted.entry(pool.clone()).or_insert(None);`
-
-Mark the pool, but keep a reset already known for it. The sequential
+**Mark the pool, but keep a reset already known for it**
+(`obs.exhausted.entry(pool.clone()).or_insert(None)` in `fold`). The sequential
 engine writes one `pool_exhausted` per outage, carrying the reset it read
 from the first refusal (and one more only when a later refusal names a
 different reset), and every other deferral after it settles as one more
@@ -370,7 +467,7 @@ for a worker failure, the last review's pool for a reviewer failure. Any
 other failure, or none, names no pool, and so does an attempt that ran on
 no pool.
 
-`retire_signals` marks this pool exhausted. The schema-4 run's
+`evidence::fold` marks this pool exhausted. The schema-4 run's
 `back_off` reads the same pool from a deferred task's last
 `attempt_finished` when a reviewer was limited, to find the reset it waits
 toward, so the two cannot disagree about which subscription refused. For
@@ -413,7 +510,7 @@ It is effect-free in `effects/wrappers.toml`, like the rest of this module:
 it reads the record it is given and removes entries from the map it is
 given, and reaches no primitive and no path.
 
-## `fn retire_served_pools` › `for review in &record.reviews {`
+## `fn served_pools(record: &AttemptRecord) -> Vec<&String> {` › `.filter(|review| review.outcome != ReviewPassOutcome::Unavailable)`
 
 A review pass that reached a verdict proves its own pool served, which on
 a cross-vendor second opinion is a different subscription entirely.
@@ -459,13 +556,13 @@ Shared with [`observe`] rather than written twice: the ledger's per-pool
 column and the estimator's self-metered source must be the same number, or
 one of them is wrong and nothing says which.
 
-## `fn accumulate` › `if let Some(pool) = &record.pool {`
+## `fn draws_of(record: &AttemptRecord) -> impl Iterator<Item = (&String, Option<f64>)> {`
 
 An attempt naming no pool contributes nothing: unattributed cost belongs
 to no subscription, and guessing which would be worse than leaving the
 pool unmeasured.
 
-## `fn accumulate` › `for review in &record.reviews {`
+## `fn review_draws(reviews: &[ReviewRecord]) -> impl Iterator<Item = (&String, Option<f64>)> {`
 
 A cross-vendor second opinion drains a different subscription than the
 implementer it judged (§11.3), so each pass is attributed on its own.
@@ -496,11 +593,13 @@ An **upper bound** on the fraction still available, after
 `safety_margin` and `reserve`, clamped to `0.0..=1.0`.
 
 Deliberately not "the fraction remaining". Self-metering sees only what
-this engine spawned in this repository, so `1 − draw/allowance` is what
+this engine spawned — in one run, in this repository this month, or on
+this machine this month, by the basis — so `1 − draw/allowance` is what
 is left *if nothing else drew on the pool* — and something else almost
-always did: earlier runs, other repositories, and the operator's own
-interactive sessions (§13's source 3, which v0.1 parses and does not
-read). Every one of those can only reduce what is left, never increase
+always did: other machines, and the operator's own interactive sessions
+(§13's source 3, which is parsed and not read). The machine basis closes
+the two gaps this note used to list first, earlier runs and other
+repositories, and those two only. Every one of those can only reduce what is left, never increase
 it, so the figure is sound as a ceiling and false as a measurement.
 Rendered with `≤` for exactly that reason.
 
@@ -523,6 +622,12 @@ Nothing measured it.
 Derived from the pool's declared shape rather than from anything
 observed — e.g. a local endpoint that cannot run out.
 
+## `pub enum Confidence` › `Reported,`
+
+The provider's own usage endpoint said so, as the capacity tracker stored
+it. Below self-metering, as §13's trust order has it: an endpoint can change
+or fail without notice, and what this engine spawned it knows for certain.
+
 ## `pub enum Confidence` › `SelfMetered,`
 
 Self-metering of what this engine spawned.
@@ -530,6 +635,24 @@ Self-metering of what this engine spawned.
 ## `pub enum Confidence` › `Signal,`
 
 A rate-limit signal from the CLI itself.
+
+## `pub struct Reported {`
+
+The ceiling a stored provider report still supports for one pool, already
+reduced to a fraction: `remaining` is raw, before the pool's margin and
+reserve. `src/capacity/machine.rs` builds it (`reading`), since what a report
+is worth depends on the clock and on the pool's allowance, and the estimator
+is given neither.
+
+## `pub enum Basis {`
+
+What the observations were folded from, which decides how the draw is worded:
+"this run drew", "this repository's runs drew, this month,", "upstroke on this
+machine drew, this month,". The sentence used to be fixed at "this run", which
+is still true of the snapshot a run writes about itself and false of the
+capacity views since they became machine-level. The self-metered note takes
+its list of what went unseen from the same place, so a machine-level ceiling
+no longer says other repositories are missing from it.
 
 ## `pub struct PoolEstimate {`
 
@@ -550,6 +673,18 @@ Everything the estimate could not account for, said out loud.
 ## `impl PoolEstimate` › `pub fn describe(&self) -> String {`
 
 One line: the pool, what is left, and how confident that is.
+
+## `pub fn estimate_gathered(pools: &[Pool], gathered: &Gathered) -> Vec<PoolEstimate> {`
+
+[`estimate`] over what `machine::gather` read: the same rules, with the
+provider reports and the basis the gatherer established. `estimate` is the
+one-run form, with no report and the `Run` basis, and is what a run's own
+`capacity_snapshot` still uses.
+
+The notes the gatherer attached to a pool's report are cloned into the
+estimate (`notes.extend(report_notes.iter().cloned())`): an estimate owns its
+notes, as it owns every other line of itself, and the gatherer's copy is
+borrowed for every pool in turn.
 
 ## `pub fn estimate(pools: &[Pool], obs: &Observations) -> Vec<PoolEstimate> {`
 
@@ -580,11 +715,29 @@ draw is reported beside an Unknown remaining rather than dressed up as
 one — §13's conservatism is about never overstating what is left, and
 "we measured some spend" is not a measurement of the ceiling.
 
+## `fn estimate_one` › `if let Some(report) = reported {`
+
+(4) The provider's report, last and below everything above it. **It only
+ever sets or lowers a ceiling.** Against a signal it is a note and the
+signal stands; an unmetered pool it says nothing about; a self-metered
+ceiling it replaces only when its own is lower, and otherwise the note says
+the report allowed more and was not used. That is "never load-bearing" made
+into arithmetic: both figures are ceilings, the lower of two true ceilings is
+true, and an endpoint that breaks high can cost nothing while one that breaks
+low costs only caution. It never yields `Exhausted`, whatever it reports: a
+report of everything drawn is `AtMost(0.0)`, and "exhausted" stays the word
+of a rate-limit signal alone.
+
+This arm sits outside `take` on purpose. `take` is rank-ordered replacement,
+and replacement is exactly what a lower-ranked source must not do here.
+
 ## `fn estimate_one` › `let unread: Vec<String> = pool`
 
-The two sources v0.1 parses but does not read. Saying so is the point: a
-pool that lists `local-logs` and gets an estimate anyway would read as
-though interactive usage had been accounted for.
+The sources that are parsed and not read: `local-logs` always, and
+`provider-endpoint` where the pool names no `usage_provider`, which is then
+the thing to add. Saying so is the point: a pool that lists `local-logs` and
+gets an estimate anyway would read as though interactive usage had been
+accounted for.
 
 ## `pub fn effective_remaining(raw: f64, pool: &Pool) -> f64 {`
 
@@ -639,12 +792,29 @@ would be a lie by tense.
 
 ## `pub struct CapacityOptions {`
 
-`upstroke capacity [--config <path>] [--pools <path>]` (§18).
+`upstroke capacity [--config <path>] [--pools <path>] [--scope machine|repo]`
+(§18). `--refresh` is not here: it is the capacity tracker's, a different
+module (`src/tracker.rs`), which the CLI runs before it asks for this report.
+Nothing in this file starts it.
 
 ## `pub struct CapacityOptions` › `pub repo_root: std::path::PathBuf,`
 
-Where to look for runs to self-meter from. Outside a git repository
-there simply are none, which the report says rather than erroring on.
+This repository, whose own run directory is always listed: it is where a run
+of schemas 1–3, which keeps no owner record under the machine directory, can
+be found at all. Outside a git repository there are no such runs, which the
+report says rather than erroring on.
+
+## `pub struct CapacityOptions` › `pub scope: Option<Scope>,`
+
+`--scope`. `None` takes `[capacity] scope` from the settings, whose own
+default is the machine (§17), so the flag outranks the file.
+
+## `pub struct CapacityOptions` › `pub now_unix: Option<u64>,`
+
+The moment the report is taken at, which decides which calendar month the
+draw counts and whether a stored provider report's window has reset. `None`
+reads the clock; a test gives the moment, so that neither is a function of
+when the suite ran.
 
 ## `pub struct CapacityReport` › `pub agents: Vec<AgentStatus>,`
 
@@ -652,20 +822,33 @@ Live probe + discovery per agent named by a pool. **This** is where
 probing belongs: `capacity` is allowed to spawn the vendors' CLIs, and
 `validate` is not (§18).
 
-## `pub struct CapacityReport` › `pub run_id: Option<String>,`
+## `pub struct CapacityReport` › `pub gathered: Gathered,`
 
-The run the self-metered figures were folded from.
+What the estimates were folded from: the observations, the provider reports
+still in force, and how many runs in how many repositories. It replaced
+`run_id`, the one run the figures used to come from.
 
 ## `pub fn report(`
 
-Collect everything `upstroke capacity` reports: pools from config, self-metered
-spend from the latest run in this repo, and a live probe per agent.
+Collect everything `upstroke capacity` reports: pools from config, the signals
+and the self-metered draw of every run in scope, the provider reports the
+tracker stored, and a live probe per agent. It reads files and starts each
+agent's probe; it writes nothing and asks no provider.
 
-## `let (observations, run_id) = match crate::rundir::latest_run(&opts.repo_root) {`
+## `let gathered = machine::gather(`
 
-Self-metering needs a repository with runs in it. Pools are user-level
-(§17), so a listing outside a repo is still worth having — it just cannot
-say what has been drawn. Reporting that beats refusing to run.
+Until 2026-11-23 this was `rundir::latest_run` and `events::read_all`: the
+latest run of this repository, read with the sequential reader. That had two
+faults. It was the wrong unit, since a pool is drained by every repository on
+the machine and a limit met in one is the state of the pool in all. And it had
+stopped working without anyone noticing: the sequential reader refuses a
+schema-4 log (`line 2 is not a valid event`), so for every run `upstroke run`
+has created since PR12 the report carried a warning and no figure.
+`machine::gather` reads each log with the reader of its own schema and never
+fails: a run it cannot fold is a warning naming it, and the rest are folded.
+
+Pools are user-level (§17), so a listing outside a repo is still worth
+having, and with the machine scope it now says what other repositories drew.
 
 ## `let runner = crate::runner::host::HostRunner::new();`
 

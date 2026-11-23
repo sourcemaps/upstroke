@@ -8,7 +8,7 @@ upstroke run <plan> [--dry-run] [--budget <usd>] [--config <path>]
 upstroke resume <run-id>
 upstroke status [<run-id>] [--follow]
 upstroke answer <question-id> [--option N | --text "..."]
-upstroke capacity                    # all pools: remaining, resets, active strategy effect
+upstroke capacity [--refresh] [--scope machine|repo]  # all pools: remaining, resets, active strategy effect
 upstroke export-decisions <run-id> [--format jsonl|csv] # landed 2026-08-12: local versioned attempt projection to stdout
 ```
 
@@ -20,6 +20,22 @@ lines; each physical note line is prefixed separately and control characters bec
 note cannot create an unprefixed warning record. A skipped agent's error is reported once. Warnings
 follow the agent summaries, then `wrote <path>`, `unchanged: <path>`, or the refusal with the proposed
 file and what `--force` keeps. §17 describes that file and its rewrite rules.
+
+`capacity` reports every pool from what is on disk: the signals and the self-metered draw folded
+from every run on the machine (§13), or from this repository's alone with `--scope repo` or
+`[capacity] scope = "repo"`, the flag outranking the setting, and whatever provider reports the
+capacity tracker stored. It prints one `scope:` line saying which, from how many runs and
+repositories. It also probes each agent's CLI for its sign-in, which is why probing lives here
+and not in `validate`. **`--refresh` is the capacity tracker** (§13) and the only flag of any
+command that reaches a network: before the report, it asks the usage endpoint of each pool that
+names a `usage_provider` (§17), through `curl`, and prints one line per such pool — `stored`
+with what was reported, `skipped` with what was missing (no `usage_token_env`, a variable that
+is not set, no account), or `failed` with the provider's status or `curl`'s own error — and then
+the report, which now reads what was stored. A refresh that stores nothing is not an error: the
+command exits `0` once the report is printed, and each pool's line is where its outcome is.
+Without `--refresh` the command asks no provider, and no other command ever does. To keep the
+reports current, schedule `upstroke capacity --refresh` with the machine's own scheduler; there
+is no daemon.
 
 `--dry-run` executes everything except agents: parse, route, and print task → kind → chain (with source of each decision: config/annotation/override) → gates → pool + strategy effect, at zero spend. It exists from day one; it is both the config-iteration loop and the sales demo.
 

@@ -176,25 +176,28 @@ ships. A run asks the same question of the adapters its own harness
 holds, which in production is the same set — so the preview cannot
 promise a reviewer the run would then refuse.
 
-## `fn latest_run_observations(`
+## `fn gathered_capacity(`
 
-§13's observations, without executing anything: fold the latest run in this
-repository, if there is one.
+§13's observations, without executing anything. Until 2026-11-23 this folded
+the latest run in this repository; it now asks `capacity::machine::gather`
+for every run in the configured scope, the machine's by default, and for the
+provider reports the capacity tracker stored. It still executes nothing and
+asks nobody: the gatherer reads files, and the tracker, which is what asks a
+provider, is a different command (`upstroke capacity --refresh`).
 
 A missing or unreadable run is not an error here. `validate` describes a
 plan; a broken run directory beside it is somebody else's problem, and
 refusing to preview a plan over one would be a strange trade.
-`has_pools` short-circuits the whole fold. With no pools connected the
+An empty pools list short-circuits the whole fold. With no pools connected the
 capacity block is one line and the observations are never consulted, so
-parsing an entire run's log for it is work with no reader — and `validate`
+parsing every run's log for it is work with no reader — and `validate`
 is the fast, zero-spend iteration loop §18 puts on day one.
 
-## `Err(error) => {`
-
-A run that exists but cannot be folded is not "no run" — and
-`read_all`'s refusal ("the log has been rewritten…") is exactly the
-loud error the event-log design exists to produce, so swallowing it
-and reporting an empty repository hid two things at once.
+A run that exists but cannot be folded is not "no run": the gatherer warns,
+naming it, and folds the rest. A log's own refusal ("the log has been
+rewritten…") is exactly the loud error the event-log design exists to
+produce, so swallowing it and reporting an empty machine would hide two
+things at once. That warning was this function's until the fold moved.
 
 ## `pub fn render(&self) -> String {`
 

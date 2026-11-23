@@ -118,6 +118,13 @@ fn stable_read(log: &Path, public: &Path) -> Result<(Vec<u8>, bool), UpstrokeErr
     })
 }
 
+pub fn committed_events(bytes: &[u8], log: &Path) -> Result<Vec<TopologyEvent>, UpstrokeError> {
+    TopologyFold::parse_log(bytes).map_err(|error| UpstrokeError::EventLog {
+        path: log.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
 fn checked_replay(
     run_id: &str,
     public: &Path,
@@ -128,7 +135,7 @@ fn checked_replay(
         path: log.to_path_buf(),
         message,
     };
-    let events = TopologyFold::parse_log(committed).map_err(|error| refused(error.to_string()))?;
+    let events = committed_events(committed, log)?;
     let Some(TopologyEventBody::RunStarted { data: started }) =
         events.first().map(|event| &event.body)
     else {

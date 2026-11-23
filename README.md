@@ -34,8 +34,8 @@ older head is checked again on the combined tree before it lands.
 
 ## Status
 `v0.1.0`, the sequential conductor, is the only tagged release ([CHANGELOG](CHANGELOG.md)). This
-README describes `master`, where v0.2 is in progress and unreleased; capacity is reported, not
-acted on.
+README describes `master`, where v0.2 is in progress and unreleased; capacity is tracked for the
+whole machine and reported, not acted on.
 
 ## Install
 From a checkout of `master`, `cargo install --locked --path .` builds `upstroke` into Cargo's `bin`
@@ -52,7 +52,8 @@ On Windows, Codex can review but not implement.
 | `upstroke connect` | Discovers agent CLIs and writes `~/.upstroke/pools.toml`. |
 | `upstroke validate plan.md` | Prints the task graph, model chains, gates and reviewers, at zero spend. |
 | `upstroke run plan.md --dry-run` | The same preview; no agent is started. |
-| `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining. |
+| `upstroke capacity` | Checks sign-in once per agent and shows each pool's estimated remaining, from every run on this machine. |
+| `upstroke capacity --refresh` | First asks each pool's billing endpoint what it has drawn this month, for pools you opted in. |
 | `upstroke run plan.md --budget 15` | Runs for real on a `upstroke/run-<id>` branch; needs a clean working tree. |
 | `upstroke status [<run-id>]` | The ledger: attempts, models, cost. |
 | `upstroke answer <question-id>` | Answers a question that parked a task. |
@@ -86,7 +87,9 @@ while you are present.
 
 ## Configuration
 Pools are user-level, in `~/.upstroke/pools.toml`, written by `upstroke connect`; routing, gates and
-budgets are repo-level, in `upstroke.toml`. Zero config works; the configuration reference is
+budgets are repo-level, in `upstroke.toml`. Any of those settings can also be written once for the
+whole machine, in `~/.upstroke/upstroke.toml`: the repository's file is laid over it and wins
+wherever both speak. Zero config works; the configuration reference is
 [design/17](design/17_design_configuration_reference.md).
 ```toml
 [routing]
@@ -101,6 +104,10 @@ cmd = "cargo test"
 ## Guarantees
 - **Agents edit files; the engine owns git and never pushes.**
 - **The engine never calls a model API.** Models run only inside the vendors' own CLIs.
+- **A run makes no network request of its own.** One command does, and only when asked:
+  `upstroke capacity --refresh` reads the documented billing endpoint of each pool you opted in,
+  through `curl`, with a key from an environment variable you name
+  ([design/13](design/13_design_capacity_engine.md)).
 - **Ground truth is the diff, not the transcript.** Gates and reviewers get the diff the engine
   captured.
 - **An empty diff can never pass.**

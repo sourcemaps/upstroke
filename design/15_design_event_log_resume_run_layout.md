@@ -21,8 +21,41 @@ The durable run artifacts are **split in two**, by who is allowed to read each h
     tasks/k<task>-g<generation>_<tag>/  # detached linked worktrees, one instance per incarnation
     merge/s<sequence>_<tag>/            # detached integration staging worktrees, likewise
     snapshots/<name>_<tag>/             # exact gate and review snapshots, likewise
+~/.upstroke/                        # the machine directory: what is the operator's, not a repository's
+    pools.toml                      # machine-level pools, written by `connect` (§17)
+    upstroke.toml                   # machine-level settings, read beneath every repository's own (§17)
+    capacity/usage/<pool>-<tag>.json    # the capacity tracker's stored provider reports (§13)
 upstroke.toml                       # repo-root config, checked in
 ```
+
+**The machine directory holds no run state.** `pools.toml`, the machine-level `upstroke.toml` and
+`capacity/usage/` are configuration and a cache of what providers reported; a run's state is its
+event log and nothing here. The capacity views read `runs/<run-id>/owner.json` under it to find
+every schema-4 run's public directory (§13), which makes the private halves an index as well as a
+store, and changes nothing about who writes them. A usage report is one JSON file per pool,
+written whole by the capacity tracker and by nothing else: staged beside its destination under a
+name no other writer can pick and renamed into place, so a reader sees the old report or the new
+and never part of either. The write is atomic and not durable, because a lost report costs one
+refresh. Its name is the pool's name reduced to `[A-Za-z0-9._-]` and eight hex digits of the
+name's SHA-256, and the file records the exact name, which the reader checks. The schema is
+versioned and read strictly:
+
+```json
+{
+  "schema": 1,
+  "pool": "anthropic-api",
+  "provider": "anthropic-cost",
+  "fetched_at": "2026-11-23T12:03:00Z",
+  "windows": [
+    { "label": "month", "used_amount": 12.5, "resets_at": "2026-12-01T00:00:00Z" }
+  ]
+}
+```
+
+A file with an unknown field, a missing one, another `schema`, a negative or non-finite amount, a
+timestamp that is not RFC 3339, more than sixteen windows, or more than 64 KiB is not a report:
+the reader says so in a warning and the estimate falls back to what the other sources say, never
+to a guess. This paragraph was added on 2026-11-23 with the tracker.
 
 **An answer file is read, never taken.** Ingesting `answers/<question-id>.json`
 reads it, and no reader of answers removes or rewrites it, so an ingestion

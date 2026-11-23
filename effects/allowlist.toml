@@ -792,6 +792,53 @@ refused. Listed because a future effect here must be reviewed into `allows` \
 rather than appearing silently, and because the layer that governs the allowlist \
 being absent from it would be the one omission nobody would think to look for."""
 
+[[funnel]]
+path = "src/tracker.rs"
+allows = ["clippy::disallowed_methods"]
+packet = "none: not a module the retired packet names. Added on 2026-11-23 with the capacity tracker (DESIGN.md §4 invariant 2, §13), as CODING_STANDARDS.md §2 requires of a new effect: reviewed into this file in the change that introduces it"
+review = """
+The capacity tracker's entry point and its one effect on disk. It is the only \
+module that asks a provider usage endpoint over HTTPS, and it is not the engine: \
+`run` and `resume` never call it (DESIGN.md §4.2). \
+WHAT IT NEEDS THE ALLOWANCE FOR, measured by denying the lint and counting the \
+errors on the library target: `clippy::disallowed_methods`, 5 production sites. \
+Four are in `publish` -- `std::fs::create_dir_all` 1 (the report directory), \
+`std::fs::write` 1 (the staged report), `std::fs::rename` 1 (publication) and \
+`std::fs::remove_file` 1 (the staged file, when the rename fails) -- and the \
+fifth is `refresh` calling `publish`, which is denied by path like any other \
+effectful wrapper (`clippy.toml`). The test region adds 27 more: \
+`std::fs::create_dir_all` 8 and `std::fs::write` 8, which build the pools files, \
+run directories and owner records its fixtures read, and 11 calls of the \
+module's own two denied entry points, `refresh` 7 and `publish` 4. \
+`clippy::disallowed_types` and `clippy::disallowed_macros` are FORBIDDEN in this \
+file rather than left to `-D warnings`: it names no `std::process::Command` and \
+prints nothing. \
+NO PROCESS IS STARTED HERE. The HTTPS request is a `curl` subprocess, built as a \
+data-only `CommandSpec` in `src/tracker/transport.rs` and started by the Runner \
+through `agent::probe_request`, the Process funnel every other program goes \
+through. That child and `src/tracker/provider.rs` each state `#![forbid(..)]` of \
+all three governed lints at file level and are not covered by this row. \
+CONTAINMENT. Every production write is under one directory, \
+`<machine dir>/capacity/usage/`, where the machine directory is the pools \
+file's own (`~/.upstroke` by default). The destination's name is derived from \
+the pool's name by `capacity::usage::report_path` (a reduction to \
+`[A-Za-z0-9._-]` plus eight hex digits of its SHA-256), so a pool name cannot \
+place a file outside that directory. The staged file is named with a fresh ULID \
+and is the only thing `remove_file` is ever called on. Nothing is written inside \
+a repository, a run directory or a private half, and nothing is deleted that \
+this call did not create. \
+WHAT THE WRITE GUARANTEES: atomic replacement by rename, not durability. No \
+barrier is called; a crash can lose the newest report and the next refresh \
+writes it again. A report is validated against the reader's bounds before the \
+first effect. \
+HANDLES: no item returns a `File`, an `OpenOptions` or a `Command`. `publish` \
+returns the destination path. \
+ITS ENTRY POINTS ARE DENIED. `refresh` and `publish` are effectful rows of \
+`effects/wrappers.toml` and entries of `clippy.toml`, so a module that states \
+no allowance cannot call them; `tracker::tests::only_the_cli_reaches_the_tracker` \
+covers the frozen legacy modules, which do state one, by reading every \
+production source file for the module's name."""
+
 # ---------------------------------------------------------------------------
 # Legacy modules, FROZEN AT PR5
 #
