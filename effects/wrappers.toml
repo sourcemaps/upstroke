@@ -1788,7 +1788,9 @@ effect_free = [
 [[module]]
 path = "src/capacity.rs"
 crate_path = "upstroke::capacity"
-shared = { describe = 2, fmt = 5, parse = 2 }
+# `fmt` gained `UsageProvider`'s `Display` and `parse` its parser, both pure, on
+# 2026-11-23.
+shared = { describe = 2, fmt = 6, parse = 3 }
 funnel = []
 effectful = []
 effectful_unnameable = []
@@ -1798,21 +1800,54 @@ effect_free = [
     "drain_of",
     "effective_remaining",
     "estimate",
+    # `estimate` over what `capacity::machine::gather` read: plain values in,
+    # estimates out.
+    "estimate_gathered",
     "exhausted_pools_of",
     "fmt",
+    # Validates three optional strings from a pools file into a `UsageSource`.
+    "from_keys",
+    # Lists what a `UsageSource` lacks for a refresh, as text.
+    "gaps",
     "is_empty",
     "limited_pool",
+    # Character-class predicates over `&str`.
+    "names_an_account",
+    "names_an_environment_variable",
+    # A `const fn` over the provider enum.
+    "needs_account",
     "observe",
     "parse",
     "parse_duration",
     "pool_exhausted_to_record",
     "pool_for",
-    "read_in_v0_1",
     "render",
     "render_duration",
+    # Reads files and starts each agent's probe through the Runner. It writes
+    # nothing and asks no provider: that is `tracker::refresh`, a different
+    # module and a denied one.
     "report",
     "retire_served_pools",
     "strategy_preview",
+]
+
+[[module]]
+path = "src/tracker.rs"
+crate_path = "upstroke::tracker"
+funnel = []
+# The capacity tracker. Both are denied by path, which is what keeps the one
+# module that speaks HTTP out of reach of every module that states no allowance
+# (DESIGN.md §4 invariant 2). `refresh` starts `curl` through the Runner for each
+# pool that names a provider and reaches `publish` without leaving its file;
+# `publish` creates the report directory, stages a file and renames it.
+effectful = [
+    "publish",
+    "refresh",
+]
+effectful_unnameable = []
+effect_free = [
+    # Formats a `RefreshReport` into a `String`.
+    "render",
 ]
 
 [[module]]

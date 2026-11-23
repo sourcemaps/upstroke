@@ -114,8 +114,8 @@ pub fn run_with<'a>(
                 }
                 let mut pool = pool_for_agent(id, &discovery);
                 if let Some(kept) = carried.remove(&pool.name) {
-                    if let Err(error) = kept.apply(&mut pool) {
-                        warnings.push(format!("pool `{}`: {error}; using auto", pool.name));
+                    for problem in kept.apply(&mut pool) {
+                        warnings.push(format!("pool `{}`: {problem}", pool.name));
                     }
                 }
                 agents.push(AgentReport {
@@ -212,10 +212,14 @@ struct OperatorKeys {
     profile: Option<String>,
     monthly_allowance: Option<toml::Value>,
     endpoint: Option<String>,
+    usage_provider: Option<String>,
+    usage_token_env: Option<String>,
+    usage_account: Option<String>,
 }
 
 impl OperatorKeys {
-    fn apply(self, pool: &mut Pool) -> Result<(), InvalidAllowance> {
+    fn apply(self, pool: &mut Pool) -> Vec<String> {
+        let mut problems = Vec::new();
         if let Some(profile) = self.profile {
             pool.profile = Some(profile);
         }
@@ -223,13 +227,32 @@ impl OperatorKeys {
             pool.endpoint = Some(endpoint);
         }
         if let Some(value) = self.monthly_allowance {
-            pool.monthly_allowance = allowance_of(&value)?;
+            match allowance_of(&value) {
+                Ok(allowance) => pool.monthly_allowance = allowance,
+                Err(error) => problems.push(format!("{error}; using auto")),
+            }
         }
-        Ok(())
+        match crate::capacity::UsageSource::from_keys(
+            self.usage_provider.as_deref(),
+            self.usage_token_env.as_deref(),
+            self.usage_account.as_deref(),
+        ) {
+            Ok(usage) => pool.usage = usage,
+            Err(defect) => problems.push(format!(
+                "{defect}; its `usage_provider`, `usage_token_env` and `usage_account` were not \
+                 carried"
+            )),
+        }
+        problems
     }
 
     fn any(&self) -> bool {
-        self.profile.is_some() || self.monthly_allowance.is_some() || self.endpoint.is_some()
+        self.profile.is_some()
+            || self.monthly_allowance.is_some()
+            || self.endpoint.is_some()
+            || self.usage_provider.is_some()
+            || self.usage_token_env.is_some()
+            || self.usage_account.is_some()
     }
 }
 
@@ -1217,5 +1240,164 @@ mod tests {
             discovery.models.is_empty() || caps.model_list,
             "models may only be reported by a CLI whose --help advertises listing"
         );
+    }
+
+    const USAGE_KEYS: &str = "usage_provider = \"anthropic-cost\"\n\
+                              usage_token_env = \"ANTHROPIC_ADMIN_KEY\"\n";
+
+    fn the_one_pool(path: &Path) -> Pool {
+        let mut warnings = Vec::new();
+        let hermetic = path.parent().expect("the pools file is in a directory");
+        let mut cfg = crate::config::load(None, hermetic, Some(path), &mut warnings)
+            .unwrap_or_else(|error| panic!("the written file loads: {error}"));
+        assert_eq!(cfg.pools.len(), 1, "one usable agent, one pool");
+        cfg.pools.remove(0)
+    }
+
+    #[test]
+    fn connect_writes_no_usage_key_of_its_own() {
+        let tree = scratch("usage-none");
+        let path = tree.path().join("pools.toml");
+        let report = connect(&path, false);
+        assert_eq!(report.outcome, Wrote::Written);
+        let settings: Vec<&str> = report
+            .content
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        assert!(
+            !settings.iter().any(|line| line.contains("usage_")),
+            "which provider to ask, and with what credential, is the operator's to say: \
+             {settings:?}"
+        );
+        assert_eq!(the_one_pool(&path).usage, None);
+    }
+
+    #[test]
+    fn usage_keys_an_operator_added_survive_a_connect_without_force() {
+        let tree = scratch("usage-carried");
+        let path = tree.path().join("pools.toml");
+        let first = connect(&path, false);
+        fs::write(&path, format!("{}{USAGE_KEYS}", first.content)).expect("the operator's edit");
+
+        let second = connect(&path, false);
+        assert_ne!(
+            second.outcome,
+            Wrote::Refused,
+            "keys connect carries are not a conflict with what it would write"
+        );
+        assert!(second.warnings.is_empty(), "{:?}", second.warnings);
+        assert_eq!(connect(&path, false).outcome, Wrote::Unchanged);
+
+        let pool = the_one_pool(&path);
+        assert_eq!(
+            pool.usage,
+            Some(crate::capacity::UsageSource {
+                provider: crate::capacity::UsageProvider::AnthropicCost,
+                token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
+                account: None,
+            })
+        );
+        assert!(
+            pool.sources.contains(&Source::ProviderEndpoint),
+            "the reader takes the provider as the source's opt-in: {:?}",
+            pool.sources
+        );
+        let written = fs::read_to_string(&path).expect("the file");
+        assert!(
+            written.contains("sources = [\"signals\", \"self\"]"),
+            "connect still writes the two sources it discovers: {written}"
+        );
+    }
+
+    #[test]
+    fn force_carries_the_usage_keys_with_the_other_operator_keys() {
+        let tree = scratch("usage-forced");
+        let path = tree.path().join("pools.toml");
+        fs::write(
+            &path,
+            "[pools.claude-code]\nkind = \"api-key\"\nagent = \"claude-code\"\nreserve = 0.5\n\
+             monthly_allowance = 250\nusage_provider = \"github-ai-credits\"\n\
+             usage_token_env = \"GH_PLAN_TOKEN\"\nusage_account = \"octo-cat\"\n",
+        )
+        .expect("a hand-written file");
+        assert_eq!(connect(&path, false).outcome, Wrote::Refused);
+
+        let forced = connect(&path, true);
+        assert_eq!(forced.outcome, Wrote::Written);
+        assert!(forced.warnings.is_empty(), "{:?}", forced.warnings);
+        let pool = the_one_pool(&path);
+        assert_eq!(
+            pool.reserve,
+            crate::capacity::DEFAULT_RESERVE,
+            "not an operator key"
+        );
+        assert_eq!(
+            pool.monthly_allowance,
+            crate::capacity::Allowance::Units(250.0)
+        );
+        assert_eq!(
+            pool.usage,
+            Some(crate::capacity::UsageSource {
+                provider: crate::capacity::UsageProvider::GithubAiCredits,
+                token_env: Some("GH_PLAN_TOKEN".to_owned()),
+                account: Some("octo-cat".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn usage_keys_the_reader_would_refuse_are_not_carried_and_a_credential_is_not_repeated() {
+        for (keys, says) in [
+            (
+                "usage_provider = \"anthropic-cost\"\nusage_token_env = \"sk-ant-admin01-LEAK\"\n",
+                "NAME of an environment variable",
+            ),
+            (
+                "usage_provider = \"claude-subscription\"\nusage_token_env = \"TOKEN\"\n",
+                "is not recognized",
+            ),
+            ("usage_token_env = \"TOKEN\"\n", "no `usage_provider`"),
+            (
+                "usage_provider = \"github-ai-credits\"\nusage_token_env = \"TOKEN\"\n\
+                 usage_account = \"../orgs/acme\"\n",
+                "`usage_account` must be an account name",
+            ),
+        ] {
+            let tree = scratch("usage-invalid");
+            let path = tree.path().join("pools.toml");
+            fs::write(
+                &path,
+                format!(
+                    "[pools.claude-code]\nkind = \"subscription-window\"\nagent = \
+                     \"claude-code\"\nprofile = \"/profiles/work\"\n{keys}"
+                ),
+            )
+            .expect("a hand-written file");
+
+            let forced = connect(&path, true);
+            assert_eq!(forced.outcome, Wrote::Written, "{keys}");
+            assert_eq!(forced.warnings.len(), 1, "{:?}", forced.warnings);
+            let warning = &forced.warnings[0];
+            assert!(warning.contains(says), "{warning}");
+            assert!(warning.contains("were not carried"), "{warning}");
+            assert!(!warning.contains("LEAK"), "{warning}");
+            assert!(!forced.content.contains("LEAK"), "{}", forced.content);
+            assert!(
+                !forced
+                    .content
+                    .lines()
+                    .any(|line| !line.starts_with('#') && line.contains("usage_")),
+                "{}",
+                forced.content
+            );
+            let pool = the_one_pool(&path);
+            assert_eq!(pool.usage, None);
+            assert_eq!(
+                pool.profile.as_deref(),
+                Some("/profiles/work"),
+                "a valid operator key beside the refused ones is still carried"
+            );
+        }
     }
 }

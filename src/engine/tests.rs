@@ -10333,6 +10333,7 @@ fn no_read_only_public_entry_point_establishes_containment() {
                         config_path: Some(absent.clone()),
                         pools_path: Some(no_pools()),
                         repo_root: repo.clone(),
+                        ..capacity::CapacityOptions::default()
                     },
                     &BuiltinAdapters,
                 );

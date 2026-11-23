@@ -135,6 +135,17 @@ parent from whatever spelling the operator chose, so they are the values
 most likely to need an escape: a Windows path in `profile` holds
 backslashes, and written raw those read as TOML escapes.
 
+## `if let Some(usage) = &pool.usage {`
+
+The three usage keys (§17), on the same terms: written only where the parent
+carried them, in the canonical spelling of the provider it parsed, and
+through `toml_string` like every other operator string. `sources` above is
+not touched for them. A pool that names a provider reads as having the
+`provider-endpoint` source whether or not the file lists it, so the file
+this writes stays the two discovered sources plus the operator's keys, and a
+file an operator edited by adding those keys alone is not one this would
+write differently.
+
 ## `fn comment(out: &mut String, prefix: &str, text: &str) {`
 
 Write `text` as comment lines, one per line of `text`, each beginning with

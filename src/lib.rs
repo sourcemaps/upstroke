@@ -24,6 +24,7 @@ pub mod rundir;
 pub mod runner;
 pub mod status;
 pub mod topology;
+pub mod tracker;
 pub mod ulid;
 pub mod util;
 pub mod validate;

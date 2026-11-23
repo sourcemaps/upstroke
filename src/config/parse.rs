@@ -232,6 +232,56 @@ pub(super) fn parse_budgets(
     Ok(budgets)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RawCapacity {
+    scope: Option<String>,
+
+    #[serde(flatten)]
+    unknown: std::collections::BTreeMap<String, toml::Value>,
+}
+
+pub(super) fn parse_capacity(
+    raw: Option<toml::Value>,
+    repo_path: &Path,
+) -> Result<crate::capacity::Scope, UpstrokeError> {
+    use crate::capacity::Scope;
+
+    let Some(value) = raw else {
+        return Ok(Scope::default());
+    };
+    let capacity: RawCapacity = value.try_into().map_err(|e| {
+        config_error(
+            repo_path,
+            format!(
+                "[capacity]: {e} (expected a table with an optional `scope` string, one of: {})",
+                Scope::ACCEPTED.join(", ")
+            ),
+        )
+    })?;
+    if !capacity.unknown.is_empty() {
+        let keys: Vec<&str> = capacity.unknown.keys().map(String::as_str).collect();
+        return Err(config_error(
+            repo_path,
+            format!(
+                "unknown key `{}` in [capacity] (accepted: `scope`)",
+                keys.join("`, `")
+            ),
+        ));
+    }
+    match capacity.scope {
+        None => Ok(Scope::default()),
+        Some(text) => Scope::parse(&text).ok_or_else(|| {
+            config_error(
+                repo_path,
+                format!(
+                    "[capacity] `scope = \"{text}\"` is not recognized (accepted: {})",
+                    Scope::ACCEPTED.join(", ")
+                ),
+            )
+        }),
+    }
+}
+
 const MAX_GATE_TIMEOUT_SECS: u64 = u64::MAX / 1000;
 
 pub(super) fn parse_gates(

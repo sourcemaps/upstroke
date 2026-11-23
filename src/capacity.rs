@@ -10,9 +10,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
-use crate::events::{AttemptRecord, Event, EventBody, PoolExhausted, ReviewPassOutcome};
+use crate::events::{AttemptRecord, Event, PoolExhausted, ReviewPassOutcome, ReviewRecord};
 use crate::ladder::{AttemptFailure, FailureKind, FailureOrigin};
-use crate::topology::events::{TopologyEvent, TopologyEventBody};
+use crate::topology::events::TopologyEvent;
+
+pub mod evidence;
+pub mod machine;
+pub mod usage;
+
+pub use self::machine::{Gathered, Scope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PoolKind {
@@ -76,10 +82,6 @@ impl Source {
             _ => None,
         }
     }
-
-    pub fn read_in_v0_1(self) -> bool {
-        matches!(self, Self::Signals | Self::SelfMetered)
-    }
 }
 
 impl fmt::Display for Source {
@@ -111,6 +113,172 @@ impl fmt::Display for Allowance {
 pub const DEFAULT_SAFETY_MARGIN: f64 = 0.15;
 pub const DEFAULT_RESERVE: f64 = 0.20;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageProvider {
+    AnthropicCost,
+    OpenaiCost,
+    GithubAiCredits,
+    GithubPremiumRequests,
+}
+
+impl UsageProvider {
+    pub const ALL: [Self; 4] = [
+        Self::AnthropicCost,
+        Self::OpenaiCost,
+        Self::GithubAiCredits,
+        Self::GithubPremiumRequests,
+    ];
+
+    pub const ACCEPTED: [&'static str; 4] = [
+        "anthropic-cost",
+        "openai-cost",
+        "github-ai-credits",
+        "github-premium-requests",
+    ];
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|provider| provider.to_string() == s)
+    }
+
+    pub const fn needs_account(self) -> bool {
+        match self {
+            Self::AnthropicCost | Self::OpenaiCost => false,
+            Self::GithubAiCredits | Self::GithubPremiumRequests => true,
+        }
+    }
+}
+
+impl fmt::Display for UsageProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::AnthropicCost => "anthropic-cost",
+            Self::OpenaiCost => "openai-cost",
+            Self::GithubAiCredits => "github-ai-credits",
+            Self::GithubPremiumRequests => "github-premium-requests",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageSource {
+    pub provider: UsageProvider,
+    pub token_env: Option<String>,
+    pub account: Option<String>,
+}
+
+pub const MAX_USAGE_KEY_CHARS: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum UsageKeyDefect {
+    #[error(
+        "sets `{}` and no `usage_provider`, so nothing would ever be asked with it — name the \
+         provider (one of: {}), or remove the key",
+        .stray.join("` and `"),
+        UsageProvider::ACCEPTED.join(", ")
+    )]
+    NoProvider { stray: Vec<&'static str> },
+    #[error(
+        "`usage_provider = \"{written}\"` is not recognized (accepted: {})",
+        UsageProvider::ACCEPTED.join(", ")
+    )]
+    UnknownProvider { written: String },
+    #[error(
+        "`usage_token_env` must be the NAME of an environment variable that holds the \
+         credential — letters, digits and underscores, not starting with a digit, at most \
+         {MAX_USAGE_KEY_CHARS} characters. What is written there is not a name, and it is not \
+         repeated here in case it is the credential itself; a credential never belongs in this \
+         file"
+    )]
+    TokenEnvNotAName,
+    #[error(
+        "`usage_account` must be an account name as the provider writes it — letters, digits, \
+         `.`, `_` and `-`, not starting with `.` or `-`, at most {MAX_USAGE_KEY_CHARS} \
+         characters — because it is placed in the request's address"
+    )]
+    AccountNotAName,
+}
+
+impl UsageSource {
+    pub fn from_keys(
+        provider: Option<&str>,
+        token_env: Option<&str>,
+        account: Option<&str>,
+    ) -> Result<Option<Self>, UsageKeyDefect> {
+        let Some(written) = provider else {
+            let stray: Vec<&'static str> = [
+                ("usage_token_env", token_env.is_some()),
+                ("usage_account", account.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(key, present)| present.then_some(key))
+            .collect();
+            return if stray.is_empty() {
+                Ok(None)
+            } else {
+                Err(UsageKeyDefect::NoProvider { stray })
+            };
+        };
+        let provider =
+            UsageProvider::parse(written).ok_or_else(|| UsageKeyDefect::UnknownProvider {
+                written: written.to_owned(),
+            })?;
+        if token_env.is_some_and(|name| !names_an_environment_variable(name)) {
+            return Err(UsageKeyDefect::TokenEnvNotAName);
+        }
+        if account.is_some_and(|name| !names_an_account(name)) {
+            return Err(UsageKeyDefect::AccountNotAName);
+        }
+        Ok(Some(Self {
+            provider,
+            token_env: token_env.map(str::to_owned),
+            account: account.map(str::to_owned),
+        }))
+    }
+
+    pub fn gaps(&self) -> Vec<String> {
+        let provider = self.provider;
+        let mut gaps = Vec::new();
+        if self.token_env.is_none() {
+            gaps.push(format!(
+                "names `usage_provider = \"{provider}\"` and no `usage_token_env`, so `upstroke \
+                 capacity --refresh` has no credential to ask it with and will skip this pool"
+            ));
+        }
+        match (&self.account, provider.needs_account()) {
+            (None, true) => gaps.push(format!(
+                "names `usage_provider = \"{provider}\"`, which reports per account, and no \
+                 `usage_account`, so `upstroke capacity --refresh` will skip this pool"
+            )),
+            (Some(_), false) => gaps.push(format!(
+                "sets `usage_account`, which `usage_provider = \"{provider}\"` does not read \
+                 (ignored)"
+            )),
+            (Some(_), true) | (None, false) => {}
+        }
+        gaps
+    }
+}
+
+pub fn names_an_environment_variable(text: &str) -> bool {
+    let mut characters = text.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+        && text.len() <= MAX_USAGE_KEY_CHARS
+}
+
+pub fn names_an_account(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_USAGE_KEY_CHARS
+        && text.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        && !text.starts_with(['.', '-'])
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pool {
     pub name: String,
@@ -124,6 +292,7 @@ pub struct Pool {
     pub monthly_allowance: Allowance,
     pub endpoint: Option<String>,
     pub profile: Option<String>,
+    pub usage: Option<UsageSource>,
     pub usable: bool,
 }
 
@@ -141,6 +310,7 @@ impl Pool {
             monthly_allowance: Allowance::Auto,
             endpoint: None,
             profile: None,
+            usage: None,
             usable: true,
         }
     }
@@ -158,6 +328,9 @@ impl Pool {
         }
         if let Some(endpoint) = &self.endpoint {
             line.push_str(&format!(" endpoint={endpoint}"));
+        }
+        if let Some(usage) = &self.usage {
+            line.push_str(&format!(" usage={}", usage.provider));
         }
         line.push_str(&format!(
             " margin={:.2} reserve={:.2}",
@@ -204,60 +377,11 @@ impl Observations {
 }
 
 pub fn observe(events: &[Event]) -> Observations {
-    let mut obs = Observations::default();
-    for event in events {
-        match &event.body {
-            EventBody::PoolExhausted { data, .. } => {
-                obs.exhausted
-                    .insert(data.pool.clone(), data.reset_at.clone());
-            }
-            EventBody::AttemptFinished { data, .. }
-            | EventBody::AttemptInterrupted { data, .. } => {
-                accumulate(&mut obs.self_spend, data);
-                retire_signals(&mut obs.exhausted, data);
-            }
-            _ => {}
-        }
-    }
-    obs
+    evidence::fold(&evidence::of_legacy(events), 0)
 }
 
 pub(crate) fn exhausted_pools_of(events: &[TopologyEvent]) -> BTreeMap<String, Option<String>> {
-    let mut exhausted = BTreeMap::new();
-    let mut signalled: Vec<&PoolExhausted> = Vec::new();
-    for event in events {
-        match &event.body {
-            TopologyEventBody::PoolExhausted { data } => signalled.push(data),
-            TopologyEventBody::AttemptFinished { data } => {
-                retire_signals(&mut exhausted, &data.record);
-                record_signals(&mut exhausted, signalled.drain(..));
-            }
-            body => {
-                record_signals(&mut exhausted, signalled.drain(..));
-                if let TopologyEventBody::CandidatePrepared { data } = body {
-                    retire_served_pools(&mut exhausted, &data.attempt);
-                }
-            }
-        }
-    }
-    record_signals(&mut exhausted, signalled);
-    exhausted
-}
-
-fn record_signals<'a>(
-    exhausted: &mut BTreeMap<String, Option<String>>,
-    signals: impl IntoIterator<Item = &'a PoolExhausted>,
-) {
-    for signal in signals {
-        exhausted.insert(signal.pool.clone(), signal.reset_at.clone());
-    }
-}
-
-fn retire_signals(exhausted: &mut BTreeMap<String, Option<String>>, record: &AttemptRecord) {
-    retire_served_pools(exhausted, record);
-    if let Some(pool) = limited_pool(record) {
-        exhausted.entry(pool.clone()).or_insert(None);
-    }
+    evidence::exhausted(&evidence::of_topology(events))
 }
 
 pub(crate) fn limited_pool(record: &AttemptRecord) -> Option<&String> {
@@ -278,23 +402,24 @@ pub(crate) fn retire_served_pools(
     exhausted: &mut BTreeMap<String, Option<String>>,
     record: &AttemptRecord,
 ) {
+    for pool in served_pools(record) {
+        exhausted.remove(pool);
+    }
+}
+
+fn served_pools(record: &AttemptRecord) -> Vec<&String> {
     let worker_served = record.failure.as_ref().is_none_or(|failure| {
         failure.kind != FailureKind::Interrupted
             && !(failure.kind == FailureKind::RateLimited
                 && failure.origin == crate::ladder::FailureOrigin::Worker)
     });
-    if worker_served {
-        if let Some(pool) = &record.pool {
-            exhausted.remove(pool);
-        }
-    }
-    for review in &record.reviews {
-        if review.outcome != ReviewPassOutcome::Unavailable {
-            if let Some(pool) = &review.pool {
-                exhausted.remove(pool);
-            }
-        }
-    }
+    let worker = record.pool.as_ref().filter(|_| worker_served);
+    let reviewers = record
+        .reviews
+        .iter()
+        .filter(|review| review.outcome != ReviewPassOutcome::Unavailable)
+        .filter_map(|review| review.pool.as_ref());
+    worker.into_iter().chain(reviewers).collect()
 }
 
 pub(crate) fn pool_exhausted_to_record(
@@ -350,14 +475,24 @@ pub fn drain_of<'a>(
 }
 
 fn accumulate(drain: &mut BTreeMap<String, Spend>, record: &AttemptRecord) {
-    if let Some(pool) = &record.pool {
-        drain.entry(pool.clone()).or_default().add(record.cost_usd);
+    for (pool, cost) in draws_of(record) {
+        drain.entry(pool.clone()).or_default().add(cost);
     }
-    for review in &record.reviews {
-        if let Some(pool) = &review.pool {
-            drain.entry(pool.clone()).or_default().add(review.cost_usd);
-        }
-    }
+}
+
+fn draws_of(record: &AttemptRecord) -> impl Iterator<Item = (&String, Option<f64>)> {
+    record
+        .pool
+        .as_ref()
+        .map(|pool| (pool, record.cost_usd))
+        .into_iter()
+        .chain(review_draws(&record.reviews))
+}
+
+fn review_draws(reviews: &[ReviewRecord]) -> impl Iterator<Item = (&String, Option<f64>)> {
+    reviews
+        .iter()
+        .filter_map(|review| review.pool.as_ref().map(|pool| (pool, review.cost_usd)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -383,6 +518,7 @@ impl fmt::Display for Remaining {
 pub enum Confidence {
     Unknown,
     Assumed,
+    Reported,
     SelfMetered,
     Signal,
 }
@@ -392,9 +528,57 @@ impl fmt::Display for Confidence {
         f.write_str(match self {
             Self::Unknown => "unknown",
             Self::Assumed => "assumed",
+            Self::Reported => "provider-reported",
             Self::SelfMetered => "self-metered",
             Self::Signal => "signal",
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reported {
+    pub remaining: f64,
+    pub window: String,
+    pub resets_at: Option<String>,
+    pub fetched_at: String,
+    pub provider: UsageProvider,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Basis {
+    #[default]
+    Run,
+    Repository,
+    Machine,
+}
+
+impl Basis {
+    fn drew(self) -> &'static str {
+        match self {
+            Self::Run => "this run drew",
+            Self::Repository => "this repository's runs drew, this month,",
+            Self::Machine => "upstroke on this machine drew, this month,",
+        }
+    }
+
+    fn unseen(self) -> &'static str {
+        match self {
+            Self::Run => {
+                "this counts only what upstroke spawned in this run, so earlier runs, other \
+                 repositories, and your own interactive sessions have all drawn against the same \
+                 allowance unseen"
+            }
+            Self::Repository => {
+                "this counts only what upstroke spawned in this repository this calendar month \
+                 (UTC), so other repositories, other machines, and your own interactive sessions \
+                 have all drawn against the same allowance unseen"
+            }
+            Self::Machine => {
+                "this counts only what upstroke spawned on this machine this calendar month \
+                 (UTC), so other machines and your own interactive sessions have drawn against \
+                 the same allowance unseen"
+            }
+        }
     }
 }
 
@@ -408,6 +592,7 @@ pub struct PoolEstimate {
     pub confidence: Confidence,
     pub reset_at: Option<String>,
     pub self_spend: Option<Spend>,
+    pub basis: Basis,
     pub notes: Vec<String>,
 }
 
@@ -419,13 +604,14 @@ impl PoolEstimate {
         }
         if let Some(spend) = &self.self_spend {
             let unpriced = if spend.unpriced > 0 { "?" } else { "" };
+            let drew = self.basis.drew();
             match spend.usd {
                 Some(usd) => line.push_str(&format!(
-                    " — this run drew ${usd:.4}{unpriced} over {} attempt(s)",
+                    " — {drew} ${usd:.4}{unpriced} over {} attempt(s)",
                     spend.attempts
                 )),
                 None => line.push_str(&format!(
-                    " — this run drew {} attempt(s), none of which reported spend",
+                    " — {drew} {} attempt(s), none of which reported spend",
                     spend.attempts
                 )),
             }
@@ -435,10 +621,37 @@ impl PoolEstimate {
 }
 
 pub fn estimate(pools: &[Pool], obs: &Observations) -> Vec<PoolEstimate> {
-    pools.iter().map(|pool| estimate_one(pool, obs)).collect()
+    pools
+        .iter()
+        .map(|pool| estimate_one(pool, obs, None, &[], Basis::Run))
+        .collect()
 }
 
-fn estimate_one(pool: &Pool, obs: &Observations) -> PoolEstimate {
+pub fn estimate_gathered(pools: &[Pool], gathered: &Gathered) -> Vec<PoolEstimate> {
+    pools
+        .iter()
+        .map(|pool| {
+            estimate_one(
+                pool,
+                &gathered.observations,
+                gathered.reported.get(&pool.name),
+                gathered
+                    .report_notes
+                    .get(&pool.name)
+                    .map_or(&[], Vec::as_slice),
+                gathered.basis,
+            )
+        })
+        .collect()
+}
+
+fn estimate_one(
+    pool: &Pool,
+    obs: &Observations,
+    reported: Option<&Reported>,
+    report_notes: &[String],
+    basis: Basis,
+) -> PoolEstimate {
     let mut notes = Vec::new();
     let self_spend = obs.self_spend.get(&pool.name).cloned();
 
@@ -478,12 +691,7 @@ fn estimate_one(pool: &Pool, obs: &Observations) -> PoolEstimate {
                     Remaining::AtMost(effective_remaining(raw, pool)),
                     Confidence::SelfMetered,
                 ) {
-                    notes.push(
-                        "a ceiling, not a measurement: this counts only what upstroke spawned in this \
-                         repository, so earlier runs, other repositories, and your own interactive \
-                         sessions have all drawn against the same allowance unseen"
-                            .to_owned(),
-                    );
+                    notes.push(format!("a ceiling, not a measurement: {}", basis.unseen()));
                     if spend.unpriced > 0 {
                         notes.push(format!(
                             "{} attempt(s) on this pool reported no spend, so even the draw behind that \
@@ -496,6 +704,37 @@ fn estimate_one(pool: &Pool, obs: &Observations) -> PoolEstimate {
         }
     }
 
+    if let Some(report) = reported {
+        let bound = effective_remaining(report.remaining, pool);
+        let said = format!(
+            "`{}` reported its {} window at {}",
+            report.provider, report.window, report.fetched_at
+        );
+        match remaining {
+            Remaining::Exhausted => notes.push(format!(
+                "{said}; a rate-limit signal outranks a provider report, so the signal stands \
+                 (§13)"
+            )),
+            Remaining::Unmetered => {}
+            Remaining::AtMost(held) if held <= bound => notes.push(format!(
+                "{said} at ≤{:.0}%, which is not below the self-metered ceiling; a provider \
+                 report only ever lowers an estimate, so the self-metered ceiling stands (§13)",
+                bound * 100.0
+            )),
+            Remaining::AtMost(_) | Remaining::Unknown => {
+                remaining = Remaining::AtMost(bound);
+                confidence = Confidence::Reported;
+                reset_at = report.resets_at.clone();
+                notes.push(format!(
+                    "{said}; a ceiling, not a measurement: whatever has drawn on the pool since \
+                     then has only lowered it, and a provider endpoint can change or fail \
+                     without notice (§13)"
+                ));
+            }
+        }
+    }
+    notes.extend(report_notes.iter().cloned());
+
     if confidence == Confidence::Unknown {
         notes.push(
             "nothing has measured this pool, so what is left is unknown — not full (§13)"
@@ -506,14 +745,23 @@ fn estimate_one(pool: &Pool, obs: &Observations) -> PoolEstimate {
     let unread: Vec<String> = pool
         .sources
         .iter()
-        .filter(|source| !source.read_in_v0_1())
+        .filter(|source| match source {
+            Source::Signals | Source::SelfMetered => false,
+            Source::LocalLogs => true,
+            Source::ProviderEndpoint => pool.usage.is_none(),
+        })
         .map(ToString::to_string)
         .collect();
     if !unread.is_empty() {
         notes.push(format!(
-            "source(s) {} are parsed but not read in v0.1, so usage they would see — including \
-             your own interactive sessions — is not in this figure",
-            unread.join(", ")
+            "source(s) {} are parsed but not read, so usage they would see — including your own \
+             interactive sessions — is not in this figure{}",
+            unread.join(", "),
+            if pool.usage.is_none() && pool.sources.contains(&Source::ProviderEndpoint) {
+                "; `provider-endpoint` is read once the pool names a `usage_provider` (§17)"
+            } else {
+                ""
+            }
         ));
     }
     if !pool.usable {
@@ -532,6 +780,7 @@ fn estimate_one(pool: &Pool, obs: &Observations) -> PoolEstimate {
         confidence,
         reset_at,
         self_spend,
+        basis,
         notes,
     }
 }
@@ -576,7 +825,7 @@ pub fn strategy_preview(mode: &str, estimates: &[PoolEstimate]) -> Vec<String> {
         .collect();
     let measured = estimates
         .iter()
-        .any(|e| e.confidence >= Confidence::SelfMetered);
+        .any(|e| e.confidence >= Confidence::Reported);
 
     let mut lines = Vec::new();
     lines.push(match mode {
@@ -620,6 +869,8 @@ pub struct CapacityOptions {
     pub config_path: Option<std::path::PathBuf>,
     pub pools_path: Option<std::path::PathBuf>,
     pub repo_root: std::path::PathBuf,
+    pub scope: Option<Scope>,
+    pub now_unix: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -628,7 +879,8 @@ pub struct CapacityReport {
     pub estimates: Vec<PoolEstimate>,
     pub agents: Vec<AgentStatus>,
     pub strategy: String,
-    pub run_id: Option<String>,
+    pub scope: Scope,
+    pub gathered: Gathered,
     pub warnings: Vec<String>,
 }
 
@@ -652,23 +904,17 @@ pub fn report(
         &mut warnings,
     )?;
 
-    let (observations, run_id) = match crate::rundir::latest_run(&opts.repo_root) {
-        Some(run_id) => {
-            let path =
-                crate::rundir::public_dir(&opts.repo_root, &run_id).join(crate::rundir::EVENT_LOG);
-            match crate::events::read_all(&path, &mut warnings) {
-                Ok(events) => (observe(&events), Some(run_id)),
-                Err(error) => {
-                    warnings.push(format!(
-                        "could not fold run {run_id} for self-metered spend ({error}); showing \
-                         signals only"
-                    ));
-                    (Observations::default(), None)
-                }
-            }
-        }
-        None => (Observations::default(), None),
-    };
+    let scope = opts.scope.unwrap_or(config.capacity_scope);
+    let gathered = machine::gather(
+        &machine::GatherOptions {
+            scope,
+            repo_root: &opts.repo_root,
+            machine_dir: config.machine_dir.as_deref(),
+            pools: &config.pools,
+            now_unix: opts.now_unix.unwrap_or_else(crate::util::unix_seconds_now),
+        },
+        &mut warnings,
+    );
 
     let mut agents: Vec<AgentStatus> = Vec::new();
     for pool in &config.pools {
@@ -717,13 +963,14 @@ pub fn report(
         }
     }
 
-    let estimates = estimate(&config.pools, &observations);
+    let estimates = estimate_gathered(&config.pools, &gathered);
     Ok(CapacityReport {
         pools: config.pools,
         estimates,
         agents,
         strategy: config.strategy.mode.clone(),
-        run_id,
+        scope,
+        gathered,
         warnings,
     })
 }
@@ -764,21 +1011,7 @@ impl CapacityReport {
             }
         }
         out.push('\n');
-        match &self.run_id {
-            Some(run_id) => {
-                let _ = writeln!(
-                    out,
-                    "self-metered draw folded from run {run_id}, the latest in this repository"
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "no run in this repository yet, so estimates rest on rate-limit signals \
-                     alone — estimates need a repo with runs"
-                );
-            }
-        }
+        let _ = writeln!(out, "scope: {} — {}", self.scope, self.gathered.describe());
         let _ = writeln!(out, "strategy: {}", self.strategy);
         for line in strategy_preview(&self.strategy, &self.estimates) {
             let _ = writeln!(out, "  {line}");
@@ -790,6 +1023,7 @@ impl CapacityReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::topology::events::TopologyEventBody;
 
     fn pool(name: &str) -> Pool {
         Pool::discovered(
@@ -1685,6 +1919,535 @@ mod tests {
                 .iter()
                 .any(|l| l.starts_with("exhausted now: claude-max — ") && l.ends_with(today)),
             "{lines:?}"
+        );
+    }
+
+    fn api_pool(allowance: f64) -> Pool {
+        let mut pool = pool("api");
+        pool.kind = PoolKind::ApiKey;
+        pool.monthly_allowance = Allowance::Units(allowance);
+        pool.usage = Some(UsageSource {
+            provider: UsageProvider::AnthropicCost,
+            token_env: Some("KEY".to_owned()),
+            account: None,
+        });
+        pool
+    }
+
+    fn reported(remaining: f64) -> Reported {
+        Reported {
+            remaining,
+            window: "month".to_owned(),
+            resets_at: Some("2026-12-01T00:00:00Z".to_owned()),
+            fetched_at: "2026-11-23T12:00:00Z".to_owned(),
+            provider: UsageProvider::AnthropicCost,
+        }
+    }
+
+    fn gathered(pool: &str, remaining: Option<f64>, drawn_usd: Option<f64>) -> Gathered {
+        let mut gathered = Gathered {
+            basis: Basis::Machine,
+            ..Gathered::default()
+        };
+        if let Some(remaining) = remaining {
+            gathered
+                .reported
+                .insert(pool.to_owned(), reported(remaining));
+        }
+        if let Some(usd) = drawn_usd {
+            gathered.observations.self_spend.insert(
+                pool.to_owned(),
+                Spend {
+                    usd: Some(usd),
+                    attempts: 1,
+                    unpriced: 0,
+                },
+            );
+        }
+        gathered
+    }
+
+    #[test]
+    fn a_provider_report_sets_a_ceiling_where_nothing_else_has_one() {
+        let estimates = estimate_gathered(&[api_pool(100.0)], &gathered("api", Some(0.5), None));
+        assert_eq!(estimates[0].confidence, Confidence::Reported);
+        let Remaining::AtMost(left) = estimates[0].remaining else {
+            panic!("expected a ceiling: {:?}", estimates[0].remaining);
+        };
+        assert!(
+            (left - 0.225).abs() < 1e-9,
+            "half left, then the pool's margin and reserve like any other source: {left}"
+        );
+        assert_eq!(
+            estimates[0].reset_at.as_deref(),
+            Some("2026-12-01T00:00:00Z")
+        );
+        assert_eq!(
+            estimates[0].describe(),
+            "api: ≤22% [provider-reported] resets 2026-12-01T00:00:00Z"
+        );
+        assert!(
+            estimates[0].notes.iter().any(|note| {
+                note.starts_with(
+                    "`anthropic-cost` reported its month window at 2026-11-23T12:00:00Z",
+                ) && note.contains("a ceiling, not a measurement")
+            }),
+            "{:?}",
+            estimates[0].notes
+        );
+        assert!(
+            !estimates[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("not full")),
+            "a reported pool is not an unmeasured one: {:?}",
+            estimates[0].notes
+        );
+    }
+
+    #[test]
+    fn a_provider_report_lowers_a_self_metered_ceiling_and_never_raises_one() {
+        let pool = api_pool(100.0);
+
+        let lower = estimate_gathered(
+            std::slice::from_ref(&pool),
+            &gathered("api", Some(0.3), Some(20.0)),
+        );
+        assert_eq!(lower[0].confidence, Confidence::Reported);
+        assert_eq!(
+            lower[0].remaining,
+            Remaining::AtMost(effective_remaining(0.3, &pool)),
+            "the provider saw more drawn than this machine did, and both are ceilings"
+        );
+
+        let higher = estimate_gathered(
+            std::slice::from_ref(&pool),
+            &gathered("api", Some(0.95), Some(20.0)),
+        );
+        assert_eq!(higher[0].confidence, Confidence::SelfMetered);
+        assert_eq!(
+            higher[0].remaining,
+            Remaining::AtMost(effective_remaining(0.8, &pool)),
+            "a report that allows more than what upstroke itself drew cannot talk the ceiling up"
+        );
+        assert_eq!(higher[0].reset_at, None, "nor lend it its reset");
+        assert!(
+            higher[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("only ever lowers an estimate")),
+            "{:?}",
+            higher[0].notes
+        );
+
+        let equal = estimate_gathered(
+            std::slice::from_ref(&pool),
+            &gathered("api", Some(0.8), Some(20.0)),
+        );
+        assert_eq!(
+            equal[0].confidence,
+            Confidence::SelfMetered,
+            "at a tie the higher-ranked source keeps the estimate"
+        );
+    }
+
+    #[test]
+    fn a_provider_report_never_speaks_over_a_signal_or_about_an_unmetered_pool() {
+        let pool = api_pool(100.0);
+        let mut signalled = gathered("api", Some(0.9), None);
+        signalled
+            .observations
+            .exhausted
+            .insert("api".to_owned(), Some("2026-11-23T17:00:00Z".to_owned()));
+        let estimates = estimate_gathered(std::slice::from_ref(&pool), &signalled);
+        assert_eq!(estimates[0].remaining, Remaining::Exhausted);
+        assert_eq!(estimates[0].confidence, Confidence::Signal);
+        assert_eq!(
+            estimates[0].reset_at.as_deref(),
+            Some("2026-11-23T17:00:00Z"),
+            "the signal's reset, not the report's"
+        );
+        assert!(
+            estimates[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("a rate-limit signal outranks a provider report")),
+            "{:?}",
+            estimates[0].notes
+        );
+
+        let mut local = api_pool(100.0);
+        local.kind = PoolKind::Unmetered;
+        let estimates = estimate_gathered(&[local], &gathered("api", Some(0.1), None));
+        assert_eq!(estimates[0].remaining, Remaining::Unmetered);
+        assert_eq!(estimates[0].confidence, Confidence::Assumed);
+    }
+
+    #[test]
+    fn a_report_of_everything_drawn_is_a_ceiling_of_zero_and_never_the_word_exhausted() {
+        let estimates = estimate_gathered(&[api_pool(100.0)], &gathered("api", Some(0.0), None));
+        assert_eq!(estimates[0].remaining, Remaining::AtMost(0.0));
+        assert_eq!(estimates[0].confidence, Confidence::Reported);
+        assert!(
+            estimates[0]
+                .describe()
+                .starts_with("api: ≤0% [provider-reported]"),
+            "only a rate-limit signal says exhausted (§13): {}",
+            estimates[0].describe()
+        );
+        let lines = strategy_preview("conserve", &estimates);
+        assert!(
+            !lines.iter().any(|line| line.starts_with("exhausted now:")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains("no pool has a measured estimate")),
+            "a provider's reading is a measurement, of the provider's: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn what_a_stored_report_could_not_say_is_a_note_on_its_pool() {
+        let mut unusable = gathered("api", None, None);
+        unusable.report_notes.insert(
+            "api".to_owned(),
+            vec!["the `month` window of the report reset".to_owned()],
+        );
+        let estimates = estimate_gathered(&[api_pool(100.0)], &unusable);
+        assert_eq!(estimates[0].remaining, Remaining::Unknown);
+        assert_eq!(
+            estimates[0].notes,
+            vec![
+                "the `month` window of the report reset".to_owned(),
+                "nothing has measured this pool, so what is left is unknown — not full (§13)"
+                    .to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_trust_order_puts_a_provider_report_below_self_metering_and_above_a_shape() {
+        let mut ranked = [
+            Confidence::Signal,
+            Confidence::Reported,
+            Confidence::Unknown,
+            Confidence::SelfMetered,
+            Confidence::Assumed,
+        ];
+        ranked.sort();
+        assert_eq!(
+            ranked,
+            [
+                Confidence::Unknown,
+                Confidence::Assumed,
+                Confidence::Reported,
+                Confidence::SelfMetered,
+                Confidence::Signal,
+            ]
+        );
+    }
+
+    #[test]
+    fn each_basis_says_whose_draw_it_counted_and_what_it_could_not_see() {
+        let pool = api_pool(100.0);
+        let cases = [
+            (
+                Basis::Run,
+                "this run drew $50.0000 over 1 attempt(s)",
+                "in this run, so earlier runs, other repositories, and your own",
+            ),
+            (
+                Basis::Repository,
+                "this repository's runs drew, this month, $50.0000 over 1 attempt(s)",
+                "in this repository this calendar month (UTC), so other repositories, other machines",
+            ),
+            (
+                Basis::Machine,
+                "upstroke on this machine drew, this month, $50.0000 over 1 attempt(s)",
+                "on this machine this calendar month (UTC), so other machines and your own",
+            ),
+        ];
+        for (basis, drew, unseen) in cases {
+            let mut folded = gathered("api", None, Some(50.0));
+            folded.basis = basis;
+            let estimates = estimate_gathered(std::slice::from_ref(&pool), &folded);
+            let line = estimates[0].describe();
+            assert!(line.ends_with(drew), "{basis:?}: {line}");
+            let note = estimates[0]
+                .notes
+                .iter()
+                .find(|note| note.starts_with("a ceiling, not a measurement: "))
+                .unwrap_or_else(|| panic!("{basis:?}: {:?}", estimates[0].notes));
+            assert!(note.contains(unseen), "{basis:?}: {note}");
+            for text in estimates[0].notes.iter().chain(std::iter::once(&line)) {
+                assert!(
+                    !text.contains("  "),
+                    "{basis:?}: a string continued across lines lost its continuation and \
+                     kept its indentation: {text:?}"
+                );
+            }
+        }
+        let machine = estimate_gathered(
+            std::slice::from_ref(&pool),
+            &gathered("api", None, Some(50.0)),
+        );
+        assert!(
+            !machine[0]
+                .notes
+                .iter()
+                .any(|note| note.contains("other repositories")),
+            "the machine basis folds other repositories, so it must not list them as unseen: {:?}",
+            machine[0].notes
+        );
+        assert_eq!(
+            estimate(std::slice::from_ref(&pool), &Observations::default())[0].basis,
+            Basis::Run,
+            "one run's own fold is the run basis"
+        );
+    }
+
+    #[test]
+    fn a_listed_provider_endpoint_is_unread_until_the_pool_names_a_provider() {
+        let mut listed = pool("claude-max");
+        listed.sources = vec![Source::Signals, Source::ProviderEndpoint];
+        let estimates = estimate(std::slice::from_ref(&listed), &Observations::default());
+        assert!(
+            estimates[0].notes.iter().any(|note| {
+                note.contains("source(s) provider-endpoint are parsed but not read")
+                    && note.contains("once the pool names a `usage_provider`")
+            }),
+            "{:?}",
+            estimates[0].notes
+        );
+
+        let mut named = api_pool(100.0);
+        named.sources = vec![Source::Signals, Source::ProviderEndpoint, Source::LocalLogs];
+        let estimates = estimate(std::slice::from_ref(&named), &Observations::default());
+        let unread: Vec<&String> = estimates[0]
+            .notes
+            .iter()
+            .filter(|note| note.contains("parsed but not read"))
+            .collect();
+        assert_eq!(unread.len(), 1, "{:?}", estimates[0].notes);
+        assert!(
+            unread[0].starts_with("source(s) local-logs are parsed but not read")
+                && !unread[0].contains("usage_provider"),
+            "a pool that names its provider has that source read: {unread:?}"
+        );
+    }
+
+    #[test]
+    fn a_usage_provider_is_spelled_exactly_and_every_accepted_spelling_parses() {
+        assert_eq!(UsageProvider::ALL.len(), UsageProvider::ACCEPTED.len());
+        for (provider, spelling) in UsageProvider::ALL.into_iter().zip(UsageProvider::ACCEPTED) {
+            assert_eq!(provider.to_string(), spelling);
+            assert_eq!(UsageProvider::parse(spelling), Some(provider));
+        }
+        for near in [
+            "Anthropic-Cost",
+            " openai-cost",
+            "openai-cost ",
+            "openai_cost",
+            "",
+        ] {
+            assert_eq!(UsageProvider::parse(near), None, "{near:?}");
+        }
+        assert!(!UsageProvider::AnthropicCost.needs_account());
+        assert!(!UsageProvider::OpenaiCost.needs_account());
+        assert!(UsageProvider::GithubAiCredits.needs_account());
+        assert!(UsageProvider::GithubPremiumRequests.needs_account());
+    }
+
+    #[test]
+    fn usage_keys_become_a_source_or_a_defect_that_says_which_key() {
+        assert_eq!(UsageSource::from_keys(None, None, None), Ok(None));
+        assert_eq!(
+            UsageSource::from_keys(
+                Some("github-ai-credits"),
+                Some("GH_TOKEN"),
+                Some("octo-cat")
+            ),
+            Ok(Some(UsageSource {
+                provider: UsageProvider::GithubAiCredits,
+                token_env: Some("GH_TOKEN".to_owned()),
+                account: Some("octo-cat".to_owned()),
+            }))
+        );
+        assert_eq!(
+            UsageSource::from_keys(None, Some("KEY"), Some("octo")),
+            Err(UsageKeyDefect::NoProvider {
+                stray: vec!["usage_token_env", "usage_account"],
+            })
+        );
+        assert_eq!(
+            UsageSource::from_keys(Some("claude-subscription"), None, None),
+            Err(UsageKeyDefect::UnknownProvider {
+                written: "claude-subscription".to_owned(),
+            })
+        );
+        assert_eq!(
+            UsageSource::from_keys(Some("openai-cost"), Some("sk-admin-LEAK"), None),
+            Err(UsageKeyDefect::TokenEnvNotAName)
+        );
+        assert!(
+            !UsageKeyDefect::TokenEnvNotAName
+                .to_string()
+                .contains("LEAK"),
+            "the refusal carries no field to repeat a pasted key from"
+        );
+        assert_eq!(
+            UsageSource::from_keys(Some("github-ai-credits"), Some("KEY"), Some("octo/cat")),
+            Err(UsageKeyDefect::AccountNotAName)
+        );
+    }
+
+    #[test]
+    fn a_source_says_what_it_still_lacks_for_a_refresh() {
+        let source = |provider, token_env: Option<&str>, account: Option<&str>| UsageSource {
+            provider,
+            token_env: token_env.map(str::to_owned),
+            account: account.map(str::to_owned),
+        };
+        assert!(
+            source(UsageProvider::OpenaiCost, Some("KEY"), None)
+                .gaps()
+                .is_empty()
+        );
+        assert!(
+            source(UsageProvider::GithubAiCredits, Some("KEY"), Some("octo"))
+                .gaps()
+                .is_empty()
+        );
+        let no_credential = source(UsageProvider::OpenaiCost, None, None).gaps();
+        assert_eq!(no_credential.len(), 1);
+        assert!(
+            no_credential[0].contains("no `usage_token_env`"),
+            "{no_credential:?}"
+        );
+        let nothing = source(UsageProvider::GithubPremiumRequests, None, None).gaps();
+        assert_eq!(nothing.len(), 2, "{nothing:?}");
+        assert!(nothing[1].contains("no `usage_account`"), "{nothing:?}");
+        let extra = source(UsageProvider::AnthropicCost, Some("KEY"), Some("acme")).gaps();
+        assert_eq!(extra.len(), 1);
+        assert!(extra[0].contains("does not read (ignored)"), "{extra:?}");
+    }
+
+    #[test]
+    fn a_variable_name_and_an_account_name_are_narrow_character_classes() {
+        for name in ["KEY", "_k", "ANTHROPIC_ADMIN_KEY_2", "a"] {
+            assert!(names_an_environment_variable(name), "{name}");
+        }
+        let long = "K".repeat(MAX_USAGE_KEY_CHARS + 1);
+        for not in [
+            "",
+            "2KEY",
+            "MY-KEY",
+            "MY KEY",
+            "KEY=1",
+            "sk-ant-x",
+            "ключ",
+            long.as_str(),
+        ] {
+            assert!(!names_an_environment_variable(not), "{not:?}");
+        }
+        assert!(names_an_environment_variable(
+            &"K".repeat(MAX_USAGE_KEY_CHARS)
+        ));
+
+        for name in ["octo-cat", "octo_cat.1", "0x", "A"] {
+            assert!(names_an_account(name), "{name}");
+        }
+        for not in [
+            "",
+            ".hidden",
+            "-flag",
+            "a/b",
+            "a b",
+            "a?b",
+            "a#b",
+            "a%2Fb",
+            "a\nb",
+            "é",
+            long.as_str(),
+        ] {
+            assert!(!names_an_account(not), "{not:?}");
+        }
+    }
+
+    #[test]
+    fn a_pool_says_which_provider_answers_for_it() {
+        assert!(
+            api_pool(100.0)
+                .describe()
+                .contains(" usage=anthropic-cost "),
+            "{}",
+            api_pool(100.0).describe()
+        );
+        assert!(!pool("claude-max").describe().contains("usage="));
+    }
+
+    #[test]
+    fn one_runs_fold_is_the_same_through_the_evidence_as_it_was_before_it() {
+        use crate::events::{Event, EventBody};
+
+        let finished = |record: AttemptRecord| {
+            Event::now(EventBody::AttemptFinished {
+                task: "t1".to_owned(),
+                attempt: record.attempt,
+                rung: 0,
+                profile: "p".to_owned(),
+                parking: None,
+                transition: None,
+                prepared_commit: None,
+                data: Box::new(record),
+            })
+        };
+        let interrupted = |record: AttemptRecord| {
+            Event::now(EventBody::AttemptInterrupted {
+                task: "t1".to_owned(),
+                attempt: record.attempt,
+                rung: 0,
+                profile: "p".to_owned(),
+                data: Box::new(record),
+            })
+        };
+        let mut priced = settled(
+            Some("claude-max"),
+            vec![review_on("codex", Some("codex-pro"))],
+        );
+        priced.cost_usd = Some(1.5);
+        priced.reviews[0].cost_usd = Some(0.25);
+        let cut_short = failed(
+            settled(Some("claude-max"), Vec::new()),
+            FailureKind::Interrupted,
+            FailureOrigin::Worker,
+        );
+        let events = [finished(priced.clone()), interrupted(cut_short.clone())];
+
+        let obs = observe(&events);
+        assert_eq!(
+            obs.self_spend,
+            drain_of([&priced, &cut_short]),
+            "the estimator's self-metered source and the ledger's per-pool column are one \
+             number, whichever of the two folds produced it"
+        );
+        assert_eq!(
+            obs.self_spend.get("claude-max"),
+            Some(&Spend {
+                usd: Some(1.5),
+                attempts: 2,
+                unpriced: 1,
+            })
+        );
+        assert_eq!(
+            obs.self_spend.get("codex-pro"),
+            Some(&Spend {
+                usd: Some(0.25),
+                attempts: 1,
+                unpriced: 0,
+            })
         );
     }
 }

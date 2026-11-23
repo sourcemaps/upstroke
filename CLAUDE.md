@@ -17,7 +17,11 @@ The binding invariants are `DESIGN.md` §4 (`design/04_design_invariants.md`). T
 The ones a change is most likely to trip over:
 
 - **Agents edit files; the engine owns git.** Agents are told never to commit.
-- **The engine never speaks HTTP.** All model interaction is inside agent subprocesses.
+- **The engine never speaks HTTP.** All model interaction is inside agent subprocesses. The
+  capacity tracker (`src/tracker.rs`, `upstroke capacity --refresh`) is the one thing that does,
+  through a `curl` subprocess, and it is not the engine: `run` and `resume` never call it, its
+  entry point is on the effect denylist, and it asks only endpoints their provider documents
+  (`DESIGN.md` §13).
 - **Ground truth is the diff, not the transcript.**
 - **Every state transition is an event.** State is derived by replaying `events.jsonl`; resume is
   replay-then-continue. There is no second path.
@@ -33,8 +37,10 @@ parallel-execution machinery (worktree-per-task, the compare-and-swap merge queu
 container runner, the topology layer) reached master on 2026-09-01, inert by default, and PR12
 activates it: `upstroke run` creates schema-4 runs and `upstroke resume` continues them, while a
 run of schemas 1-3 still resumes, reports and exports on the sequential path.
-`export-decisions` landed 2026-08-12. Still to come: capacity-driven routing (the capacity engine
-ships read-only), more adapters, notifiers. No `0.2.0` tag exists. The build order is `DESIGN.md`
+`export-decisions` landed 2026-08-12. Machine-level capacity landed 2026-11-23: the capacity views
+fold every run on the machine, a tracker outside the engine reads provider usage endpoints, and
+settings have a machine level (`~/.upstroke/upstroke.toml`) beneath each repository's. Still to
+come: capacity-driven routing (the capacity engine ships read-only), more adapters, notifiers. No `0.2.0` tag exists. The build order is `DESIGN.md`
 §21 and it is deliberate; check where the project is before adding something out of sequence.
 
 **`DESIGN.md` is the only living authority for product design**, indexed at the root and split
@@ -157,8 +163,10 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 `src/` is one crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters,
 with `proc/` for subprocess handling), `engine/` (the conductor), `topology/` (the v0.2 execution
 topology), `runner/` (host and container execution), `events/`, `validate/`, `status/`,
-`effects/`, `connect/`, and flat modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`,
-`capacity.rs`, `rundir.rs`, `workspace.rs`, `workspace_manager.rs`, `export.rs`. Large modules
+`effects/`, `connect/`, `capacity/` (the estimator, the machine-level fold, the usage-report
+schema), `tracker/` (the capacity tracker: provider endpoints and the `curl` transport), and flat
+modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`, `rundir.rs`, `workspace.rs`,
+`workspace_manager.rs`, `export.rs`. Large modules
 are being split into per-concern children; check the tree rather than this list.
 
 ## Traps that have already cost time

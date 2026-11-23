@@ -211,16 +211,12 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
             render::to_row(task, chain, second)
         })
         .collect();
-    let (observations, run_id) = latest_run_observations(
-        &opts.config_root,
-        !analysis.config.pools.is_empty(),
-        &mut warnings,
-    );
+    let gathered = gathered_capacity(&opts.config_root, &analysis.config, &mut warnings);
     Ok(Report {
         rows,
         warnings,
         strategy: render::strategy_echo(&analysis.config),
-        capacity: render::capacity_echo(&analysis.config, &observations, run_id.as_deref()),
+        capacity: render::capacity_echo(&analysis.config, &gathered),
         review: render::review_echo(&reviews, analysis.config.review_cross_family),
         effort: render::effort_echo(&analysis.config),
         gates: analysis.gates.into_iter().map(|gate| gate.name).collect(),
@@ -229,30 +225,24 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
     })
 }
 
-fn latest_run_observations(
+fn gathered_capacity(
     repo_root: &Path,
-    has_pools: bool,
+    config: &Config,
     warnings: &mut Vec<String>,
-) -> (capacity::Observations, Option<String>) {
-    let none = || (capacity::Observations::default(), None);
-    if !has_pools {
-        return none();
+) -> capacity::Gathered {
+    if config.pools.is_empty() {
+        return capacity::Gathered::default();
     }
-    let Some(run_id) = crate::rundir::latest_run(repo_root) else {
-        return none();
-    };
-    let events_path = crate::rundir::public_dir(repo_root, &run_id).join(crate::rundir::EVENT_LOG);
-    let mut ignored = Vec::new();
-    match crate::events::read_all(&events_path, &mut ignored) {
-        Ok(events) => (capacity::observe(&events), Some(run_id)),
-        Err(error) => {
-            warnings.push(format!(
-                "run {run_id} exists but its event log could not be folded for self-metered \
-                 spend ({error}); the capacity block below rests on rate-limit signals alone"
-            ));
-            none()
-        }
-    }
+    capacity::machine::gather(
+        &capacity::machine::GatherOptions {
+            scope: config.capacity_scope,
+            repo_root,
+            machine_dir: config.machine_dir.as_deref(),
+            pools: &config.pools,
+            now_unix: crate::util::unix_seconds_now(),
+        },
+        warnings,
+    )
 }
 
 impl Report {
@@ -686,8 +676,14 @@ mod tests {
         options.config_path = Some(root.path().join("upstroke.toml"));
 
         let captured = CapturedInputs::capture(&options);
+        let pools = options.pools_path.clone().expect("the fixture pools file");
+        let machine_settings = pools
+            .parent()
+            .expect("the fixture pools file has a directory")
+            .join(config::MACHINE_SETTINGS);
         let mut expected = vec![plan, root.path().join("upstroke.toml")];
-        expected.push(options.pools_path.clone().expect("the fixture pools file"));
+        expected.push(machine_settings);
+        expected.push(pools);
         expected.extend(
             GATE_DERIVATION_INPUTS
                 .iter()
@@ -1105,14 +1101,29 @@ mod tests {
         );
         assert!(rendered.contains("not full"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("local-logs") && rendered.contains("not read in v0.1"),
+            rendered.contains("local-logs") && rendered.contains("parsed but not read"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("never probes"), "rendered:\n{rendered}");
         assert!(rendered.contains("read-only"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("no run in this repository yet"),
-            "rendered:\n{rendered}"
+            rendered.contains("scope: machine — no run on this machine yet"),
+            "the preview folds the machine unless the settings say otherwise:\n{rendered}"
+        );
+
+        fs::write(
+            o.config_root.join("upstroke.toml"),
+            "[capacity]\nscope = \"repo\"\n",
+        )
+        .expect("the repository's settings");
+        let rendered = run(&o).expect("validates").render();
+        assert!(
+            rendered.contains("scope: repo — no run in this repository yet"),
+            "a repository that asks for its own runs alone is told that is what it got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("claude-max: unknown [unknown]") && rendered.contains("not full"),
+            "and the narrower scope reads an unmeasured pool no more generously:\n{rendered}"
         );
     }
 
