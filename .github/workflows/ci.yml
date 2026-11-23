@@ -375,10 +375,10 @@ jobs:
   # job's clean-up killed an orphaned test binary,
   # `upstroke-8ddcc7d640fdf222`. The suite step no longer pipes Cargo into
   # `Tee-Object`, the pipe a surviving test process is inferred to have
-  # held in both runs. It waits on Cargo's process and reads the suite's
-  # output from files; it lists, and asks Windows to stop, any `upstroke*`
-  # process still running, and fails for it where Cargo's own exit has not
-  # already failed the step. The comment above this job's suite step says
+  # held in both runs. It waits on each process it starts and reads the
+  # suite's output from files; it lists, and asks Windows to stop, any
+  # `upstroke*` process still running, and fails for it where a harness's
+  # own exit has not already failed the step. The comment above this job's suite step says
   # what was observed, what is inferred, and that the test which leaves
   # the process is not established.
   test-windows-hosted:
@@ -444,12 +444,14 @@ jobs:
       # list is not closed -- Cargo has more ways to be told this than anyone
       # will enumerate. Counting what libtest itself reported refuses the
       # effect instead of the causes: a suite that did not execute has no
-      # `test result: ok.` line to count. On each leg the cargo line hands
-      # libtest the leg's `matrix.tests`, the count of passing tests is held
-      # to the leg's `matrix.floor`, and a last line prints the count. The
-      # count stays now that the suite runs on GitHub's machines, because a
-      # Cargo target runner or a `[workspace]` selection reaches them the
-      # same way, and a leg's floor also refuses a shard whose filter matched
+      # `test result: ok.` line to count. On each leg the line that starts
+      # the harnesses hands libtest the leg's `matrix.tests`, the count of
+      # passing tests is held to the leg's `matrix.floor`, and a last line
+      # prints the count. The count stays now that the suite runs on
+      # GitHub's machines. A Cargo target runner no longer reaches a leg,
+      # since Cargo only builds and the step starts each harness itself, but
+      # a `[workspace]` selection reaches GitHub's machines as it reached the
+      # guest, and a leg's floor also refuses a shard whose filter matched
       # almost nothing. Each leg's floor is its share of 1700, the floor the
       # whole suite was held to as one job on the guest. Removing that many
       # tests is a deliberate act, and it edits the floors in the same
@@ -475,12 +477,33 @@ jobs:
       # oracle holds the number in this script and the install to the one it
       # pins, and moving the compiler edits all three together.
       #
-      # Then the suite, started as a process and waited on. The script does
-      # not pipe Cargo into `Tee-Object`: `Start-Process` sends Cargo's two
-      # streams to files in `RUNNER_TEMP`, `WaitForExit()` returns when
-      # Cargo's own process ends, and the script prints the files and counts
-      # from them after that. Twice a hosted shard reported its tests and did
-      # not end. In run 43719719561, on 2026-11-15, the 1,669 s shard printed
+      # Then the suite, built and then run, and every process the script
+      # starts waited on. Cargo builds once, with `--no-run`, and runs
+      # nothing; the script takes the test harnesses from the build's own
+      # messages and starts each in turn over the leg's `matrix.tests`, with
+      # `-Z unstable-options --report-time` after it, so that libtest writes
+      # each test's time after its result. On a stable compiler libtest takes
+      # those flags only where `RUSTC_BOOTSTRAP` is set, and the variable is
+      # kept away from Cargo: the build scripts of three crates this one
+      # builds, `anyhow`, `thiserror` and `proc-macro2`, each probe for a
+      # nightly feature, turn it on where the probe compiles with the
+      # variable set, and have Cargo run them again when it changes. A Cargo
+      # that saw it would build the three, and every harness over them,
+      # otherwise than the `test` job's legs and a user's machine do, from a
+      # tree nobody changed. So the variable is set after the build, no
+      # `cargo` runs after it, and it ends with the step: the later steps run
+      # in processes of their own. Without `--no-run` Cargo would run every
+      # harness over the whole suite itself, untimed, before the loop ran the
+      # shard. Nothing is piped into `Tee-Object`: `Start-Process` sends each
+      # process's two streams to files in `RUNNER_TEMP`, `WaitForExit()`
+      # returns when that process ends, and the script prints the files and
+      # counts from them after the loop. The build's errors are read in a
+      # `try`, so a failed read cannot replace Cargo's code. A harness the
+      # step starts has the step's environment, without Cargo's run-time
+      # `CARGO_*` variables, its `[env]` table or its `PATH` additions, so a
+      # test reads those through `env!`, at compile time. Twice a hosted
+      # shard reported its tests and did not end. In run 43719719561, on
+      # 2026-11-15, the 1,669 s shard printed
       # every `test result: ok` line 31.6 minutes into its job and ran to the
       # job's limit, where the runner's clean-up killed a test process left
       # over. In run 44277078005, on 2026-11-18, `test (windows-latest, 3 of
@@ -493,32 +516,39 @@ jobs:
       # Windows hands a child the handles its parent holds as inheritable: a
       # test process that outlived the suite held the pipe `Tee-Object`
       # reads, so the pipeline never reached its end. Which test leaves the
-      # process is not established. Waiting on Cargo's process does not
-      # depend on what that process left running, and nothing the step reads
-      # is a pipe a survivor can hold open.
+      # process is not established. Waiting on a process does not depend on
+      # what that process left running, and nothing the step reads is a pipe
+      # a survivor can hold open.
       #
-      # What is left running is then the step's to report. After Cargo ends
-      # the script lists every process named `upstroke*` that is still
-      # running, with its command line, and asks Windows to stop it. It
-      # does not check that the process stopped. The listing names a
-      # process, not the test that started it. Cargo's own failure comes
-      # first, with Cargo's exit code, and a failure while reading the
-      # output or listing the processes cannot replace that code: the
-      # script prints the failure and still exits with Cargo's code. Where
-      # Cargo exited zero the same failure fails the step, because nothing
-      # was read or listed to count from. Where Cargo exited zero and a
-      # process was left, the step throws: the suite passed, and a test
-      # leaves a process running. If the inference is wrong and Cargo
-      # itself does not end, the listing is never reached, and the job's
-      # limit still ends the leg.
+      # What is left running is then the step's to report. After the last
+      # harness ends the script lists every process named `upstroke*` that
+      # is still running, with its command line, and asks Windows to stop
+      # it. It does not check that the process stopped. The listing names a
+      # process, not the test that started it. A harness's own failure comes
+      # first, with its exit code, which the loop keeps as soon as the
+      # harness ends and before it copies the harness's two outputs. Each
+      # copy has a `try` of its own: a copy that fails prints why, and ends
+      # the step only where the harness passed, since then there is nothing
+      # to count; where the harness failed the loop stops on its code. A
+      # failure while copying or reading the output or listing the processes
+      # cannot replace that code: the script prints the failure and still
+      # exits with the harness's code. Where the harnesses exited zero the
+      # same failure fails the step, because nothing was read or listed to
+      # count from. Where they exited zero and a process was left, the step
+      # throws: the suite passed, and a test leaves a process running. If
+      # the inference is wrong and a harness itself does not end, the
+      # listing is never reached, and the job's limit still ends the leg.
       - name: Test, and witness that the suite ran
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           $rustc = ((cargo rustc -q --lib -- --version) | Out-String).Trim(); $path_rustc = ((rustc --version) | Out-String).Trim(); $cargo = ((cargo --version) | Out-String).Trim()
           if ($rustc -notmatch '^rustc 1\.97\.1 ' -or $path_rustc -notmatch '^rustc 1\.97\.1 ' -or $cargo -notmatch '^cargo 1\.97\.1 ') { throw "the suite would run on '$rustc' (Cargo's compiler), '$path_rustc' (PATH's rustc) and '$cargo', not the image's 1.97.1: a compiler was chosen by something other than this workflow" }
-          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'
-          $suite = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features -- ${{ matrix.tests }}' -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $err; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode
+          $out = Join-Path $env:RUNNER_TEMP 'suite-stdout.log'; $err = Join-Path $env:RUNNER_TEMP 'suite-stderr.log'; $built = Join-Path $env:RUNNER_TEMP 'suite-build.json'
+          $build = Start-Process -FilePath cargo -ArgumentList 'test --all-targets --all-features --no-run --message-format=json-render-diagnostics' -NoNewWindow -PassThru -RedirectStandardOutput $built -RedirectStandardError $err; $null = $build.Handle; $build.WaitForExit(); $code = $build.ExitCode
+          if ($code -ne 0) { try { Get-Content $err } catch { "reading the build's errors failed: $_" }; exit $code }
+          $harnesses = @(Get-Content $built | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -ceq 'compiler-artifact' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable }); if ($harnesses.Count -eq 0) { throw "Cargo built no test harness, so this shard would run nothing" }
+          $env:RUSTC_BOOTSTRAP = '1'; foreach ($h in $harnesses) { $suite = Start-Process -FilePath $h -ArgumentList '${{ matrix.tests }} -Z unstable-options --report-time' -NoNewWindow -PassThru -RedirectStandardOutput "$out.part" -RedirectStandardError "$err.part"; $null = $suite.Handle; $suite.WaitForExit(); $code = $suite.ExitCode; try { Get-Content "$out.part" | Add-Content $out } catch { "copying the output of $h failed: $_"; if ($code -eq 0) { throw } }; try { Get-Content "$err.part" | Add-Content $err } catch { "copying the errors of $h failed: $_"; if ($code -eq 0) { throw } }; if ($code -ne 0) { break } }
           try { Get-Content $err; $log = Get-Content $out; $log; $left = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'upstroke%'"); foreach ($p in $left) { "left running after the suite: pid $($p.ProcessId): $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }
           catch { if ($code -ne 0) { "reading the suite's output or listing the processes it left failed: $_" } else { throw } }
           if ($code -ne 0) { exit $code }

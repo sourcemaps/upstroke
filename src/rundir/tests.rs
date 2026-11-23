@@ -3281,16 +3281,17 @@ fn link_dir(link: &Path, target: &Path) {
     }
     #[cfg(windows)]
     {
-        let status = std::process::Command::new("cmd")
+        let output = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(link)
             .arg(target)
-            .status()
+            .output()
             .expect("mklink runs");
         assert!(
-            status.success(),
+            output.status.success(),
             "creating a junction must succeed; an unmakeable junction is a \
-                 failure of this test, never a skip"
+                 failure of this test, never a skip: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
     assert!(
