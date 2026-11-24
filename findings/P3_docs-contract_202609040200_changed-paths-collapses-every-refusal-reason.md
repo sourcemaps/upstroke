@@ -19,5 +19,5 @@ guard: deferred to the parent's sweep, queue row 11, which owns changed_paths, t
 
 deferred to the parent's sweep, queue row 11, which owns `changed_paths`, the layer that knows the slot and the base; `changed_path_records` is the typed reader it can adopt, and the doc comment on `decode_changed_paths` says the reason ends there until the parent decides
 
-Recorded by the `src/workspace_manager/parsers.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/parsers.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

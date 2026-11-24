@@ -30,4 +30,4 @@ file is outside the repository — which is why no pull request can close this r
 workaround is what was used throughout: `--message-format=json`, which puts diagnostics on stdout,
 or running `CARGO_TARGET_DIR=<slot> cargo …` directly.
 
-Recorded in `reviews/FINDINGS.md` §8. This is a build-infrastructure defect, not a defect in the tree; `correctness` is the closest word in the closed category vocabulary and the classification is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §8. This is a build-infrastructure defect, not a defect in the tree; `correctness` is the closest word in the closed category vocabulary and the classification is this migration's judgement.

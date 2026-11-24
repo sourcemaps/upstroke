@@ -27,7 +27,7 @@
 //! filesystem; the funnels that act on the paths it names are the parent's.
 //!
 //! **A slot has one instance per coordinator incarnation** (PR11 follow-up C,
-//! `reviews/2026-10-02-pr11-follow-up-c-record.md`, §3.3 as §4.2 repairs it).
+//! `48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`, §3.3 as §4.2 repairs it).
 //! [`Slot`] stays the logical identity every caller passes, frozen recovery and
 //! the merge module included; what the manager creates on disk is an
 //! *instance* of it, the slot's component followed by `_` and the creating

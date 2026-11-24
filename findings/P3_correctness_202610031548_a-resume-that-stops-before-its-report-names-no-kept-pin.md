@@ -5,10 +5,10 @@ disposition: deferred
 category: correctness
 pr: 331
 reviewed_sha: 9b2262f4f2b515cc1181ed67df7f19756612b8a7
-location: reviews/2026-10-02-pr11-follow-up-d-record.md:596
+location: src/engine/coordinator.rs:390
 provenance: introduced_by_feature
 first_bad: cb1beacfd1b7f05519f3460d8bda9c5037f79d8e, follow-up D's implementation of the kept pin's warning, as its design has stated the limitation since 37e4d8c43258e739da6a37b6a44bd51b8494ee18 (R-D5)
-guard: a change to how the legacy engine delivers a failing command's warnings (rendering the partial report a failed drain already writes, or carrying the warnings on the error), or the owner's explicit acceptance; until then the residual stays stated as R-D5 in `reviews/2026-10-02-pr11-follow-up-d-record.md` and filed here, and nothing accepts it
+guard: a change to how the legacy engine delivers a failing command's warnings (rendering the partial report a failed drain already writes, or carrying the warnings on the error), or the owner's explicit acceptance; until then the residual stays stated as R-D5 in `48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` and filed here, and nothing accepts it
 ---
 
 ## Failure sequence
@@ -52,7 +52,7 @@ decision, as D's did. Nothing here is proposed.
 
 R-D1's preservation design, round 4, implemented on draft #331 and adopted on 2026-10-11 with decision O8 as an agent
 decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`), in force only from
-#331's merge (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), gives the resume three more warnings: the pin it
+#331's merge (`48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), gives the resume three more warnings: the pin it
 put back from
 a copy, the fresh copy it wrote (with the `git fetch` that restores the pin from it), and what stayed in the checkout.
 **They are delivered as the kept-pin warning is, and lost the same way:** a resume whose later step fails returns that

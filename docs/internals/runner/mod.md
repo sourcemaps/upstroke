@@ -38,7 +38,7 @@ the await points PR11 introduces. PR11 made the change: `run` returns
 one borrowed value, and what travels with a call (its cancellation and its own
 observers) a second argument; synchronous callers use the trait's
 `run_blocking`. `docs/internals/runner/contract.md` has the contract, and the
-PR11 record (`reviews/2026-09-30-pr11-record.md`, R-A and R-I) the readings.
+PR11 record (`48f2af7a:reviews/2026-09-30-pr11-record.md`, R-A and R-I) the readings.
 
 ## `#![deny(clippy::disallowed_methods, clippy::disallowed_types)]`
 

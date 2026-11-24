@@ -19,5 +19,5 @@ guard: deferred to this file: the honest shape is for SyntheticRecord's recovere
 
 deferred to this file: the honest shape is for `SyntheticRecord`'s `recovered` field to carry "nothing to recover" as a third state rather than as `true`, and `SyntheticRecord` is `src/topology/effects.rs`'s frozen packet type, whose sweep is queue row 28. The fsck assertion that does carry the claim runs for every site
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

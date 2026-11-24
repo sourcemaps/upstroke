@@ -19,5 +19,5 @@ the repair above counts literals, which is still a census over source text -> a 
 
 deferred to `src/workspace_manager.rs`, queue row 11: the honest form compares what the funnel passes with what `sampled_command` passes as **values at run time**, which needs the parent's argv construction to be observable — a seam in the parent, or an argv on the hook phase, and the latter is `src/topology/effects.rs`'s frozen type. Reproduction to use: argv.push("--ignore-errors".into()) in `candidate_stage`, which passes the census at 966775e and is caught only by the literal count added here
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

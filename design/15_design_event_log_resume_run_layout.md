@@ -126,7 +126,7 @@ The execution root is created only when the managed base is a real directory, th
 Current host-process crash containment is deliberately platform-specific. On Unix, ordinary descendants remain in an isolated process group and a separate cleanup reaper retains the run's cleanup lease if the conductor is killed, as does every `git update-ref` the engine spawns for as long as that child lives, so a resume cannot begin while a ref write of the dead run is still in flight; code that deliberately daemonises out of that group remains outside the host-runner contract. A container invocation is contained on Unix by the container runner's own cleanup reaper, armed before that runner's first container starts and holding no cleanup lease: if the conductor is killed it kills and removes every container the runner started, and it is cancelled only once each of them is established gone; Windows has no such reaper, and a killed conductor's containers are reclaimed by the next write command's startup census. On Windows, each command is created suspended, assigned to a private kill-on-close Job Object, and only then resumed. Direct-child success and timeout both terminate and boundedly observe that job empty; abrupt conductor death closes its non-inheritable handle and lets the kernel terminate ordinary descendants. PID scanning and `taskkill` are not part of the ownership protocol. Exact gate/review worktrees likewise record and sync a private intent before `git worktree add`; resume reclaims every such registration before it switches branches or dispatches another worker.
 
 **A registry another process is writing.** *In force for the topology's registry accesses, as
-`reviews/2026-10-01-pr11-follow-up-b-record.md` designs them (§8, over §7, §6 and §5) and its implementation section
+`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` designs them (§8, over §7, §6 and §5) and its implementation section
 records. It needs no packet change. The frozen legacy engine's accesses are a separate change, follow-up D, and the
 owner's decision.*
 
@@ -303,7 +303,7 @@ stays as adopted.
   completion has a hard wall-clock bound); nothing else of the legacy engine's accesses changes.
 
 **A dead coordinator's Git writers and the slot its resume uses.** *In force for the topology's
-slots, as `reviews/2026-10-02-pr11-follow-up-c-record.md` designs them (§4, completed in §5) and its
+slots, as `48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md` designs them (§4, completed in §5) and its
 implementation section records. The packet names the untagged paths; that record's erratum
 E-FUC-3, which amends them for U's instances, is adopted as composed, under the owner's delegation
 of 2026-10-11 (that record's §6.16).*
@@ -514,7 +514,7 @@ Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data
 **A legacy attempt the worktree registry refused.** *ADOPTED on 2026-10-11, with decision O8 (decision B) to
 unfreeze the PR5-frozen legacy modules it changes and with ruling B-W924-R1-S, as an agent decision by
 `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's `0194a1e4…`) — follow-up D
-(`reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation section),
+(`48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` §1, as §2 to §4 amend it, and its Implementation section),
 implemented on draft pull request #331. Nothing in this paragraph is in force until that pull request merges, after
 follow-up B's (pull request #329), whose registry access it calls.
 Once in force, it replaces the last item of "A registry another process is writing" above, which says the frozen

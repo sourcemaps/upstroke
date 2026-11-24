@@ -79,7 +79,7 @@ of `create_container` and `start_container`, and
 it so by reading every naming of an unarmed launcher in the tree. The reaper's scope is the
 runner's own identity, compared with each container's labels before anything forks, and the
 runner disarms only when every container it started reached an established end. The
-follow-up's record (`reviews/2026-10-01-pr11-follow-up-a-record.md`, §1 and §2) has the
+follow-up's record (`48f2af7a:reviews/2026-10-01-pr11-follow-up-a-record.md`, §1 and §2) has the
 design, the review's corrections and the witnesses.
 
 ## `#![cfg_attr(not(test), forbid(clippy::disallowed_methods))]`

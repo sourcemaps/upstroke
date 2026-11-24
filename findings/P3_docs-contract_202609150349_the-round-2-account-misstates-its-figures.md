@@ -5,10 +5,10 @@ disposition: deferred
 category: docs-contract
 pr: 290
 reviewed_sha: 0320e2df9e7ca959f0a80146ef64126323839125
-location: reviews/2026-09-14-o3-attribution-record.md:141
+location: 48f2af7a:reviews/2026-09-14-o3-attribution-record.md:141
 provenance: introduced_by_feature
 first_bad: 703bcd0794365d65fde5a1bb05aa4dbe93f4dfd6
-guard: the next change that edits `reviews/2026-09-14-o3-attribution-record.md` or the pull request #290 body — it corrects each sentence below to the saved output of its own command and cites that output by path, the way this pull request's round-1 and round-2 entries cite theirs
+guard: the next edit of the #290 body takes it up — it corrects each of the body's sentences below to the saved output of its own command and cites that output by path, the way the body's round-1 and round-2 entries cite theirs
 ---
 
 ## Failure sequence
@@ -28,7 +28,7 @@ re-executed at `0320e2df9e7ca959f0a80146ef64126323839125` with the output saved 
   nine, and round 2's seven". `git rev-list --count c3688ada..0320e2df` prints **6**
   (`0de39a89`, `eb1c1d1c`, `703bcd07`, `0333e37c`, `5da89afb`, `0320e2df`); the total of 25 is
   right, the breakdown is not.
-- The record (`reviews/2026-09-14-o3-attribution-record.md:141`) says "the seven enum-variant
+- The record (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md:141`) says "the seven enum-variant
   constructions above are the two legacy emitters and six fixture construction sites". Two plus six
   is eight, and eight is what the base census lists: **eight** value-position constructions of the
   record, two emitters and six fixture sites. Seven is the count of `EventBody::DesignDefect {` and
@@ -36,7 +36,7 @@ re-executed at `0320e2df9e7ca959f0a80146ef64126323839125` with the output saved 
   sites — because the sixth fixture site, the canonical `serde_json::to_value(DesignDefect { .. })`
   at base `src/topology/events.rs:4361`, constructs the record and no enum variant. The sentence
   puts the record count's parts under the enum-variant count's total.
-- The record (`reviews/2026-09-14-o3-attribution-record.md:1088`) says of the commits between the
+- The record (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md:1088`) says of the commits between the
   B1 commit `0de39a89` and the code head `5da89afb` that "the commits between are this record's";
   `git show --stat` shows `eb1c1d1c` also changes the F1 finding file, `703bcd07` also changes the
   O3 finding file, and `0333e37c` changes `docs/internals/events/mod.md` and
@@ -48,8 +48,19 @@ source file than it did, that the base held seven constructions of the record, a
 round's docs commits touched only the record — and, following the cited commands, finds each
 figure contradicted by the command's own output.
 
+## Since 2026-11-24
+
+The record left master on 2026-11-24 (`bde77050`) and is read from history at the location above;
+its own copies, the sentences at `:141` and `:1088`, are archived evidence that nobody keeps true
+and are not corrected. What stays open is the #290 body, whose three sentences still read as the
+failure sequence quotes them in the body as saved on 2026-11-24
+(`gh pr view 290 --repo sourcemaps/upstroke --json body --jq .body` as printed on 2026-11-24): line
+257, "(`git diff --stat fcfedc75 HEAD -- src`: four files)"; line 176, "the first landing's ten,
+round 1's nine, and round 2's seven"; and line 249, "the commits between are the record and the two
+findings' corrections".
+
 ## What the change that takes this up should do
 
-Replace each figure with its command's saved output — five files, six commits, eight record
-constructions of which seven construct an enum variant, and the commit list with every file each
-commit touches — and cite that output by path.
+Replace each of the #290 body's three figures with its command's saved output — five files, six
+commits, and the commits between `0de39a89` and the head with every file each touches, the two
+notes `0333e37c` changes among them — and cite that output by path.

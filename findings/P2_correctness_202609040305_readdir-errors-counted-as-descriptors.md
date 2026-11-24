@@ -19,5 +19,5 @@ the Linux descriptor reader counted `read_dir` entries with `entries.count()` ->
 
 deferred: an `Err` entry makes the whole count "not readable"; the test that proves the reader has an arm for it
 
-Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by PR #125, closed after eight frontier passes; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

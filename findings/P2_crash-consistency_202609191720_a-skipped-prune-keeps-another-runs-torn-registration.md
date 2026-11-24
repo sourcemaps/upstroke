@@ -130,7 +130,7 @@ removal leaves Git's enumeration working.
 
 ## At #329's implementation (2026-10-03)
 
-**The trade-off is settled the second way.** #329 removed every engine `git worktree prune` (`reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5): no engine
+**The trade-off is settled the second way.** #329 removed every engine `git worktree prune` (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5): no engine
 process deletes another process's registration, so another run's torn registration is no longer deleted by this run's
 removals, by design (`no_removal_prunes_another_processs_registration_and_the_store_goes_only_when_empty`). This file's
 residue stays: the registration lasts until its own run's resume repairs it, or until an operator removes it.

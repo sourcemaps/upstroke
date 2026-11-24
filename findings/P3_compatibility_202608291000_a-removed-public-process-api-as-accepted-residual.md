@@ -24,4 +24,4 @@ surface carries a deprecation obligation at all. Recorded as an accepted residua
 residue rather than as a gate blocker — the point of the row is that the removal is known, not that
 it is waiting on a fix.
 
-Recorded in `reviews/FINDINGS.md` §25. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §25. Severity is this migration's judgement.

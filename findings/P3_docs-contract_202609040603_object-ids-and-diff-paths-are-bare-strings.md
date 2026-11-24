@@ -19,5 +19,5 @@ guard: deferred: a validated object-id type belongs to object.rs, which owns is_
 
 deferred: a validated object-id type belongs to `object.rs`, which owns `is_object_id` (the engine's `CommitSha` is the unvalidated spelling of the same thing), and `difference` as a typed list of paths or a reason belongs to the parent's `index_differs_from` (row 11); the field's doc comment on `difference` states that the string is a diagnostic
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

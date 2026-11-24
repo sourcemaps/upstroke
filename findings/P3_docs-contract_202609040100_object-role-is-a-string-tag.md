@@ -19,5 +19,5 @@ guard: deferred to the parent's sweep of src/workspace_manager.rs, the queue's l
 
 deferred to the parent's sweep of `src/workspace_manager.rs`, the queue's last row of this family, where the variant's field lives; until then the two literals are passed only by `refuse_expected_old` and `refuse_new`, and `an_expected_old_is_a_well_formed_non_null_id_at_either_hash_length` was witnessed failing under the expected-old wrapper passing the role new
 
-Recorded by the PR #126 `src/workspace_manager/object.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #126 `src/workspace_manager/object.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

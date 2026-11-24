@@ -19,5 +19,5 @@ guard: deferred to the parent (queue row 11) or the ref layer, which have the re
 
 deferred to the parent (queue row 11) or the ref layer, which have the repository and can ask its backend; at 0e510735c5324d8d8c5e9194cf80f2858e4e1878 the certification is withdrawn instead of guessed at: `has_checked_out` documents that `false` is not proof of a different ref and that no case folding is done here, and `assert_publishable`'s site says the same. `SWEEP-PARSERS-008` is closed only for the half it measured, the whitespace and byte-set spelling of a branch; ref-storage equivalence is this row and stays open. The proposal for row 11: ask the guard a fail-closed question (byte identity, or a spelling the store cannot tell from it) rather than an identity one. Over-refusal can in principle refuse a legitimate publication where two distinct refs differ only by case; that is acceptable, because a refusal fails loudly where the alternative corrupts a checkout silently, and because this engine's run refs are generated rather than user-chosen
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

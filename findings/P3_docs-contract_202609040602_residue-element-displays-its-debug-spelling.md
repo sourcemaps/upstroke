@@ -27,5 +27,5 @@ with the element's Debug name, so it is one assertion's change. The adoption was
 sweep's bound, which is why it did not land with the `Display`. `SWEEP-RESIDUE-AUTHORITY-001` is the
 same defect in `src/topology/effects/bijection.rs`
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

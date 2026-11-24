@@ -19,5 +19,5 @@ the registration scan reads `gitdir` and `commondir` with unrestricted `fs::read
 
 fixed at 59f2bd99c95c80f1a2a011a78ebe34b43fbf4555 by reverting the scan, so no production path in this pull request reads a repository-controlled file; deferred as a requirement to the sweep of `src/workspace_manager.rs`, queue row 11: every read of a file a repository controls needs a file-type check before the open and a bound on bytes and on time, and that requirement covers `revalidate_removal`'s existing `gitdir` reads as much as anything new
 
-Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

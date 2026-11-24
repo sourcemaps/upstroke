@@ -19,5 +19,5 @@ the closed pull request pinned "no production wildcard wait in this crate" with 
 
 deferred: if a source census is ever written for this, it blanks comments and every literal kind before matching, proves the blanker on a fixture, asserts the size and boundaries of its domain, recognises every spelling of a wildcard wait, and carries a positive control that injects one violation and sees the expected failure (standards/12_standards_tests.md); and it is evidence about this crate only, never about a host
 
-Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by PR #125, closed after eight frontier passes; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

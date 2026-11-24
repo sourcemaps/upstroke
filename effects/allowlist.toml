@@ -556,7 +556,7 @@ WHEN THE GUARD CANNOT RUN, RESIDUE SURVIVES: a `SIGKILL`ed process runs no \
 `Drop` at all, and a failing label query returns early from the `Drop` that \
 does run, so the container stays in the shared daemon and nothing in the \
 scratch-directory cleanup removes it. ONE gated test pre-cleans its own \
-container name before the create for exactly that case (`reviews/FINDINGS.md` \
+container name before the create for exactly that case (`48f2af7a:reviews/FINDINGS.md` \
 §16; the key it derives is per build slot and is fixed when \
 `CARGO_TARGET_DIR` is unset, `R5-SEAMS-006`); the other nine rely on the \
 `Drop`. \

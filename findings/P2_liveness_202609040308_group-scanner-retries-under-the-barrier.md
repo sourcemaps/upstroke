@@ -19,5 +19,5 @@ guard: deferred: named for the file's owner; any change that makes the READY wai
 
 deferred: named for the file's owner; any change that makes the READY wait give way to a termination must cover this retry too, or the coverage claim is false
 
-Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by PR #125, closed after eight frontier passes; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

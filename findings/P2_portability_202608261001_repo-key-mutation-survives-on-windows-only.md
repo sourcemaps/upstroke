@@ -24,4 +24,4 @@ and needs an assertion that kills there, or the re-expressed mutation is equival
 platform. Do not carry it forward as a regression without that measurement — that is the claim §15
 exists to avoid making without evidence.
 
-Recorded in `reviews/FINDINGS.md` §15 as one of the six entries needing adjudication. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §15 as one of the six entries needing adjudication. Severity is this migration's judgement.

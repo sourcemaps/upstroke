@@ -25,4 +25,4 @@ only as to whether that is a real detection-power loss or an equivalent-mutant a
 re-expressing a prose-recorded mutation. This one is a flat regression candidate, still surviving,
 and does not need adjudication to be believed — it needs a test.
 
-Recorded in `reviews/FINDINGS.md` §15, “the catalogue re-measured against the shipped code”. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §15, “the catalogue re-measured against the shipped code”. Severity is this migration's judgement.

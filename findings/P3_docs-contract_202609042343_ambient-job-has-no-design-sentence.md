@@ -17,7 +17,7 @@ A Windows write command whose ambient Job Object cannot be created or joined ref
 `AMBIENT_REFUSAL_PREFIX`: "cannot start a write command: on Windows every child must be a member of
 the coordinator's ambient kill-on-close Job Object from creation (INV-18), and …" -> the operator
 looks `INV-18` up -> no public document defines it. At `425ad55`,
-`grep -rn INV-18 --include=*.md .` hits only `reviews/FINDINGS.md` rows that cite it as already
+`grep -rn INV-18 --include=*.md .` hits only `48f2af7a:reviews/FINDINGS.md` rows that cite it as already
 known, and `design/15`'s containment paragraph describes the private per-invocation Job Object
 alone ("each command is created suspended, assigned to a private kill-on-close Job Object, and only
 then resumed"); the ambient job, its startup refusal and the no-degraded-mode rule appear nowhere

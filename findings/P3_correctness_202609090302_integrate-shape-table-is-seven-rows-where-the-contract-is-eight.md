@@ -27,5 +27,5 @@ Extend the array to the contract's eight shapes so the iteration is the census i
 rename it to say which subset it covers. Prefer the first: the two missing shapes have tests already,
 so the work is wiring rather than new coverage.
 
-Raised as observation O3 of the G3 cumulative review gate, `reviews/2026-09-08-gate-G3.md`, with the
+Raised as observation O3 of the G3 cumulative review gate, `48f2af7a:reviews/2026-09-08-gate-G3.md`, with the
 suggested disposition "a ledger row". No row was filed at the time; this is that row.

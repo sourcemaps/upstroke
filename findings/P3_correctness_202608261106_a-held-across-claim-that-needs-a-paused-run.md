@@ -24,4 +24,4 @@ Give the suite a coordinator seam that can pause a run mid-span, then witness th
 rather than the acquisition. The two rows close together or not at all — inventing a one-off pause
 for this entry is the orchestration a repair round should not be inventing.
 
-Recorded in `reviews/FINDINGS.md` §20 as unchanged in disposition and evidence. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §20 as unchanged in disposition and evidence. Severity is this migration's judgement.

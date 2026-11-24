@@ -5,10 +5,10 @@ disposition: deferred
 category: docs-contract
 pr: 258
 reviewed_sha: f6fd7fc0faa7e79618da922270ebe666f6100a5f
-location: reviews/2026-09-09-g4-fix-temporary-object-fanout-record.md:1273
+location: 48f2af7a:reviews/2026-09-09-g4-fix-temporary-object-fanout-record.md:1273
 provenance: introduced_by_feature
 first_bad: f6fd7fc0faa7e79618da922270ebe666f6100a5f — §14.3 is new in that commit
-guard: none — the four files exist and carry manifest rows, so no evidence is missing; the change that takes this up says what the checker checked (the round-7 files cited before it ran) and that the four written after it are attested by the manifest, not by the checker
+guard: the next edit of the #258 body takes it up — its Gates paragraph says what the checker checked (the round-7 files cited before it ran) and that the four written after it are attested by the manifest, not by the checker; the four files exist and carry manifest rows, so no evidence is missing
 ---
 
 ## Failure sequence
@@ -34,6 +34,15 @@ that attributes its verification to a checker that skipped it by name: false att
 missing evidence. Finding 5 of the `ultra` review of `f6fd7fc0`, posted on the pull request as
 the SHA-bound comment.
 
+## Since 2026-11-24
+
+The record left master on 2026-11-24 (`bde77050`) and is read from history at the location above;
+its own copy, the §14.3 sentence there, is archived evidence that nobody keeps true and is not
+corrected. What stays open is the #258 body's Gates paragraph, which in the body as saved on
+2026-11-24 (`gh pr view 258 --repo sourcemaps/upstroke --json body --jq .body` as printed on
+2026-11-24, line 38) still reads as the failure sequence quotes it: "`45-r7-final-checks.log`
+covers whitespace, the freeze, the local body validation and the cited round-7 files".
+
 ## Why it is deferred
 
 Reasoned-only, no evidence missing, no failing test or witness; bears on no Gate 4 pass-rule
@@ -41,7 +50,7 @@ clause and no row-10 evidence, so the owner's rule files it and merges.
 
 ## What the change that takes this up should do
 
-Make §14.3 and the body's Gates sentence say what ran: the checker verified the cited round-7
-files that existed before it ran, skipped by name the four it knew would be written after it, and
-those four are attested by the manifest's rows. Or run a checker over the full cited set after the
-last file is written and cite that log instead.
+Make the #258 body's Gates sentence say what ran: the checker verified the cited round-7 files
+that existed before it ran, skipped by name the four it knew would be written after it, and those
+four are attested by the manifest's rows. Or run a checker over the full cited set after the last
+file is written and cite that log in the body instead.

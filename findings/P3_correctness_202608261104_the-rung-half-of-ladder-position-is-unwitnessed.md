@@ -26,4 +26,4 @@ Write the second witness: replace the driver's `rung` reader with a constant and
 all, so the fixture needs a task that has actually escalated — the ladder position needs a spent
 allowance the same way the deferral count needed a prior deferral in the log.
 
-Recorded in `reviews/FINDINGS.md` §20 and named again in §4's recurrence table. Severity is this migration's judgement: a test-sufficiency gap in escalation bookkeeping, with no reproduction of a wrong rung in production.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §20 and named again in §4's recurrence table. Severity is this migration's judgement: a test-sufficiency gap in escalation bookkeeping, with no reproduction of a wrong rung in production.

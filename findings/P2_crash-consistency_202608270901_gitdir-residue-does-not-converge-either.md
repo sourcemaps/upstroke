@@ -27,4 +27,4 @@ found **three uncovered**: `PR5-RD-003` and two others it did not name. It ruled
 `PR5-RD-003` is not the only uncovered case, so a repair that closes this one row and stops has not
 closed the shape. Carried only because the slice was landing; not settled.
 
-Recorded in `reviews/FINDINGS.md` §13 alongside `PR5-RD-002`. Severity is this migration's judgement: same mechanism as `PR5-RD-002`, one file over, with no measured rate of its own.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §13 alongside `PR5-RD-002`. Severity is this migration's judgement: same mechanism as `PR5-RD-002`, one file over, with no measured rate of its own.

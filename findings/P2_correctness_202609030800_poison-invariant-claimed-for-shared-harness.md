@@ -19,5 +19,5 @@ the doc and the body say "a poisoned harness is never recorded into" for the sha
 
 the claim is fixed at 0d09ca4df07728d55fcb637e2508cd4145aaf1d2 to what holds, `HarnessEffects` alone, and the type's doc names the four adapters that still recover and record; the adapters themselves are deferred to the sweeps of their files, `src/rundir.rs`, `src/events/log.rs`, `src/runner/container.rs` and `src/runner/mod.rs`, which are not edited here
 
-Recorded by the PR #119 `src/workspace_manager/hooks.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #119 `src/workspace_manager/hooks.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

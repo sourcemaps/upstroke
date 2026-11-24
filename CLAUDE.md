@@ -37,6 +37,9 @@ deliberate; check where the project is before adding something out of sequence.
 into `design/` by section. `CODING_STANDARDS.md` indexes the implementation standards in
 `standards/`. `MAINTAINING.md` is the change lifecycle. When a decision changes the design, the
 section changes in the same pull request; there is no separate decision record to keep in step.
+The dated review records and the closed finding ledger left master on 2026-11-24 and are read from
+history as `48f2af7a:reviews/<file>`, the ledger as `48f2af7a:reviews/FINDINGS.md`; older review
+records are in the private lab repository.
 
 ## Gates
 
@@ -142,7 +145,6 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
 | `scripts/pr-ready-audit.sh` | Lane readiness audit: maintains `lane:*` and `ready-to-merge`, enqueues with `--enqueue` |
 | `findings/` | The standing finding ledger, one file per open finding; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
-| `reviews/` | `reviews/FINDINGS.md`, the predecessor ledger, closed to new sections, and the dated review records still on master; historical review records are in the private lab repository |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
 | `src/` | One crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters, with `proc/` for subprocess handling), `engine/` (the conductor), `topology/` (the v0.2 execution topology), `runner/` (host and container execution), `events/`, `validate/`, `status/`, `effects/`, `connect/`, `capacity/` (the estimator, the machine-level fold, the usage-report schema), `tracker/` (the capacity tracker: provider endpoints and the `curl` transport), and flat modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`, `rundir.rs`, `workspace.rs`, `workspace_manager.rs`, `export.rs`. Large modules are being split into per-concern children; check the tree rather than this list |
 

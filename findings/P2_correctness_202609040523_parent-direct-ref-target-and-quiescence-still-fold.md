@@ -19,5 +19,5 @@ guard: deferred to the sweep of src/workspace_manager.rs, queue row 11: the two 
 
 deferred to the sweep of `src/workspace_manager.rs`, queue row 11: the two helpers and the design sentence belong to the same change, and the sentence follows the code. Until then no living authority claims more than the code does
 
-Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

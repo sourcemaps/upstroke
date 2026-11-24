@@ -102,7 +102,7 @@ the shared bundle's `events` family does not have. So appends made
 through the scaffold are observable in the ordering timeline and appends
 made through `emit::emit` are not — two observation surfaces for one
 kind of event, decided by which emitter ran. That is a real divergence,
-it is recorded in `reviews/FINDINGS.md`, and it is why this parameter is
+it is recorded in `48f2af7a:reviews/FINDINGS.md`, and it is why this parameter is
 not by itself a guarantee of anything: it makes the bundle the caller's
 choice, and `every_family_of_the_harness_bundle_records_into_the_same_harness`
 is the assertion that the choice was the right one.

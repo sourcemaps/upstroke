@@ -22,7 +22,7 @@ notifier") true of answers as well as delivery.
 
 What the file holds is an `interaction::AnswerRecord`: the answer, and —
 since the 2026-09-01 decision that a runtime question is a discovery until
-convicted (`reviews/2026-09-14-o3-attribution-record.md`) — the optional
+convicted (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`) — the optional
 attribution a human rules, `discovered_hole` by default or `design_defect`
 with the citation that convicts. This command writes the record
 **unattributed**: it has no flag for a ruling, and `None` in the file means
@@ -30,7 +30,7 @@ no ruling was made. What ingests such a file today is the schema-3 engine,
 which writes its `design_defect` record unclassified (`attribution: None,
 citation: None`) whatever the file says, and whose reader reports
 `Unclassified`; the topology emitter that will apply the discovery default
-at ingest is not built (`reviews/2026-09-14-o3-attribution-record.md`
+at ingest is not built (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`
 §14). A ruling therefore arrives only through the
 answer channel's file, never through the `question_answered` transaction,
 and never without its citation — `interaction::write_answer` refuses a

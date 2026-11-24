@@ -15,7 +15,7 @@ none of them should own privately.
 **This module used to *locate* the CLI, and it deliberately no longer
 does.** An adapter names its CLI; the boundary that will execute it decides
 which file that name is. `PR4-ADAPTER-RESOLVES-ON-THE-HOST` in
-`reviews/FINDINGS.md` is the entry, [`Invocation::named`] is the repair, and
+`48f2af7a:reviews/FINDINGS.md` is the entry, [`Invocation::named`] is the repair, and
 DESIGN.md:612 is the sentence it serves: "Probes run through that same
 runner, **or pre-flight could certify a host CLI/version different from the
 one the attempt executes**", with the normal container case being "an image

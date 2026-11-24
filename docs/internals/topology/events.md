@@ -1099,7 +1099,7 @@ It is a backoff round because that is what it indexes:
 doubling that has to restart when the run stops being stuck.
 
 **Comment-only, on a frozen file, by per-instance approval of
-2026-08-26**, carrying `reviews/FINDINGS.md` §20's staged erratum text.
+2026-08-26**, carrying `48f2af7a:reviews/FINDINGS.md` §20's staged erratum text.
 The wire is unchanged: no field, no type and no serde attribute moves,
 and `events::SCHEMA_VERSION` — which lives outside this file — is not
 touched. The reason it was not left for the G2 pass is
@@ -1618,7 +1618,7 @@ settlement is.
 Informational: a question that reached a person, with its answer and its
 attribution — `discovered_hole` by default, `design_defect` only by
 citation — the record the 2026-09-01 decision attributes
-(`reviews/2026-09-14-o3-attribution-record.md`). The payload is the shared
+(`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`). The payload is the shared
 `events::DesignDefect`, read without `strict::field`, so its two optional
 columns, or a column this binary does not know, decode through the
 informational-tolerance path below; the same columns on the

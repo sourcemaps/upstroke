@@ -266,7 +266,7 @@ The settlement now belongs to `candidate_prepared`:
 applies that event, refuses an `attempt_finished` that settles `succeeded`
 at all, and refuses a `candidate_prepared` whose generation is already
 promoted — so neither ordering of the old pair can be written. The per-instance
-Class B approval is `reviews/FINDINGS.md` §3.
+Class B approval is `48f2af7a:reviews/FINDINGS.md` §3.
 
 ## `pub fn rematerialize_question(finished: &AttemptFinished4) -> Option<&FrozenQuestion> {`
 

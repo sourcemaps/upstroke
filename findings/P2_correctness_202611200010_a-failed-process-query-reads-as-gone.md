@@ -50,7 +50,7 @@ What still catches a survivor:
 ## What the change that takes this up should do
 
 - **Add a probe with three outcomes** to `src/agent/proc.rs`'s `windows_job`: alive, gone, or
-  unobserved. `reviews/2026-10-02-pr11-follow-up-c-record.md` §2.5.2 (lines 983–1007) sets it out.
+  unobserved. `48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md` §2.5.2 (lines 983–1007) sets it out.
   When `OpenProcess` fails, `ERROR_INVALID_PARAMETER` is gone and any other error is unobserved. A
   failed `GetProcessTimes` is unobserved. A different creation time is gone. `WAIT_OBJECT_0` is
   gone, `WAIT_TIMEOUT` is alive, and any other wait result is unobserved. The record's `proc.rs`

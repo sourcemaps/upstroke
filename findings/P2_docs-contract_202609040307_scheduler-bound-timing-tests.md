@@ -19,5 +19,5 @@ the closed pull request's tests of the bounded end required wall-clock time unde
 
 deferred: tests of a bounded wait observe the mechanism of the bound (the number of looks taken, or a clock the test controls), not wall time, and join every worker they spawn; §12's rule that concurrency tests do not depend on scheduling luck
 
-Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by PR #125, closed after eight frontier passes; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

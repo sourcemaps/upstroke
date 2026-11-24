@@ -406,7 +406,7 @@ Every label [`arm_label`] can return for a step that **offers work**.
 **Below `arm_label`, not above it.** These two `const`s were inserted
 between that function's doc block and the function, so the block
 attached to `OFFERS_WORK` and `arm_label` rendered undocumented —
-occurrence 10 of `reviews/FINDINGS.md` §4's doc-re-targeting class,
+occurrence 10 of `48f2af7a:reviews/FINDINGS.md` §4's doc-re-targeting class,
 committed by the commit whose ledger entry corrected that class's own
 count. `clippy::doc_lazy_continuation` does not fire here because the
 stranded block's last line is prose rather than a list item, which is
@@ -474,7 +474,7 @@ $ grep -rn 'an_ending_run_reaches_closure' --include='*.rs' src/ | grep -v '///'
 
 **Zero code occurrences.** The doc-comment filter is not tidiness: this
 sentence quotes the name, so the unfiltered command matches *itself* and
-reports a hit for a test that does not exist. `reviews/FINDINGS.md` §4
+reports a hit for a test that does not exist. `48f2af7a:reviews/FINDINGS.md` §4
 carries that as a class — a command quoted as evidence becomes part of
 its own input — and it is the documentation half of
 `PR4-CENSUS-COMMENT-ORACLE`. The two tests named above are the real

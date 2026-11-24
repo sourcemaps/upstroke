@@ -659,7 +659,7 @@ candidate; both must refuse before the ref is created.
 The tree is deliberately **not** asserted, and it is not an oversight:
 the fold keeps the candidate, the base and the paths, so a resume has no
 recorded tree to compare against. `PR7-CANDIDATE-TREE-UNVERIFIED` in
-`reviews/FINDINGS.md` §2 is that residue, recorded rather than papered
+`48f2af7a:reviews/FINDINGS.md` §2 is that residue, recorded rather than papered
 over.
 **A commit on the recorded base, carrying a tree nobody judged, is refused.**
 

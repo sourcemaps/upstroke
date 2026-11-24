@@ -19,5 +19,5 @@ guard: deferred to this file, once the parent decides its flattening: the parent
 
 deferred to this file, once the parent decides its flattening: the parent turns most `Refusal` values into `UpstrokeError::Refused { message }`, so a typed comparison at these sites needs `Refusal` reachable from the test, which is `src/workspace_manager.rs`'s call, queue row 11. Converting all 61 blind would also be a diff no reviewer could read against a census, which is the bound this sweep is held to
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

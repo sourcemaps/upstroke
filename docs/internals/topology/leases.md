@@ -113,7 +113,7 @@ no longer saw the survivor as older: a lineage created after a release
 could widen onto an older live lineage's region and publish ahead of it.
 G4's independent verification found it (P1, `G4-LINEAGE-AGE-REUSED-AFTER-RELEASE`);
 the executed sequence, the freeze class and the fix are
-`reviews/2026-09-09-g4-fix-lineage-age-record.md`.
+`48f2af7a:reviews/2026-09-09-g4-fix-lineage-age-record.md`.
 
 ## `pub struct LeaseTable {`
 

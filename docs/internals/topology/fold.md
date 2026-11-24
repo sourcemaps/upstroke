@@ -182,7 +182,7 @@ it, because closing it is this field.
 
 Per-instance **Class B** approval, granted 2026-08-26 against the
 frontier re-review of `c2c0294`, finding B; the ledger row is
-`reviews/FINDINGS.md` §3 and `PR7-CANDIDATE-TREE-UNVERIFIED` in §2.
+`48f2af7a:reviews/FINDINGS.md` §3 and `PR7-CANDIDATE-TREE-UNVERIFIED` in §2.
 Nothing serde-visible moves — `CandidatePrepared::tree_sha` already
 exists on the wire and this is the fold keeping what it reads. It
 conforms to §15 rather than amending it.

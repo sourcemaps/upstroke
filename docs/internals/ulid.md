@@ -18,7 +18,7 @@ The coordinator incarnation id is the one id with a second construction
 (`incarnation_ulid`, PR11 follow-up C): the same layout, its 80-bit field also
 hashing 128 bits the process draws from the host, because a slot instance's
 name is a function of the id that created it
-(`reviews/2026-10-02-pr11-follow-up-c-record.md`, §4.2).
+(`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`, §4.2).
 
 ## `#![forbid(`
 
