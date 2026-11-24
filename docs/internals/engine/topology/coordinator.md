@@ -21,7 +21,7 @@ calls this entry yet — `upstroke run` still writes schema 3, and a schema-4 ru
 from tests until PR12.
 
 The readings this module implements are the working record's R-R to R-AL
-(`reviews/2026-09-30-pr11-record.md`, "Phase 3's readings" and "Phase 4's readings"), as the
+(`48f2af7a:reviews/2026-09-30-pr11-record.md`, "Phase 3's readings" and "Phase 4's readings"), as the
 early review's repairs (§13, round R1), review round 2's (§13, round R2) and review round 3's
 (§13, round R3) corrected them; the sections below name them where they bind.
 
@@ -2252,7 +2252,7 @@ and empty, the state `git worktree add` passes through and leaves when it is kil
 the first verification only. With `finishes`, a thread plays the other process finishing its
 write, but only after a registry access of this run has failed on it at least once — the
 `CONTENDED_ATTEMPTS` handshake of `workspace_manager::tolerant_registry_access`'s contract
-(`reviews/2026-10-01-pr11-follow-up-b-record.md` §6.4) — so the witness measures a retry and
+(`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §6.4) — so the witness measures a retry and
 never a store that happened to be whole. Through the fixture's primitives: a topology module
 may name no `std::fs` write.
 

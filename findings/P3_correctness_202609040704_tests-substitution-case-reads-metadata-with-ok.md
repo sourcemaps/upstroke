@@ -19,5 +19,5 @@ guard: deferred to this file: distinguishing absence from a failed inspection he
 
 deferred to this file: distinguishing absence from a failed inspection here means deciding what an unreadable acted-through path means to the generator, and the same question is open one level down in `src/workspace_manager/residue.rs` §51's deferred rows. The count assertion makes a wrong classification visible as a number that stops matching
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

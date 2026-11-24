@@ -5,10 +5,10 @@ disposition: deferred
 category: performance
 pr: 331
 reviewed_sha: 9b2262f4f2b515cc1181ed67df7f19756612b8a7
-location: reviews/2026-10-02-pr11-follow-up-d-record.md:598
+location: src/engine/coordinator.rs:610
 provenance: introduced_by_feature
 first_bad: cb1beacfd1b7f05519f3460d8bda9c5037f79d8e, follow-up D's implementation of the kept pin, as its design has stated the limitation since 37e4d8c43258e739da6a37b6a44bd51b8494ee18 (R-D7)
-guard: the owner's ruling on kept-pin retention, or a change that retires a kept pin once its output is committed or recovered; until then the operator removes each with `git update-ref -d <pin>`, and the residual stays stated as R-D7 in `reviews/2026-10-02-pr11-follow-up-d-record.md` and filed here; nothing accepts it
+guard: the owner's ruling on kept-pin retention, or a change that retires a kept pin once its output is committed or recovered; until then the operator removes each with `git update-ref -d <pin>`, and the residual stays stated as R-D7 in `48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` and filed here; nothing accepts it
 ---
 
 ## Failure sequence
@@ -59,7 +59,7 @@ proposed.
 
 R-D1's preservation design, round 4 (sha256 `f9e81c07…`), implemented on draft #331 and adopted on 2026-10-11 with
 decision O8 as an agent decision by `pr11_decide_d` under the owner's delegation of 2026-10-11 (babysit's
-`0194a1e4…`), in force only from #331's merge (`reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), keeps more,
+`0194a1e4…`), in force only from #331's merge (`48f2af7a:reviews/2026-10-02-pr11-follow-up-d-record.md` §5.17), keeps more,
 and the engine still removes
 none of it; the operator does:
 - **pins:** one per attempt that part N keeps (an attempt error after the worker ran, or a reviewed candidate whose

@@ -42,7 +42,7 @@
 //! read of a repository-controlled file), which is the parent's work and not
 //! a child classifier's: `findings/` carries a file per case for the sweep of
 //! `src/workspace_manager.rs`, the queue's last row of this family, and
-//! `reviews/FINDINGS.md` §51 is where they were derived. The one inspection
+//! `48f2af7a:reviews/FINDINGS.md` §51 is where they were derived. The one inspection
 //! this module used to make through `git worktree list` — whether the
 //! repository registers the worktree — is now the parent's byte-safe read of
 //! the store itself (`registration_for`), since a registration an interrupted

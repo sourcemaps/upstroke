@@ -19,5 +19,5 @@ the scan is constant memory and the answer is not: a first line that is found is
 
 deferred: the doc on `first_line_within` now states the property where a reader meets it, and what to bound is what a census may spend rather than what a first line is, which is a decision for the census and its design sentence rather than a constant invented in this module
 
-Recorded by the PR #137 pass over `src/rundir/classify.rs`; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #137 pass over `src/rundir/classify.rs`; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

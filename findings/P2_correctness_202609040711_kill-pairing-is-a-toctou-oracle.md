@@ -19,5 +19,5 @@ guard: withdrawn, not repaired: the try_wait observation, the already_exited fie
 
 **withdrawn, not repaired**: the `try_wait` observation, the `already_exited` fields and the per-shape assertion are deleted, which removes the defect completely because the defect was the added observation. `kill_error` stays recorded and printed beside the per-shape counts, so pass 1's §7 discard stays closed without an unsound claim on top of it. Reproduced independently here: `Child::kill` on a zombie returns `Ok` and the following `wait` reports the child's own exit 0. **A sound version cannot be built inside this process** — two instants cannot decide it — and needs the child watched from outside, which is `src/runner/**`'s ground
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

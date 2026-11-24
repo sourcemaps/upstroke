@@ -40,7 +40,7 @@ engineering consequences other documents rely on are retained here, unchanged in
   settle. **Conviction rate**: the share of those questions ruled `design_defect`, each
   citing the checklist item refinement skipped (§5) — a Definition of Ready with a failure
   signal that cannot be gamed by punishing discovery, since a discovery is not a demerit
-  (`reviews/2026-09-14-o3-attribution-record.md`). The importer is the
+  (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`). The importer is the
   highest-leverage unbuilt item; the near-term version is one developer hand-translating
   two stories in ten minutes.
 - **Sequencing.** Prove the loop unattended (§21's acceptance run), use it on real work

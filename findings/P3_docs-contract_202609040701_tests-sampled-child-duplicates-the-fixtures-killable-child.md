@@ -19,5 +19,5 @@ guard: deferred, naming effects/allowlist.toml: this file's funnel row states in
 
 deferred, naming `effects/allowlist.toml`: this file's funnel row states in the present tense that the one type owning a live `std::process::Child` here is `SampledChild` and is private, and counts this file's `Command::spawn` sites, so collapsing the type edits a reviewed governance record as well as the test. It belongs in the same change as the row below
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

@@ -117,14 +117,16 @@ source, documentation, workflows, release machinery and this file.
    findings produces six files. Severity leads the filename so `findings/` sorts worst
    first and an `ls` is the outstanding work; name and shape them as `findings/README.md`
    states. A finding fixed before merge needs no file at all — the body's ledger row is its
-   permanent record, and that row is required whatever the disposition. `reviews/FINDINGS.md` is
-   the same ledger up to 2026-09-04, closed to new sections; its section numbers are cited from
-   source and design and do not move.
+   permanent record, and that row is required whatever the disposition. The same ledger up to
+   2026-09-04, closed to new sections, left master on 2026-11-24 and is read at
+   `48f2af7a:reviews/FINDINGS.md` since; its section numbers are cited from source and design and
+   do not move.
 
    A repair-only push after a pass that found no serious P1 needs no second pass: the owner reads
    `git diff <reviewed> <head>`, confirms it contains those repairs and nothing else — never a
    workflow, gate script or validator edit — and says so in the body. A push confined to
-   the finding ledger (`findings/`, or `reviews/FINDINGS.md`), or a conflict-free merge of `master` that leaves `git diff master...HEAD`
+   the finding ledger (`findings/`, or `reviews/FINDINGS.md` on a branch cut before that ledger left
+   master), or a conflict-free merge of `master` that leaves `git diff master...HEAD`
    byte-identical with CI green on the merged head and no gate edited by the pull request, keeps
    the review as well; record both SHAs, and for the merge-in both base SHAs and the diff hash
    before and after. Anything wider is a new change and is reviewed again. A panel-reviewed
@@ -302,7 +304,7 @@ takes it up should do. A pull request that does not merge carries nothing into t
 so those files land through a change of their own. What a signal costs is a paragraph. A loop
 neither signal catches is still a loop, so these are a floor and not a detector.
 
-PR #125 is the pull request this subsection was written from; `reviews/FINDINGS.md` §49 is its
+PR #125 is the pull request this subsection was written from; `48f2af7a:reviews/FINDINGS.md` §49 is its
 record.
 
 ### Tech debt sweeps

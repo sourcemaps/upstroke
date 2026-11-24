@@ -1291,7 +1291,7 @@ impl LockSite {
 /// and since PR10 both are reached: `rundir::write_report` in `src/rundir.rs`
 /// consults `RunDir.WriteReport` and then this site around the one write, the
 /// two hook executions for one write that the owner's standing finding
-/// `PR3-REPORT-DOUBLE-NAME` (`findings/`, history in `reviews/FINDINGS.md` §2)
+/// `PR3-REPORT-DOUBLE-NAME` (`findings/`, history in `48f2af7a:reviews/FINDINGS.md` §2)
 /// said ST-07 would demand; and `rundir::sync_report_dir` consults the same
 /// two, in the same order, around the directory barrier a finalization that
 /// finds the report current takes before it prunes, so that branch's one

@@ -30,4 +30,4 @@ kept until then: `upstroke::runner::host::build_command` is on the denylist, so 
 be allowlisted, and `src/agent/bin.rs` sits in the enumerated legacy section where the debt is
 visible rather than convenient.
 
-Recorded in `reviews/FINDINGS.md` §8. It was missed by both full-ledger audits (§35's 52 and §38's 26), so it is carried here on its own row text.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §8. It was missed by both full-ledger audits (§35's 52 and §38's 26), so it is carried here on its own row text.

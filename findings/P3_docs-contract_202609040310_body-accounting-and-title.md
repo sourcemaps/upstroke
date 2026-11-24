@@ -19,5 +19,5 @@ the closed pull request's title still claimed a load-tolerant READY budget after
 
 deferred: recorded so the next attempt counts the calls from the code and retitles on a narrowing
 
-Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by PR #125, closed after eight frontier passes; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

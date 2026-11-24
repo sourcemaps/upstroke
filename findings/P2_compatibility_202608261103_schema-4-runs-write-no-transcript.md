@@ -25,4 +25,4 @@ Decide whether the schema-4 path owes the transcript artifact, and record the an
 G2 erratum list. This is a real capability gap rather than a defect in what exists, so the repair
 is a decision followed by a writer, not a fix to a broken writer.
 
-Recorded in `reviews/FINDINGS.md` §20. Its stated pair, `PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4`, is fixed; this one is not. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §20. Its stated pair, `PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4`, is fixed; this one is not. Severity is this migration's judgement.

@@ -49,7 +49,7 @@ before the runtime is asked anything, every spec carrying a path that
 names nothing inside the image, and `Caps.version` certifying the host's
 CLI while the attempt runs the image's, which is DESIGN.md:612's
 sentence exactly. `PR4-ADAPTER-RESOLVES-ON-THE-HOST` in
-`reviews/FINDINGS.md` is the entry; [`crate::agent::bin::Invocation::named`]
+`48f2af7a:reviews/FINDINGS.md` is the entry; [`crate::agent::bin::Invocation::named`]
 is the repair.
 
 This is not a new shape for the field. [`crate::gates::ShellKind::spec`]
@@ -61,7 +61,7 @@ exception. **A `String` was always wide enough** — DESIGN.md:222 freezes
 
 The corollary belongs to the *runner*: resolving a name is now a thing
 each boundary does, so each boundary owns which files a name may reach.
-`PR6D-HOST-RUNNER-RESOLVES-BY-PLATFORM-SEARCH` in `reviews/FINDINGS.md`
+`PR6D-HOST-RUNNER-RESOLVES-BY-PLATFORM-SEARCH` in `48f2af7a:reviews/FINDINGS.md`
 records what the host runner's answer is today and who owns tightening
 it.
 
@@ -826,7 +826,7 @@ its adjacency and its fault row are `topology::effects` — PR3's, frozen
 here, and in its `sites.rs` and `vocab.rs` children since that module was
 split — and a probe context would be a *new variant* of an
 inventory the packet enumerates. That half is deferred, with an owner,
-in `reviews/FINDINGS.md`. What this test contributes is that the
+in `48f2af7a:reviews/FINDINGS.md`. What this test contributes is that the
 mismatch is counted rather than silent: the two roles are named here,
 so ST-07 evidence over `Process.Spawn` cannot be read as covering the
 probe prefixes.

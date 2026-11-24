@@ -30,4 +30,4 @@ points (`runner::host::tests::every_role_reaches_the_containment_points_of_this_
 `a_fault_armed_at_any_containment_point_stops_any_role`) — so the change is to the signature, not
 to the behaviour, and `src/runner/**` is frozen, which is why PR5 could not make it.
 
-Recorded in `reviews/FINDINGS.md` §8, and likewise absent from §35's and §38's audit tables.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §8, and likewise absent from §35's and §38's audit tables.

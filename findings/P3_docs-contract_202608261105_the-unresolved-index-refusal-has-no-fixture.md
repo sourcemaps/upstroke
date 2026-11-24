@@ -24,4 +24,4 @@ produce the refusal with a fixture that reaches it, or amend the clause. Raising
 rather than a repair is deliberate: the ownership is genuinely unclear and guessing it would put a
 fixture in the wrong slice.
 
-Recorded in `reviews/FINDINGS.md` §20. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §20. Severity is this migration's judgement.

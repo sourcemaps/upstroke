@@ -90,7 +90,8 @@ A deleted finding is not lost. Three things outlive it:
   of the 74 it loses. It loses them *silently* -- a pathspec that matches nothing exits 0 with no
   output -- which is the same defect `findings-in-range.sh` carried at its `git ls-tree`, and the
   two were fixed together.
-- **`reviews/FINDINGS.md`**, for everything up to 2026-09-04.
+- **`48f2af7a:reviews/FINDINGS.md`**, for everything up to 2026-09-04: the closed ledger, read at
+  that object since it left master on 2026-11-24.
 
 The one thing this costs is a grep. Checking whether a defect has recurred used to be a search of
 one file; it is now a search of this directory for the open ones and `git log` for the closed. That
@@ -102,13 +103,14 @@ looks likely to return, say so in the body's row rather than relying on the file
 - **A pull request body still carries its own ledger table**, with the canonical nine-column
   header, listing every finding of that pull request. The body groups by pull request; this
   directory does not.
-- **`reviews/FINDINGS.md` keeps its resolved history**, as the same ledger up to 2026-09-04. Its
-  sections keep their numbers, because source comments and design sections cite them by number
-  (`reviews/FINDINGS.md` §4, §19, §20 and others, in 25 places across 16 files). Nothing is
+- **The closed ledger keeps its resolved history**, as the same ledger up to 2026-09-04, and since
+  2026-11-24 it is read at `48f2af7a:reviews/FINDINGS.md`. Its sections keep their numbers,
+  because source comments and design sections cite them by number
+  (`48f2af7a:reviews/FINDINGS.md` §4, §19, §20 and others, in 25 places across 16 files). Nothing is
   renumbered, and its dated narrative and audit sections are left as their authors wrote them. What
   did move is its open rows: every one is a file here now, under the same `id`, so this directory
   is the whole queue and that file is the history behind it. It is closed to new sections; new
   findings come here.
 - **The review-preservation rule still applies.** `MAINTAINING.md` lets a push confined to the
-  ledger keep its frontier review; that exemption names this directory as well, so recording a
+  ledger keep its frontier review; that exemption names this directory, so recording a
   finding, or deleting a resolved one, does not cost a pass.

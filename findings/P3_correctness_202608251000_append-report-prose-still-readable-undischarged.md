@@ -30,4 +30,4 @@ that introduced a new defect" class this project has paid for five times — whi
 that raised it stopped at the narrower honest claim: the count and the discharge cannot be skipped;
 the prose can.
 
-Recorded in `reviews/FINDINGS.md` §3 on 2026-08-25 as *partially repaired*, with this residue “named rather than closed”. Severity is this migration's judgement: the count and the discharge still bind, so what leaks is prose, not authority.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §3 on 2026-08-25 as *partially repaired*, with this residue “named rather than closed”. Severity is this migration's judgement: the count and the discharge still bind, so what leaks is prose, not authority.

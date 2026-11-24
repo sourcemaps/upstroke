@@ -19,5 +19,5 @@ five of the folds in `first_committed_line` turn an I/O failure the filesystem d
 
 deferred to `src/engine/topology/startup.rs`, which owns the census report: `startup_census` defines the classification as `Committed` or "anything else", so the reason belongs beside the class in `RunDirEntry` rather than inside the binary answer, and adding a third class here would contradict the packet. `first_committed_line` states which folds are honest absence and which are not, at the return that loses the difference
 
-Recorded by the PR #137 pass over `src/rundir/classify.rs`; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #137 pass over `src/rundir/classify.rs`; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

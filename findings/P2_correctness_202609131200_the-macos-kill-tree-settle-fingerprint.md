@@ -42,7 +42,7 @@ child did not lead its own process group"*, a different test and a different ass
 was measured and repaired by #173. Family resemblance is exactly what that row's own text forbids
 as an attribution.
 
-**Its one prior appearance is recorded under a row that disclaims it.** `reviews/FINDINGS.md`
+**Its one prior appearance is recorded under a row that disclaims it.** `48f2af7a:reviews/FINDINGS.md`
 §`W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` lists this test twice (#97 run `33674393240` att. 1,
 #104 run `33741105025` att. 1) and marks both *"an assertion flake, harness alive"* — explicitly
 **not** that row's self-kill mechanism, which is what that row was about and what its repair

@@ -19,5 +19,5 @@ guard: deferred to this file: the honest form is to compare only two Ok answers 
 
 deferred to this file: the honest form is to compare only two `Ok` answers and say what an unresolvable record means to a recovery check, which is a decision about `canonical_prefix`'s contract that `src/workspace_manager/containment.rs` owns and queue row 11 composes
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

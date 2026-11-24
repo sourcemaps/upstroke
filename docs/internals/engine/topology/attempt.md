@@ -920,7 +920,7 @@ failure branch that the first, passing, verify did not take.
 between it and this function with no blank line — so all of it attached
 to `emit`, `start` rendered undocumented, and `emit`'s own two
 paragraphs read as a continuation of the `# Errors` section below.
-`PR7-R3-EMIT-004`, the doc-re-targeting class `reviews/FINDINGS.md` §4
+`PR7-R3-EMIT-004`, the doc-re-targeting class `48f2af7a:reviews/FINDINGS.md` §4
 records; split 2026-08-26 by moving `emit` above this block rather than
 by moving the prose. **Above the `# Errors` heading, not after it**: the
 first attempt appended it to the end of the block, and rustdoc renders

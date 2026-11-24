@@ -153,7 +153,7 @@ legacy log's status is byte-identical; a discovery prints its attribution;
 a conviction prints its attribution and the citation that convicts. A stored
 `design_defect` with no citation is a discovery to this arm, because the
 reader derives it so — the projection re-decides nothing
-(`reviews/2026-09-14-o3-attribution-record.md`, R7).
+(`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`, R7).
 
 ## `let outcome = match data.outcome {`
 

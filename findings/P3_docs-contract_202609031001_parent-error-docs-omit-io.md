@@ -19,5 +19,5 @@ guard: deferred by owner direction (P3 and lower recorded): the two # Errors lis
 
 deferred by owner direction (P3 and lower recorded): the two `# Errors` lists are owed and are rewritten in the parent's sweep, `standards/SWEEP.md` queue row 11; `a_regular_file_on_the_chain_is_reported_where_it_stands_and_never_as_nothing_to_remove` and `an_intent_that_cannot_be_read_is_an_error_and_not_an_absent_intent` pin the outcomes the docs omit
 
-Recorded by the PR #120 `src/workspace_manager/containment.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #120 `src/workspace_manager/containment.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

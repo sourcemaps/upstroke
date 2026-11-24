@@ -150,7 +150,7 @@ The scheduler waited out a deferral and made that work runnable again.
 logged, with the question, the answer and an attribution — `discovered_hole`
 by default, `design_defect` only by citation — so the designer prompt learns
 from honestly labelled data. The tag is a historical name; the record carries
-the judgment (`reviews/2026-09-14-o3-attribution-record.md`).
+the judgment (`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`).
 
 ## `CapacitySnapshot {`
 
@@ -685,7 +685,7 @@ or a resume picking up an answer written while the run was dead.
 
 The attribution the 2026-09-01 decision gives every runtime question — a
 runtime question is a discovery until convicted
-(`reviews/2026-09-14-o3-attribution-record.md`; `DESIGN.md` §5, §12,
+(`48f2af7a:reviews/2026-09-14-o3-attribution-record.md`; `DESIGN.md` §5, §12,
 §23.1). It is the judgment the `design_defect` record carries now that its
 tag is a historical name. Spelled `discovered_hole` and `design_defect` on
 the wire, `BudgetKind`'s mold, and `Display` writes the same spelling.

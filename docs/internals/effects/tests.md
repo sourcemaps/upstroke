@@ -2054,7 +2054,7 @@ asserts it.
 The CI workflow, read as a document rather than as text
 ---------------------------------------------------------------------------
 
-`BRIDGE-CI-SHAPE-TEST-IS-A-SUBSTRING-ORACLE` in `reviews/FINDINGS.md` deferred
+`BRIDGE-CI-SHAPE-TEST-IS-A-SUBSTRING-ORACLE` in `48f2af7a:reviews/FINDINGS.md` deferred
 this section's repair for one reason -- it needs a YAML parser and the crate
 had no `[dev-dependencies]` at all. The dependency is added, so the repair is
 made: every claim below is an equality over a parsed mapping or an exact
@@ -3643,7 +3643,7 @@ site censuses here and the witness for the first one's domain, and, in the
 T-CONTAINER section further down, the five
 that hold the two production regions and the whole-file module derivation.
 The names in this file are the harness -- they are what the contract, CI,
-`effects/wrappers.toml`, `reviews/FINDINGS.md` and `--list` know -- and each
+`effects/wrappers.toml`, `48f2af7a:reviews/FINDINGS.md` and `--list` know -- and each
 one delegates and does nothing else.
 
 The boundary is drawn at "reads the tree, writes nothing". All twelve do

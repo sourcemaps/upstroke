@@ -38,4 +38,4 @@ downstream crate. Repair was ruled out of scope for the promotion because narrow
 `src/topology/` visibility would break public `EventSite` signatures and frozen `compile_fail`
 doctests pinned to specific failure reasons.
 
-Recorded in `reviews/FINDINGS.md` §37, carried by owner amendment with the instruction that the panel must find it triaged in the ledger rather than discover it. Severity is this migration's judgement.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §37, carried by owner amendment with the instruction that the panel must find it triaged in the ledger rather than discover it. Severity is this migration's judgement.

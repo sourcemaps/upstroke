@@ -729,7 +729,7 @@ scope cannot be established at all.
 Reclaim the container names a gated test is about to create, before it
 creates them.
 
-`reviews/FINDINGS.md` §16. Two gated tests went red on a head whose only
+`48f2af7a:reviews/FINDINGS.md` §16. Two gated tests went red on a head whose only
 change was a documentation edit, and passed in isolation minutes later:
 four containers from an earlier run this session had been **SIGKILLed** when
 the box exhausted its inodes — two `Exited (137)`, two still `Created` —

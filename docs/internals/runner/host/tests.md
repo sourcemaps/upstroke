@@ -1765,7 +1765,7 @@ the harness never opens the inode for writing and a fork in another harness thre
 writer; the writer closes when that child exits, and the 60-second supervision bound fails and cleans
 up a stuck one. Closing the harness's own descriptor, or renaming the inode, would not do: an
 inherited copy would stay alive and the later exec would fail `ETXTBSY`. Windows writes the batch
-file directly. This repairs `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY` (`reviews/FINDINGS.md` §43) for
+file directly. This repairs `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY` (`48f2af7a:reviews/FINDINGS.md` §43) for
 the marker, transparency and forwarding fixtures.
 
 ## `pub(crate) mod inherited_writer {`

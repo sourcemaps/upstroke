@@ -19,5 +19,5 @@ guard: deferred to the engine, which is not on this queue and outside this sweep
 
 deferred to the engine, which is not on this queue and outside this sweep's bound: `run.rs` should carry the failure's text into the `generation_closed` record's detail or the run's log at the site that drops it, and the dispatch path should do the same for `Recreated`. The `VerifyFailure` doc states the contract the engine owes: the variant and its `Display` are what an operator is told afterwards
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

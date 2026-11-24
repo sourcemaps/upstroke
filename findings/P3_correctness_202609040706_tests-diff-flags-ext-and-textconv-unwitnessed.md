@@ -19,5 +19,5 @@ guard: deferred to this file: both need a program on disk or a .gitattributes fi
 
 deferred to this file: both need a program on disk or a `.gitattributes` filter, which is a fixture shape this suite does not have and a half-test rather than a witness if faked. `capture_diff_is_immune_to_user_diff_config` covers the same flag list for the schema-3 caller in `src/workspace.rs`, so the list is not unwitnessed in the crate
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

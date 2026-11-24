@@ -24,4 +24,4 @@ Until then the restriction is what makes the deferral safe, so a change that rel
 without closing the residual reopens the gap. The comparison head for anything measured against this
 row is `0f05b456`.
 
-Recorded in `reviews/FINDINGS.md` §29, “2026-08-30 PR #73 owner adjudication — narrowed residuals and temporary restrictions”. Severity is this migration's judgement; the adjudication assigned none.
+Recorded in `48f2af7a:reviews/FINDINGS.md` §29, “2026-08-30 PR #73 owner adjudication — narrowed residuals and temporary restrictions”. Severity is this migration's judgement; the adjudication assigned none.

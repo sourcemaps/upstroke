@@ -845,7 +845,7 @@ here — so a resume could create the authoritative candidate ref at an
 object no gate ran against and no reviewer read, which is the one thing
 §15's "adopts only that exact shape" exists to prevent. This comment used
 to record that gap and call closing it "its own decision"; the decision
-was made on 2026-08-26 (Class B, `reviews/FINDINGS.md` §3) and
+was made on 2026-08-26 (Class B, `48f2af7a:reviews/FINDINGS.md` §3) and
 `PreparedCandidate::tree_sha` is it.
 
 Refused as `ObjectMissing` rather than a new refusal kind: the object at

@@ -19,5 +19,5 @@ on a guard READY failure the closed pull request closed the command and acknowle
 
 deferred: the snapshot is read before any descriptor is closed, at both helpers, and both messages carry `open_max`; a test drives the ordering with a helper that writes READY at the deadline
 
-Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by PR #125, closed after eight frontier passes; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

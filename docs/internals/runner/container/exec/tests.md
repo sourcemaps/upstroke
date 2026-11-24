@@ -2007,7 +2007,7 @@ container that had run would be gone before anything could look at it.
 
 Pre-clean before the create, not after the teardown.
 
-`reviews/FINDINGS.md` §16: `LeaveNoResidue` above is correct and
+`48f2af7a:reviews/FINDINGS.md` §16: `LeaveNoResidue` above is correct and
 cannot help, because no in-process cleanup runs when the process is
 SIGKILLed. Every component of this name is fixed — `repo_key()`, the
 run id from `GATED_RUNS`, `INCARNATION_1`, and `gate_id(0)`'s

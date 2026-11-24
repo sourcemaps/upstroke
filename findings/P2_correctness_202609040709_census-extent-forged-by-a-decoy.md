@@ -19,5 +19,5 @@ guard: withdrawn rather than repaired a third time, on the coordinator's narrowi
 
 **withdrawn rather than repaired a third time**, on the coordinator's narrowing ruling of 2026-09-04: a census that reads as a guarantee and can be walked around silently is worse than none, because the green is what gets trusted. The false-boundary field and its assertion are deleted with the naive-extent computation that fed them; the structural extent is kept because reverting it restores pass 2's literal forgery. What `no_sampled_funnel_builds_its_argv_from_a_literal` now claims, in its own doc and in `CANDIDATE_STAGE_ARGV`'s, is that these four bodies hold no inline literal Git argument today — a tripwire, not a guarantee — and **§12's domain-boundary requirement is recorded here as unmet**. A real census must resist all three recipes: the sibling spelling, the false boundary, and the decoy function
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

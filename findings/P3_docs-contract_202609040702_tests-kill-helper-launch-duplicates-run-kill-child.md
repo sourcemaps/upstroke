@@ -19,5 +19,5 @@ guard: deferred, naming effects/allowlist.toml for the same reason as the row ab
 
 deferred, naming `effects/allowlist.toml` for the same reason as the row above: this file's only `Command::output` site is that launch, and the funnel row counts it. The oracle that made the test wrong is fixed here and is independent of where the child is spawned
 
-Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/tests.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

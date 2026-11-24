@@ -318,7 +318,7 @@ instance a manager creates is named by a hash of its incarnation, and an id
 that two processes could draw equal — two PID namespaces, or two machines
 sharing a checkout, with equal clock, pid and counter — would hand one
 incarnation's slots to another (PR11 follow-up C,
-`reviews/2026-10-02-pr11-follow-up-c-record.md`, §4.2). A test's `Fixed` ids
+`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`, §4.2). A test's `Fixed` ids
 stay fixed, so the frozen tests' tags are deterministic.
 
 ## `mod tests` › `pub(crate) struct Fixed {`

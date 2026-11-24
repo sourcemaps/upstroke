@@ -19,5 +19,5 @@ guard: deferred to the parent's sweep (queue row 11), whose funnel this is; the 
 
 deferred to the parent's sweep (queue row 11), whose funnel this is; the call site names it. The proposal: re-assert publishability inside the funnel closure, where `revalidate_acted_through` already runs, after the Before hook. That narrows the window rather than closing it -- `git update-ref` and a checkout are not one atomic act -- so row 11 owes a statement of what the funnel guarantees as well as the code, which is why this round does not change it
 
-Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the `src/workspace_manager/worktree.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

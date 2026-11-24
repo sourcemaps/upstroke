@@ -351,7 +351,7 @@ method's only caller was the driver. The two direct calls were
 character-for-character copies of this body, so routing them here is a
 substitution and not a behaviour change.
 `run::tests::the_frozen_pool_table_is_read_through_one_seam` holds the
-count at one. `reviews/FINDINGS.md` §19, claim (4).
+count at one. `48f2af7a:reviews/FINDINGS.md` §19, claim (4).
 
 ## `impl AttemptPlans for FrozenPlans<'_>` › `fn pools_for(&self, agent: &str) -> Vec<String> {`
 

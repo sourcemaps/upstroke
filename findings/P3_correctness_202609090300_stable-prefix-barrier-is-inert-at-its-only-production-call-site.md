@@ -40,5 +40,5 @@ reachable, or add one sentence at the call site stating that the proof is upstre
 the real fix and is worth more.
 
 Raised as observation O1 of the G3 cumulative review gate,
-`reviews/2026-09-08-gate-G3.md`, which recorded it with the suggested disposition "a tech-debt ledger
+`48f2af7a:reviews/2026-09-08-gate-G3.md`, which recorded it with the suggested disposition "a tech-debt ledger
 row, plus one sentence at the call site". No row was filed at the time; this is that row.

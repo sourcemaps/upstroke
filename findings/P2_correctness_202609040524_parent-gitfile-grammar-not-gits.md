@@ -19,5 +19,5 @@ guard: deferred to the sweep of src/workspace_manager.rs, queue row 11, with the
 
 deferred to the sweep of `src/workspace_manager.rs`, queue row 11, with the reproduction: rewrite a valid checkout's `.git` to `gitdir:/path/to/admin`, and separately point a well-formed line at an empty directory. Reading the gitfile as Git reads it (`setup.c`, git 2.43) and validating the target as a git directory is that file's work; `add_state` reads whatever it answers
 
-Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

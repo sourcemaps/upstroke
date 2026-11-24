@@ -5,7 +5,7 @@ disposition: deferred
 category: liveness
 pr: 330
 reviewed_sha: a0464f432f3d93134360f5d5a88e60b653cd6fb4
-location: reviews/2026-10-02-pr11-follow-up-c-record.md:2036
+location: 48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md:2036
 provenance: introduced_by_feature
 first_bad: a0464f432f3d93134360f5d5a88e60b653cd6fb4 (design round 3's release protocol for Q's sentinel)
 guard: only if the owner's decision O5 (#330's D2) selects Q, the quiescence path, instead of U: the round that builds Q closes it or carries it as the stated residual of the record's section 4.9, with its crash-table row corrected and an oracle for the fallback; while U is selected, as implemented on #330, nothing builds the sentinel and this does not arise
@@ -16,7 +16,7 @@ guard: only if the owner's decision O5 (#330's D2) selects Q, the quiescence pat
 Reasoned by all three lenses of #330's design review round 3 at `a0464f43`
 (`~/orch-pr11/reviews/review-330-d3-{design,concurrency,regression}-a0464f43.review.md`; the triage
 `~/orch-pr11/reviews/review-330-d3-triage.md`, FUC-D3-SENTINELFALLBACK). It is a finding against Q's sentinel, the
-member that keeps a writer group non-empty (`reviews/2026-10-02-pr11-follow-up-c-record.md`, §2.4 and §3.5), which #330
+member that keeps a writer group non-empty (`48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`, §2.4 and §3.5), which #330
 does not build.
 
 1. Release sends the sentinel `SIGTERM` and then `SIGCONT`; its handler would call `setsid()` and `_exit(0)`.

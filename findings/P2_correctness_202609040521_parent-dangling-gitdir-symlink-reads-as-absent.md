@@ -19,5 +19,5 @@ a registration's `gitdir` replaced by a dangling symlink is `NotFound` when foll
 
 deferred to the sweep of `src/workspace_manager.rs`, queue row 11, with the reproduction: replace a linked worktree registration's `gitdir` with a dangling symlink, list, classify. A reader that distinguishes "the name is not there" from "the name is there and unreadable" needs `symlink_metadata` before the read and a decision for each kind, which is the repository-reading helpers' work, not a classifier's
 
-Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `reviews/FINDINGS.md` in the words it
+Recorded by the PR #128 `src/workspace_manager/residue.rs` sweep; the row is carried out of `48f2af7a:reviews/FINDINGS.md` in the words it
 was written in.

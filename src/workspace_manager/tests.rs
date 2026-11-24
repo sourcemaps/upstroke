@@ -1653,7 +1653,7 @@ fn a_marker_read_records_the_one_attempt_the_unix_arm_makes() {
 ///
 /// Two removals, one attempt each, not "at least one": since #329 the forced
 /// removal deletes the registration it bound directly instead of pruning
-/// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §2.5), so
+/// (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`, §2.5), so
 /// `remove_tree_once_handles_close` is called once for the checkout and once for
 /// the Git admin directory, and each call's one attempt is numbered 1. The seam
 /// reports the most attempts one removal made, so a count above one, or an
@@ -7475,7 +7475,7 @@ fn tree_bytes_detects_a_directory_replaced_by_a_link_to_equal_contents() {
 /// is a write in flight and is attempted past until the access's deadline;
 /// the refusal then arrives as `UpstrokeError::RegistryRefused`, resumable and
 /// never Git state, carrying that diagnostic as its last failure
-/// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §3.6). The shipped CLI's
+/// (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`, §3.6). The shipped CLI's
 /// `upstroke resume` uses the separate `Workspace::reclaim_gate_workspaces`
 /// path, which never decodes a registration's `gitdir`; this test does not
 /// reproduce a refusal in that path. `DESIGN.md` §15's reclaim sentence is
@@ -15995,7 +15995,7 @@ fn the_one_update_ref_spawn_gives_its_child_the_cleanup_lease() {
 
 // ---------------------------------------------------------------------------
 // #329: the tolerant registry access
-// (`reviews/2026-10-01-pr11-follow-up-b-record.md`, §5 to §8 and its
+// (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md`, §5 to §8 and its
 // implementation section). The T-numbers are the record's.
 // ---------------------------------------------------------------------------
 
@@ -18686,7 +18686,7 @@ fn a_linked_childs_kill_fails_its_test_within_its_bound_rather_than_wait_for_a_c
 // PR11 follow-up C: a slot instance per coordinator incarnation (U)
 // -----------------------------------------------------------------------
 //
-// The record is `reviews/2026-10-02-pr11-follow-up-c-record.md`: §4.2's tag,
+// The record is `48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`: §4.2's tag,
 // §4.3's discovery, §4.5's refusing variant, §4.6's replacements for the two
 // frozen oracles that U makes vacuous, §4.7's untagged names, §5.2 and §5.3's
 // switches and §5.4's final sweep. Its "Implementation" section names each

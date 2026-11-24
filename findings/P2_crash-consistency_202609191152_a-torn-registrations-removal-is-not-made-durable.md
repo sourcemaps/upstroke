@@ -67,7 +67,7 @@ directory's state, as the checkout barrier's witnesses do.
 
 ## At #329's implementation (2026-10-03)
 
-**Its reach widened.** #329's targeted removal (`reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5) deletes every registration a forced removal binds through
+**Its reach widened.** #329's targeted removal (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §2.5) deletes every registration a forced removal binds through
 the same `remove_tree_once_handles_close(admin)`, not only a registration with an empty `commondir`, and runs no
 `git worktree prune`. So the unsynced deletion above is now every bound registration's. One consequence is new: a
 healthy registration that a power loss brings back is no longer removed by a later engine removal's prune. Git lists it

@@ -51,7 +51,7 @@ than adjective:
 - keep per-run output so each occurrence's outcome and diagnostic survive together.
 
 Carried flakes live in the finding ledger (`findings/`, one file per finding; older
-ones in `reviews/FINDINGS.md`) with their rate, owner and consequence.
+ones in `48f2af7a:reviews/FINDINGS.md`) with their rate, owner and consequence.
 
 **Instruments and censuses.** Source-based enforcement is code and is tested like code. A census of
 Rust structure blanks comments and string, character, byte-string and raw-string literals before

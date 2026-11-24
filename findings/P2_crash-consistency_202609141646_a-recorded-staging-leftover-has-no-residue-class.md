@@ -29,7 +29,7 @@ by the record (`write_report`'s rustdoc, `src/rundir.rs:1196-1213`), and it has 
   `Report.Write` carry `"rows": []` with the detail "nothing has been performed, so no row holds
   anything"; both after-phase entries carry `["r21"]` for the published report. The four entries
   name `kill_after_report_before_each_cleanup_step` as their executed evidence.
-- The record (`reviews/2026-09-12-pr10-record.md:2241-2247`) says so and calls it acceptable: "The
+- The record (`48f2af7a:reviews/2026-09-12-pr10-record.md:2241-2247`) says so and calls it acceptable: "The
   residue of a death *inside* the report site's primitive, between its two hook phases — the record
   in the private half and the directory it names in the public one, with the staged file inside —
   is the run's own residue by the record, and no registry row covers it: the sequential registry

@@ -57,7 +57,7 @@ executed an orphaned `update-ref` rewriting such a replacement's `HEAD`.
   rewritten (`~/orch-pr11/reviews/review-329-d2-{design,concurrency}-0874bcf3.review.md`).
 - **Design round 3**, executed with one coordinator through the production `WorkspaceManager`
   funnels and the coordinator's real locks, on an out-of-tree probe built from `0874bcf3`
-  (`reviews/2026-10-01-pr11-follow-up-b-record.md` §2.2; the files are under
+  (`48f2af7a:reviews/2026-10-01-pr11-follow-up-b-record.md` §2.2; the files are under
   `~/orch-pr11/logs/pr11_fub_design3/witness/c-single/`):
   - `witness-exec.log`: the late `reset` reverts the edits;
   - `witness-filter.log` and `witness-filter-strace.log`: the orphaned add's `remove_junk` deletes
@@ -157,7 +157,7 @@ open.
 
 ## What #330's implementation closes, and why this finding stays open (2026-10-03)
 
-**Closed: the slot-reuse routes.** PR11 follow-up C's implementation (#330, `reviews/2026-10-02-pr11-follow-up-c-record.md`,
+**Closed: the slot-reuse routes.** PR11 follow-up C's implementation (#330, `48f2af7a:reviews/2026-10-02-pr11-follow-up-c-record.md`,
 its "Implementation" section) builds U: a slot instance per coordinator incarnation, named by a tag of the incarnation's
 id, whose production form carries a draw from the host; every walk reaching every incarnation's instance; no retention;
 a final sweep at terminal finalization; and the switch set (maintenance, rerere, relative paths, lazy fetch, transports,
