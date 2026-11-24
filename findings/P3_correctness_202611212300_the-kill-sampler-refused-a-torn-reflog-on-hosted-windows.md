@@ -39,7 +39,7 @@ started by `SampledChild::spawn`, which runs `git` by name (`src/workspace_manag
 line 14435). On Windows the kill is `child.kill()` on that child alone, and `await_group_end`
 returns at once (`src/workspace_manager/fixture.rs`, near lines 3603-3606 and 3643-3646).
 
-## The one sighting
+## The first sighting
 
 | run | job | platform | date | pull request | checkout |
 |---|---|---|---|---|---|
@@ -80,6 +80,54 @@ head in CI run 44817216910 (`83bb3c8b`, 2026-11-20). It also passed on #392's ne
 44841822496 (`1c457a42`, an empty commit on `83bb3c8b`, 2026-11-21), and the merge-queue run after
 that merged #392.
 
+## Three more sightings, 2026-11-23 and 2026-11-24
+
+| run | job | platform | date | pull request | checkout |
+|---|---|---|---|---|---|
+| `45232814168` (`merge_group`) | `137896587187`, `test (windows-latest, 8 of 10)` | a GitHub-hosted `windows-latest` runner | 2026-11-23, 17:55:18Z | #410 | `1a2074d1`, GitHub's merge-queue commit of #410 onto `master` at `372269d2` |
+| `45282352517` (`pull_request`) | `138069798393`, `test (windows-latest, 8 of 10)` | a GitHub-hosted `windows-latest` runner | 2026-11-23, 22:43:23Z | #412 at `680ba5f7` | `5d2d35d9`, GitHub's merge of `680ba5f7` into `master` at `4c9c566b` |
+| `45355876016` (`pull_request`) | `138313434575`, `test (windows-latest, 13 of 14)` | a GitHub-hosted `windows-latest` runner | 2026-11-24, 08:24:46Z | #411 at `aaa9bdcd` | `d5b963d`, GitHub's merge of `aaa9bdcd` into `master` at `48f2af7a` |
+
+All three failed the same test at the same site, `Object.ProposalCherryPick`, on the same
+assertion, the sampler's refusals assertion at `src\workspace_manager\tests.rs:13226:9`. In each
+job this test was the only failure.
+
+- **Run `45232814168`** (`evidence/job-45232814168-137896587187.log`, SHA-256
+  `5c54a589de4975994ff4477fe05e8b69d34f1d7471ad585290202d222f662f0a`). Line 712 marks the test
+  `FAILED <188.866s>`. Line 744 is the panic at `src\workspace_manager\tests.rs:13226:9`. Line 745:
+  the classifier refused 1 of 8 samples, run 3, fsck exit code 2, with
+
+      error: worktrees/s3_WG9T4H5MXCSP/HEAD: invalid reflog entry 84c4d3c50cee3073185e5b86b79f94b2b00e430b
+
+  The site's summary line is `Object.ProposalCherryPick: n=8 none=0 internal=2 after=5
+  unclassified=1`. Line 751: `test result: FAILED. 319 passed; 1 failed; 19 ignored`. The same
+  tree passed: merge-queue run `45239059571` checked out `4c9c566b`, whose tree is `1a2074d1`'s
+  (`6e9e8c7e`), and passed; it merged #410.
+
+- **Run `45282352517`** (`evidence/job-45282352517-138069798393.log`, SHA-256
+  `ee4334bdfbf23a9b60fe09dbbfff3ce345e4ed96a7353e68a7cb0f10d37c0d35`). Line 744 marks the test
+  `FAILED <200.921s>`. Line 756 is the panic. Line 757: the classifier refused 4 of 8 samples, runs
+  1, 4, 5 and 7, each fsck exit code 2 with `error: worktrees/s<run>_WG9T4H5MXCSP/HEAD: invalid
+  reflog entry <oid>` (oids `5fa4dc79…`, `f53abf9e…`, `0c394ebe…`, `07b2d272…`). The site's
+  summary line is `Object.ProposalCherryPick: n=8 none=0 internal=2 after=2 unclassified=4`. Line
+  763: `319 passed; 1 failed; 19 ignored`. The same tree passed: run `45291107344` on `b8522a9f`
+  (an empty commit on `680ba5f7`) checked out `40b1922e`, whose tree is `5d2d35d9`'s (`98554cae`),
+  and this test passed.
+
+- **Run `45355876016`** (`evidence/job-45355876016-138313434575.log`, SHA-256
+  `96e490353a810c8ab824d9f2c669acf2a5eedbd8962847d8b0549f5be094653e`). Line 467 marks the test
+  `FAILED <146.459s>`. Line 479 is the panic. Line 480: the classifier refused 2 of 8 samples, runs
+  1 and 5, with the same fsck error (oids `16577c61…`, `c568c797…`). The site's summary line is
+  `Object.ProposalCherryPick: n=8 none=0 internal=2 after=4 unclassified=2`. Line 487: `90 passed;
+  1 failed; 3 ignored`. The same tree passed: run `45364092561` on `6fa13e35` (an empty commit on
+  `aaa9bdcd`) checked out `6f599e6`, whose tree is `d5b963d`'s (`1573c0c7`), and passed.
+
+- In each log the earlier sites' summary lines (`CandidateStage`, `CandidateWriteTree`) are
+  present and there is no `Worktree.Add` line. Each log's checkout step reports `git version
+  2.56.1.windows.1`.
+
+- None of #410, #411 or #412 changes `src/workspace_manager/`.
+
 ## What is and is not established
 
 **Established.** In one sample of `Object.ProposalCherryPick`, after the kill was fired, the
@@ -87,6 +135,8 @@ classifier's fsck exited 2 on an `invalid reflog entry` in the reflog of a stagi
 `HEAD`. The classifier refused, and the test failed on its refusals assertion. The registration's
 name, `s1_WG9T4H5MXCSP`, has the shape of this site's staging slot. The failing test and the code
 it drives were not changed by #392, and the same test passed on #392's heads before and after.
+The three later sightings refused the same way, at the same site, in staging registrations of the
+same shape, one to four samples of eight.
 
 **Not established: what the kill reached.** `SampledChild::spawn` runs `git` by name. On a Windows
 machine where that name resolves to Git for Windows' launcher (`cmd\git.exe`), the kill ends the
@@ -125,17 +175,35 @@ commit, then read the reflog after Git had appended the entry naming it.
 - the same fsck run again once every Git process of the sample has ended. If the error is gone, the
   first reading is ruled out.
 
-**Not established: the rate.** One sighting. The other runs of this test on 2026-11-20 were not
-counted.
+**Not established: the rate.** Four sightings, on 2026-11-20, 2026-11-23 (two) and 2026-11-24,
+each followed by a pass of the same tree. The runs of this test in that period were not counted.
+
+**The test's rate across this row and PR249-KILL-SAMPLER-WINDOWS-WRAPPER, counted 2026-11-24.** The
+population is every run of the `CI` workflow created from 2026-11-22 00:00Z to 2026-11-24 10:50Z
+that ended with a conclusion of success or failure: 111 runs, all ended by 11:12:59Z (six runs in
+that span were cancelled when a later event superseded them, and are not counted). A run counts as
+failed on the test when one of its jobs reports
+`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered ...
+FAILED`. Six of the 111 did: runs 44970652323, 45019915010 and 45376131057 under PR249's
+fingerprints, and 45232814168, 45282352517 and 45355876016 under this row's. Of the 47 runs in the
+population created from 2026-11-23 12:00Z, four did. In each of the six the test was its job's only
+failure. Five of the six were followed by a run made because of the red: 44978559642 (an empty
+commit on #400), 45239059571 (#410 entering the merge queue again after the red ejected it),
+45291107344 (#412), 45364092561 (#411) and 45384932886 (#413). The push run on `master`,
+45019915010, was not run again.
 
 ## Related, not the same
 
 - **`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`**
   (`findings/P2_correctness_202609090020_pr5s-census-sampler-kills-gits-launcher-on-windows.md`)
   is the launcher cause: `SampledChild::spawn` runs `git` by name, so on Windows the kill can end
-  the launcher and not Git. Its fingerprints are recovery failures at `Worktree.Add` on the
-  self-hosted guest (`test (winguest)`): a forced removal denied access to a registration's
-  `locked`, and `record.recovered` failing. This one is a classifier refusal at
+  the launcher and not Git. Its first fingerprint is that launcher measurement itself (the PR9
+  repair-materialization sampler on the self-hosted guest at `56ea88c9`: 30 kills in 32 spawns, none
+  landing mid-write). Its second and third, on the self-hosted guest (`test (winguest)`), are
+  recovery failures at `Worktree.Add`: a forced removal denied access to a registration's `locked`,
+  and `record.recovered` failing. The hosted-runner fingerprints that row
+  gained on 2026-11-24 include a forced removal during `ProposalCherryPick`'s sampling, refused
+  with os error 32, which is still a recovery failure. This one is a classifier refusal at
   `ProposalCherryPick`, on a GitHub-hosted runner, raised before any recovery was asserted. It
   belongs to that finding only if the kill is shown to have reached only the launcher. Routing the
   spawn through `fixture::sampled_git`, the change that finding prescribes, is not shown to cure
