@@ -67,8 +67,16 @@ refuses any profile while `CLAUDE_CODE_OAUTH_TOKEN` is set, because that token o
 profile's credentials. A fresh run makes these checks in `prepare_fresh`, before its lease, so a
 refused run leaves no run directory and no private half. A resume makes them first in its
 pre-flight, under its locks. The refusals are the same, word for word, on both. Pre-flight then runs the agent CLI's capability
-probe under the profile. It does not check sign-in, so a profile that is not signed in passes
-pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). The legacy
+probe under the profile and, for Claude Code alone, its sign-in check (`claude --setting-sources ""
+auth status --json`), on a fresh run and on a resume, once under each account Claude Code's pools
+use, in file order: each profile they name, and the default account when any of them names none or
+Claude Code has no pool. It stops at the first account that is signed out or whose check fails to
+answer, and that account refuses the run before it starts or resumes; a CLI that cannot say passes.
+The check asks with no user, project or local settings loaded, as a worker loads none, so a
+credential that only a settings file supplies (an `apiKeyHelper`, say) does not count. An agent
+whose pools use more than sixteen distinct accounts is refused before its sign-in is checked.
+Other agents' sign-in is not checked at pre-flight, so a signed-out Codex fails at its first
+attempt (`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`). The legacy
 (schema 1–3) coordinator refuses any pool that names a profile.
 
 **When it is rewritten.** Two comparisons against the file already there, because two questions

@@ -17,15 +17,16 @@ use super::ci_model::{
     CAPABILITY_STEP_TIMEOUT_MINUTES, CAPABILITY_WINDOWS_OBSERVATION, CI_TARGETS, CI_WORKFLOW,
     CLIPPY_GATE, CiTarget, DEFAULTS_FIELDS, DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY,
     GATE_JOB_FIELDS, GATE_SCRIPTS, GOLDEN_IMAGE_TOOLCHAIN, HOST_ACCEPTANCE_CAPTURE,
-    HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS,
+    HOST_ACCEPTANCE_WINDOWS_CAPTURE, KNOWN_SHELLS, MSRV_COMMAND, MSRV_ENTRY_KEYS, MSRV_JOB,
+    MSRV_JOB_FIELDS, MSRV_MATRIX_FIELDS, MSRV_RUNS_ON, MSRV_TOOLCHAIN_TARGETS,
     OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS, REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE,
     STABLE_TOOLCHAIN, STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_JOB_NAME, TEST_LEGS,
     TEST_SCRIPTS, TEST_SHARD_COMMAND, TEST_STEP_ENV, TEST_STEP_FIELDS, TEST_TIMEOUT_MINUTES,
     TEST_WINDOWS_HOSTED_JOB, TEST_WINDOWS_HOSTED_JOB_FIELDS, TEST_WINDOWS_HOSTED_NAME,
     TEST_WINDOWS_HOSTED_SCRIPTS, TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES, TEST_WINDOWS_PLATFORM,
-    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
-    WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WORKFLOW_ENV,
-    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, TOOLCHAIN_TARGETS,
+    WINDOWS_BUILD_WITNESS, WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS,
+    WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -193,6 +194,16 @@ fn stem_collisions(jobs: &BTreeSet<String>) -> BTreeMap<String, Vec<String>> {
     by_stem
 }
 
+fn runner_target(runner: &str) -> Option<&'static CiTarget> {
+    CI_TARGETS.iter().find(|target| target.runner == runner)
+}
+
+pub(super) fn cross_target(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    words.by_ref().find(|word| *word == "--target")?;
+    words.next()
+}
+
 fn ci_gate_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = Vec::new();
     for complaint in field_complaints(doc, &WORKFLOW_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
@@ -210,6 +221,7 @@ fn ci_gate_complaints(doc: &Yaml) -> Vec<String> {
         return out;
     }
 
+    let mut gate_jobs: BTreeMap<&str, &str> = BTreeMap::new();
     for target in &CI_TARGETS {
         let gates: Vec<&String> = job_names
             .iter()
@@ -217,26 +229,57 @@ fn ci_gate_complaints(doc: &Yaml) -> Vec<String> {
                 let Some(job) = field(jobs, name) else {
                     return false;
                 };
-                scalar(job, "runs-on") == Some(target.runner)
+                scalar(job, "runs-on") == Some(target.check_runner)
                     && steps_of(job)
                         .iter()
-                        .any(|step| scalar(step, "run") == Some(CLIPPY_GATE))
+                        .any(|step| scalar(step, "run") == Some(target.clippy_gate))
             })
             .collect();
         if gates.len() != 1 {
             out.push(format!(
                 "[no-gate-job] expected exactly one job whose `runs-on:` is `{}` and one of \
-                 whose steps has `run:` equal to `{CLIPPY_GATE}`, found {gates:?}. Without it \
-                 every body the `{}` tuple compiles is outside the denylist's reach on every \
-                 job CI runs.",
-                target.runner, target.triple
+                 whose steps has `run:` equal to `{}`, found {gates:?}. Without it every body \
+                 the `{}` tuple compiles is outside the denylist's reach on every job CI runs.",
+                target.check_runner, target.clippy_gate, target.triple
             ));
             continue;
         }
         let gate = gates[0];
+        if let Some(shared) = gate_jobs.insert(gate.as_str(), target.triple) {
+            out.push(format!(
+                "[no-gate-job] `{gate}` is the Clippy gate of both `{shared}` and `{}`. Each \
+                 target's gate is a job of its own, so that one target's failure, timeout or \
+                 cancellation cannot stand for another's.",
+                target.triple
+            ));
+        }
         let Some(job) = field(jobs, gate) else {
             continue;
         };
+        let Some(host) = runner_target(target.check_runner) else {
+            out.push(format!(
+                "[step-shell] `{gate}` runs on `{}`, which is not a runner this contract \
+                 models, so the shell its steps resolve to is undecidable here",
+                target.check_runner
+            ));
+            continue;
+        };
+        if let Some(triple) = cross_target(target.clippy_gate) {
+            let pinned: Vec<Option<&str>> = steps_of(job)
+                .iter()
+                .filter(|step| installs_a_toolchain(step))
+                .map(|step| field(step, "with").and_then(|with| scalar(with, "targets")))
+                .collect();
+            if pinned != [Some(triple)] {
+                out.push(format!(
+                    "[gate-toolchain-target] `{gate}` runs `{}` and its toolchain steps install \
+                     the targets {pinned:?}, not exactly `{triple}`. The pin keeps the tuple \
+                     the gate names in one place with the command that names it; without it \
+                     the job fails for want of that tuple's standard library.",
+                    target.clippy_gate
+                ));
+            }
+        }
 
         for complaint in field_complaints(job, &GATE_JOB_FIELDS, &OPTIONAL_DEFAULTS_FIELD) {
             out.push(format!(
@@ -260,9 +303,9 @@ fn ci_gate_complaints(doc: &Yaml) -> Vec<String> {
                     doc,
                     job,
                     step,
-                    target,
+                    host,
                     &format!("`{gate}` step {index}"),
-                    target.default_shell,
+                    host.default_shell,
                 ));
             }
         }
@@ -1271,6 +1314,16 @@ fn step_pin_complaints(job: &Yaml, named: &str, code: &str, scripts: &[&str]) ->
                     ));
                 }
             }
+            if let Some(targets) = scalar(inputs, "targets") {
+                if !TOOLCHAIN_TARGETS.contains(&targets) {
+                    out.push(format!(
+                        "[unpinned-action-input] `{named}` step {index} asks for targets \
+                         {targets:?}, which is not one of {TOOLCHAIN_TARGETS:?}. This action \
+                         interpolates the value into a shell command, as it does components, \
+                         so an unpinned one runs whatever it contains."
+                    ));
+                }
+            }
         }
     }
     out
@@ -1469,6 +1522,16 @@ pub(super) fn three_component(version: &str) -> String {
     }
 }
 
+fn msrv_entry(entry: &Yaml) -> Option<(String, String)> {
+    if !field_complaints(entry, &MSRV_ENTRY_KEYS, &[]).is_empty() {
+        return None;
+    }
+    Some((
+        scalar(entry, "os")?.to_owned(),
+        scalar(entry, "target")?.to_owned(),
+    ))
+}
+
 pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
     let mut out = Vec::new();
     let Some(jobs) = field(doc, "jobs") else {
@@ -1497,14 +1560,26 @@ pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
             ));
         }
         if scalar(step, "run").is_some() {
-            for target in &CI_TARGETS {
+            let check_runners: BTreeSet<&str> = CI_TARGETS
+                .iter()
+                .map(|target| target.check_runner)
+                .collect();
+            for runner in check_runners {
+                let Some(host) = runner_target(runner) else {
+                    out.push(format!(
+                        "[step-shell] `{MSRV_JOB}` step {index} runs on `{runner}`, which is not \
+                         a runner this contract models, so the shell it resolves to is \
+                         undecidable here"
+                    ));
+                    continue;
+                };
                 out.extend(shell_complaints(
                     doc,
                     job,
                     step,
-                    target,
-                    &format!("`{MSRV_JOB}` step {index} on `{}`", target.runner),
-                    target.default_shell,
+                    host,
+                    &format!("`{MSRV_JOB}` step {index} on `{runner}`"),
+                    host.default_shell,
                 ));
             }
         }
@@ -1518,7 +1593,9 @@ pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
         out.push(format!(
             "[msrv-job-command] the `{MSRV_JOB}` job has {running} steps whose `run:` is \
              exactly `{MSRV_COMMAND}`, not one. Dropping `--locked` lets Cargo resolve past \
-             the exact pins this manifest carries for the floor, and an `echo` satisfies \
+             the exact pins this manifest carries for the floor; dropping `--target` checks \
+             the runner's own tuple, so the entry for a target checked from another runner's \
+             host compiles that host's regions and none of its own; and an `echo` satisfies \
              every substring reading of the same line."
         ));
     }
@@ -1531,49 +1608,62 @@ pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
     out.extend(checkout_complaints(job, MSRV_JOB, "msrv-checkout"));
     out.extend(toolchain_complaints(job, MSRV_JOB, "msrv-toolchain", None));
 
-    let expected_runners: BTreeSet<String> = CI_TARGETS
+    let expected_entries: BTreeSet<(String, String)> = CI_TARGETS
         .iter()
-        .map(|target| target.runner.to_owned())
+        .map(|target| (target.check_runner.to_owned(), target.triple.to_owned()))
         .collect();
     match field(job, "strategy") {
         None => out.push(format!(
             "[msrv-job-matrix] the `{MSRV_JOB}` job declares no `strategy:`, so it checks the \
-             floor on one platform"
+             floor for one target"
         )),
         Some(strategy) => {
             for complaint in field_complaints(strategy, &["fail-fast", "matrix"], &[]) {
                 out.push(format!(
-                    "[msrv-job-matrix] the `{MSRV_JOB}` job's `strategy:` {complaint}. \
-                     `exclude:` removes a runner `os:` still lists and `include:` adds one it \
-                     does not."
+                    "[msrv-job-matrix] the `{MSRV_JOB}` job's `strategy:` {complaint}. The \
+                     entries are read from `fail-fast` and `matrix` and from nothing else there."
                 ));
             }
             if field(strategy, "fail-fast").and_then(Yaml::as_bool) != Some(false) {
                 out.push(format!(
                     "[msrv-job-matrix] the `{MSRV_JOB}` job's `fail-fast:` is not `false`, so \
-                     one platform's floor failure cancels the other two before they report"
+                     one target's floor failure cancels the other two before they report"
                 ));
             }
             if let Some(matrix) = field(strategy, "matrix") {
-                for complaint in field_complaints(matrix, &["os"], &[]) {
+                for complaint in field_complaints(matrix, &MSRV_MATRIX_FIELDS, &[]) {
                     out.push(format!(
-                        "[msrv-job-matrix] the `{MSRV_JOB}` job's `matrix:` {complaint}"
+                        "[msrv-job-matrix] the `{MSRV_JOB}` job's `matrix:` {complaint}. An axis \
+                         or `exclude:` next to `include:` changes which combinations run: beside \
+                         an axis GitHub folds an `include:` entry into the axis's combinations \
+                         where it can, and `exclude:` removes combinations, so the entries that \
+                         run are no longer the ones the list names."
                     ));
                 }
             }
         }
     }
-    let listed = field(job, "strategy")
+    let listed: Option<Vec<Option<(String, String)>>> = field(job, "strategy")
         .and_then(|strategy| field(strategy, "matrix"))
-        .and_then(|matrix| field(matrix, "os"))
-        .and_then(scalar_set);
-    if listed.as_ref() != Some(&expected_runners) {
+        .and_then(|matrix| field(matrix, "include"))
+        .and_then(Yaml::as_vec)
+        .map(|entries| entries.iter().map(msrv_entry).collect());
+    let found: BTreeSet<(String, String)> = listed.iter().flatten().flatten().cloned().collect();
+    let exact = listed
+        .as_ref()
+        .is_some_and(|entries| entries.len() == found.len() && entries.iter().all(Option::is_some));
+    if !exact || found != expected_entries {
         out.push(format!(
-            "[msrv-job-matrix] the `{MSRV_JOB}` job's matrix runs on {listed:?}, not exactly \
-             {expected_runners:?}"
+            "[msrv-job-matrix] the `{MSRV_JOB}` job's `matrix.include:` reads as {listed:?}, \
+             the `(os, target)` pairs {found:?}, not exactly {expected_entries:?}, each once: \
+             one entry for each target in `CI_TARGETS`, with exactly the keys {MSRV_ENTRY_KEYS:?}, \
+             the runner that checks the target and its triple. An entry that reads as `None` \
+             is not such a mapping. A dropped or retargeted entry leaves a target's floor \
+             unchecked while the other entries are green, and an entry twice checks one target \
+             twice in its place."
         ));
     }
-    if scalar(job, "runs-on") != Some("${{ matrix.os }}") {
+    if scalar(job, "runs-on") != Some(MSRV_RUNS_ON) {
         out.push(format!(
             "[msrv-job-matrix] the `{MSRV_JOB}` job's `runs-on:` is {:?}, so the matrix above \
              decides nothing",
@@ -1604,6 +1694,15 @@ pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {
              is `{}`. A leg named for the floor that installs something else is green about a \
              version it never compiled.",
             declared_rust_version()
+        ));
+    }
+    let targets = field(toolchains[0], "with").and_then(|with| scalar(with, "targets"));
+    if targets != Some(MSRV_TOOLCHAIN_TARGETS) {
+        out.push(format!(
+            "[msrv-job-toolchain] the `{MSRV_JOB}` job's toolchain step installs the targets \
+             {targets:?}, not exactly `{MSRV_TOOLCHAIN_TARGETS}`: the entry's own triple, \
+             which its check names with `--target`. An entry whose target is not the runner's \
+             own has no standard library for it without this input."
         ));
     }
 
@@ -1822,8 +1921,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  while Clippy never examines a denied call in that platform's code. The \
                  standing row's first escape, verbatim.",
         job: Some("lint-macos"),
-        anchor: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n",
-        replacement: "      - run: echo cargo clippy --all-targets --all-features -- -D warnings\n",
+        anchor: "      - run: cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n",
+        replacement: "      - run: echo cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n",
         refused_as: "no-gate-job",
     },
     WorkflowEscape {
@@ -1840,8 +1939,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  whitespace-normalised block for the literal `if: false` and could not refuse \
                  this form; the field-set equality does not have to know the form.",
         job: Some("lint-macos"),
-        anchor: "    runs-on: macos-latest\n",
-        replacement: "    runs-on: macos-latest\n    if: ${{ false }}\n",
+        anchor: "    runs-on: ubuntu-latest\n",
+        replacement: "    runs-on: ubuntu-latest\n    if: ${{ false }}\n",
         refused_as: "unexpected-job-field",
     },
     WorkflowEscape {
@@ -1863,10 +1962,15 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-GATE-STEP-RETARGETED",
-        escape: "a step-level environment retargets the compile. The `run:` scalar still \
-                 matches character for character, the job is green, and Clippy examined a \
-                 target whose `#[cfg]` bodies are not this platform's.",
-        job: Some("lint-macos"),
+        escape: "a step-level environment retargets the Windows gate's compile: \
+                 `CARGO_BUILD_TARGET` names the Linux tuple, and the `run:` scalar still \
+                 matches character for character. Where that tuple's standard library is \
+                 installed the job is green and Clippy examined a target whose `#[cfg]` bodies \
+                 are not Windows'; where it is not, the job fails for want of it. The field is \
+                 refused before either. The row stands on `lint (windows)` because \
+                 `lint (macos)` names its tuple with `--target`, which Cargo takes over the \
+                 variable.",
+        job: Some("lint-windows"),
         anchor: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n",
         replacement: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n\
                       \x20       env:\n\
@@ -1879,8 +1983,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  runs `true /path/to/script`: the step succeeds, Clippy never runs, and the \
                  `run:` scalar still matches this contract character for character.",
         job: Some("lint-macos"),
-        anchor: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n",
-        replacement: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n\
+        anchor: "      - run: cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n",
+        replacement: "      - run: cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n\
                       \x20       shell: 'true'\n",
         refused_as: "step-shell",
     },
@@ -1934,13 +2038,39 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-GATE-RUNNER-DRIFT",
-        escape: "the macOS leg moved to Ubuntu: two jobs run the gate on one platform and no \
-                 job compiles `#[cfg(target_os = \"macos\")]` under Clippy. \
-                 `PR5-MACOS-CLIPPY-NEVER-RUN` is the ledger row for the state this restores.",
+        escape: "the macOS gate's job moved off its check runner, to Windows. The command \
+                 still names its tuple, but every shell and environment reading of the job \
+                 was made for `ubuntu-latest` -- on Windows its step resolves to `pwsh`, where \
+                 the process environment is case-insensitive -- so the contract pins the \
+                 runner with the command, and no job on `ubuntu-latest` runs the macOS cross \
+                 gate. `PR5-MACOS-CLIPPY-NEVER-RUN` is the ledger row for the state the gate \
+                 restores.",
         job: Some("lint-macos"),
-        anchor: "    runs-on: macos-latest\n",
-        replacement: "    runs-on: ubuntu-latest\n",
+        anchor: "    runs-on: ubuntu-latest\n",
+        replacement: "    runs-on: windows-latest\n",
         refused_as: "no-gate-job",
+    },
+    WorkflowEscape {
+        name: "MUT-GATE-CROSS-TARGET-DROPPED",
+        escape: "the macOS gate's run line loses `--target aarch64-apple-darwin`. Two jobs then \
+                 run Clippy over the Linux tuple and none compiles the macOS regions -- \
+                 `PR5-MACOS-CLIPPY-NEVER-RUN` one flag away, with the job, its runner and its \
+                 green result all unchanged.",
+        job: Some("lint-macos"),
+        anchor: "      - run: cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n",
+        replacement: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n",
+        refused_as: "no-gate-job",
+    },
+    WorkflowEscape {
+        name: "MUT-GATE-TOOLCHAIN-TARGET-DROPPED",
+        escape: "the macOS gate's toolchain step no longer installs `aarch64-apple-darwin`. \
+                 The job then fails for want of that tuple's standard library, which is loud; \
+                 the pin keeps the tuple the toolchain installs in one place with the command \
+                 that names it.",
+        job: Some("lint-macos"),
+        anchor: "          targets: aarch64-apple-darwin\n",
+        replacement: "",
+        refused_as: "gate-toolchain-target",
     },
     WorkflowEscape {
         name: "MUT-AGGREGATE-NEEDS-DROPPED",
@@ -2138,9 +2268,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the MSRV leg checks out `master` ahead of its pinned command; the floor is \
                  verified on a tree the candidate never touched",
         job: Some("msrv"),
-        anchor: "      - run: cargo check --locked --all-targets --all-features\n",
+        anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
         replacement: "      - run: git fetch origin master && git checkout --detach FETCH_HEAD\n\
-                      \x20     - run: cargo check --locked --all-targets --all-features\n",
+                      \x20     - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
         refused_as: "msrv-run-script",
     },
     WorkflowEscape {
@@ -2407,8 +2537,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  compiles a dependency set no release ships and reports green over a floor it \
                  never tested.",
         job: Some("msrv"),
-        anchor: "      - run: cargo check --locked --all-targets --all-features\n",
-        replacement: "      - run: cargo check --all-targets --all-features\n",
+        anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
+        replacement: "      - run: cargo check --target ${{ matrix.target }} --all-targets --all-features\n",
         refused_as: "msrv-job-command",
     },
     WorkflowEscape {
@@ -2417,31 +2547,73 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  over. `test-docs-consistency.sh` withdrew every claim about which commands CI \
                  runs precisely because a text checker cannot tell these apart.",
         job: Some("msrv"),
-        anchor: "      - run: cargo check --locked --all-targets --all-features\n",
-        replacement: "      - run: echo cargo check --locked --all-targets --all-features\n",
+        anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
+        replacement: "      - run: echo cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
+        refused_as: "msrv-job-command",
+    },
+    WorkflowEscape {
+        name: "MUT-MSRV-COMMAND-UNTARGETED",
+        escape: "the check loses `--target ${{ matrix.target }}`. Each entry then checks its \
+                 runner's own tuple: the macOS entry, on `ubuntu-latest`, compiles the Linux \
+                 regions a second time and none of the macOS ones, and every entry is still \
+                 green.",
+        job: Some("msrv"),
+        anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
+        replacement: "      - run: cargo check --locked --all-targets --all-features\n",
         refused_as: "msrv-job-command",
     },
     WorkflowEscape {
         name: "MUT-MSRV-MATRIX-NARROWED",
-        escape: "the floor is checked on Linux only. A dependency that raises its MSRV behind \
-                 a `cfg` -- this manifest has a `cfg(windows)` and a `cfg(unix)` dependency \
-                 table -- breaks on a platform this leg no longer visits.",
+        escape: "the macOS entry is gone, so the floor is checked for Linux and Windows only. \
+                 A dependency that raises its MSRV behind a `cfg` -- this manifest has a \
+                 `cfg(windows)` and a `cfg(unix)` dependency table -- or a call newer than the \
+                 floor inside a `#[cfg(target_os = \"macos\")]` region breaks on a target this \
+                 leg no longer compiles.",
         job: Some("msrv"),
-        anchor: "        os: [ubuntu-latest, windows-latest, macos-latest]\n",
-        replacement: "        os: [ubuntu-latest]\n",
+        anchor: "          - os: ubuntu-latest\n\
+                 \x20           target: aarch64-apple-darwin\n",
+        replacement: "",
         refused_as: "msrv-job-matrix",
     },
     WorkflowEscape {
         name: "MUT-MSRV-MATRIX-EXCLUDED",
-        escape: "the same narrowing with `os:` left listing all three, so every reading of \
-                 `os:` passes while the Windows floor is never compiled. \
-                 `MUT-TEST-MATRIX-EXCLUDED`'s shape on the leg that had no strategy contract.",
+        escape: "the same narrowing with `include:` left listing all three entries and an \
+                 `exclude:` naming the macOS pair above it, so every reading of `include:` \
+                 alone passes. `MUT-TEST-MATRIX-EXCLUDED`'s shape on this leg. GitHub \
+                 documents that `include:` entries are processed after `exclude:`, so by that \
+                 rule this one removes no entry of an `include:` list; that is the rule as \
+                 documented, and no workflow was run to watch it. The oracle does not weigh \
+                 it: the entries are read from `include:` and from nothing else in `matrix:`, \
+                 so the key is refused whatever it would remove.",
         job: Some("msrv"),
-        anchor: "        os: [ubuntu-latest, windows-latest, macos-latest]\n",
-        replacement: "        os: [ubuntu-latest, windows-latest, macos-latest]\n\
-                      \x20       exclude:\n\
-                      \x20         - os: windows-latest\n",
+        anchor: "        include:\n",
+        replacement: "        exclude:\n\
+                      \x20         - os: ubuntu-latest\n\
+                      \x20           target: aarch64-apple-darwin\n\
+                      \x20       include:\n",
         refused_as: "msrv-job-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-MSRV-CROSS-TARGET-DROPPED",
+        escape: "the macOS entry's `target:` becomes the Linux tuple. The matrix still has \
+                 three entries and the job three green results, but two of them check \
+                 `x86_64-unknown-linux-gnu` on `ubuntu-latest` and none compiles the macOS \
+                 regions on the floor.",
+        job: Some("msrv"),
+        anchor: "            target: aarch64-apple-darwin\n",
+        replacement: "            target: x86_64-unknown-linux-gnu\n",
+        refused_as: "msrv-job-matrix",
+    },
+    WorkflowEscape {
+        name: "MUT-MSRV-TOOLCHAIN-TARGET-DROPPED",
+        escape: "the floor's toolchain step no longer installs the entry's target. The macOS \
+                 entry then fails for want of that tuple's standard library, which is loud; \
+                 the pin keeps the toolchain's targets and the check's `--target` reading the \
+                 one matrix value.",
+        job: Some("msrv"),
+        anchor: "          targets: ${{ matrix.target }}\n",
+        replacement: "",
+        refused_as: "msrv-job-toolchain",
     },
     WorkflowEscape {
         name: "MUT-MSRV-FAIL-FAST-ENABLED",
@@ -2469,8 +2641,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         escape: "the same absolution one level down, on the step that runs the check: the step \
                  fails, the job succeeds, and the leg is green",
         job: Some("msrv"),
-        anchor: "      - run: cargo check --locked --all-targets --all-features\n",
-        replacement: "      - run: cargo check --locked --all-targets --all-features\n\
+        anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
+        replacement: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n\
                       \x20       continue-on-error: true\n",
         refused_as: "msrv-job-step-field",
     },
@@ -2483,9 +2655,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  the whole defect lives inside a scalar this contract used to treat as \
                  opaque.",
         job: Some("msrv"),
-        anchor: "      - run: cargo check --locked --all-targets --all-features\n",
+        anchor: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
         replacement: "      - run: echo \"RUSTFLAGS=-A warnings\" >> \"$GITHUB_ENV\"\n\
-                      \x20     - run: cargo check --locked --all-targets --all-features\n",
+                      \x20     - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
         refused_as: "rustflags-persisted",
     },
     WorkflowEscape {
@@ -2532,9 +2704,9 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
                  script scan is not merely a `GITHUB_ENV` detector -- and a leg that names the \
                  variable at all is doing something this contract has no model for.",
         job: Some("lint-macos"),
-        anchor: "      - run: cargo clippy --all-targets --all-features -- -D warnings\n",
+        anchor: "      - run: cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n",
         replacement: "      - run: RUSTFLAGS=-A warnings cargo build --all-targets\n\
-                      \x20     - run: cargo clippy --all-targets --all-features -- -D warnings\n",
+                      \x20     - run: cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings\n",
         refused_as: "rustflags-in-script",
     },
     WorkflowEscape {
@@ -2592,12 +2764,14 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         anchor: "      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
                  \x20       with:\n\
                  \x20         toolchain: 1.85.0\n\
+                 \x20         targets: ${{ matrix.target }}\n\
                  \x20     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n\
-                 \x20     - run: cargo check --locked --all-targets --all-features\n",
-        replacement: "      - run: cargo check --locked --all-targets --all-features\n\
+                 \x20     - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n",
+        replacement: "      - run: cargo check --locked --target ${{ matrix.target }} --all-targets --all-features\n\
                       \x20     - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable\n\
                       \x20       with:\n\
                       \x20         toolchain: 1.85.0\n\
+                      \x20         targets: ${{ matrix.target }}\n\
                       \x20     - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2\n",
         refused_as: "msrv-job-order",
     },

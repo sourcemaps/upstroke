@@ -5,6 +5,18 @@
 - `upstroke capacity` and `validate` now show the usage-limit signals and spend of a schema-4 run
   when it is the repository's latest. They used to warn that its log was not a valid event and
   report no run.
+- A schema-4 run's pre-flight, on `upstroke run` and on `upstroke resume`, now refuses the run when
+  Claude Code's account, or a Claude Code pool's `profile`, is not signed in, as `claude
+  --setting-sources "" auth status --json` reports it, before anything is spawned for the run. The
+  check asks in a worker's settings context, with no user, project or local settings loaded, so a
+  credential that only a settings file supplies (an `apiKeyHelper`, say) does not count, and
+  `upstroke connect` and `upstroke capacity`, which call the same discovery, now report the answer a
+  worker would get. It checks every account
+  Claude Code's pools use, each once: each `profile` they name, and the default account when any of
+  them names none or Claude Code has no pool, stopping at the first account that fails and refusing
+  an agent whose pools use more than sixteen distinct accounts. A run with a signed-out account used
+  to start and fail at its first attempt on Claude Code (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). A CLI that cannot say
+  whether it is signed in still passes.
 - When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
   that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
   session under its `profile`, instead of waiting for the reset; with every pool of the agent

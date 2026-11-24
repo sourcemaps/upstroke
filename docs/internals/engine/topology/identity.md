@@ -166,6 +166,49 @@ The probe of one recorded agent. Slotted.
 — outside `[0-9A-Za-z_-]`, or too long. A probe identity is a path and
 a container-name component, so the refusal is a containment refusal.
 
+## `impl PreflightIdentities` › `pub const FURTHER_POOL_STRIDE: u32 = 16;`
+
+How far apart two pools' probe ordinals are: the width of one pool's block of
+ordinals. It is larger than the highest probe ordinal any adapter mints
+(Codex's, 11, its model catalog read; Claude Code's highest is 2, its
+`auth status --json`), so a further pool's block never reaches the next one's,
+and none reaches back into the ordinals the adapter mints for itself. An
+adapter that one day mints an ordinal of 16 or more is refused by
+[`PreflightIdentities::further_pool`] rather than given an identity that
+collides, so the stride is widened then, not discovered to be too narrow.
+
+The stride is also how `profiled` tells a further account's discovery from
+the adapter's own probes: it leaves alone any agent probe at an ordinal of the
+stride or more, so a further account's discovery reaches the CLI carrying
+exactly its own account, the default account's with no profile (`profiled.md`,
+`Profiled::stamped`). That reading holds because no adapter mints such an
+ordinal itself.
+
+## `impl PreflightIdentities` › `pub fn further_pool(`
+
+A probe of `agent` run for the `further`-th further account of that agent
+(`further` counts from 1), at the adapter's `ordinal`: the agent probe at
+ordinal `further * FURTHER_POOL_STRIDE + ordinal`. The name says pool because
+each account is named by the first pool that uses it.
+
+Pre-flight runs an agent's sign-in discovery once under each account the
+agent's pools use, the default account included (`preflight.md`,
+`Account::of_agent`, `refuse_signed_out`). An adapter mints its discovery's
+identities with fixed ordinals (Claude Code's `auth status --json` is ordinal
+2), so a second run of it would render the same `p.agent-<id>.o<n>` and the
+ledger would refuse the second registration (`InvocationLedger::open`). The
+first account's discovery keeps the adapter's own identities, and every
+further account's is moved here, to a block of ordinals of its own. Two
+further accounts, or a further account and the adapter's own probes, never
+share an identity.
+
+### Errors
+
+[`UpstrokeError::Refused`] for `further` 0 (the first account keeps the
+adapter's identities, and has no block here), for an `ordinal` of
+[`Self::FURTHER_POOL_STRIDE`] or more, and for a shifted ordinal that does not
+fit in a `u32`; and [`Self::agent`]'s refusals.
+
 ## `pub fn is_slotted(invocation: &InvocationId) -> bool {`
 
 ---------------------------------------------------------------------------
@@ -837,6 +880,15 @@ test is where that shows up.
 
 An agent name an identity cannot carry is refused, because that identity
 becomes a path component and a container-name component.
+
+## `mod tests` › `fn a_further_pools_probes_take_a_block_of_ordinals_of_their_own() {`
+
+[`PreflightIdentities::further_pool`]: three further pools' probes, at every
+ordinal below the stride, are each the same agent's slotted probe at the
+shifted ordinal, and no two of them, or any of them and an identity the
+adapter mints for itself, render the same value. Claude Code's discovery under
+the first further pool is pinned as `p.agent-claude-code.o18`. Further pool 0,
+an ordinal as wide as the stride, and a shift past `u32::MAX` are refused.
 
 ## `mod tests` › `fn the_synchronous_substrate_refuses_a_pair_it_cannot_grant_at_once() {`
 

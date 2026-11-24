@@ -112,6 +112,18 @@ equalities below compare a shorter list against a shorter list and pass. The
 collision is therefore checked before anything is derived from the stems.
 Measured, `MUT-AGGREGATE-STEM-COLLISION`.
 
+## `fn runner_target(runner: &str) -> Option<&'static CiTarget> {`
+
+The [`CI_TARGETS`] row whose `runner` is `runner`: the platform whose default
+shell a job on that runner gets. A gate or an `msrv` entry checked from
+another platform's runner resolves its shell for that runner, so the macOS
+gate on `ubuntu-latest` is held to Linux's `bash`.
+
+## `pub(super) fn cross_target(command: &str) -> Option<&str> {`
+
+The word after `--target` in a command, if it names one: the tuple a gate
+compiles when it is not its runner's own.
+
 ## `fn ci_gate_complaints(doc: &Yaml) -> Vec<String> {`
 
 Every way the parsed workflow fails the gate-wiring contract.
@@ -122,9 +134,27 @@ input is an oracle nobody has seen refuse anything. Each complaint opens with
 a `[kebab-code]`, and the escape table names the code it must provoke -- so a
 mutation that fails for an unrelated reason does not count as refused.
 
+A target's gate is exactly one job whose `runs-on:` is the target's
+`check_runner` and one of whose steps runs the target's `clippy_gate`, and
+the three gates are three different jobs; `[no-gate-job]` otherwise, naming
+both. The pair, not the runner alone: `lint (macos)` and `lint` both run on
+`ubuntu-latest`, and only the `--target aarch64-apple-darwin` on the first
+tells them apart. Measured, `MUT-GATE-ECHOED`, `MUT-GATE-RUNNER-DRIFT` (the
+macOS gate's job moved to `windows-latest`) and
+`MUT-GATE-CROSS-TARGET-DROPPED` (the flag dropped: two jobs then match the
+Linux gate and none the macOS one).
+
+Where the gate's command carries `--target <triple>`, the job's toolchain
+step must install exactly that tuple through `targets:`, or the gate is
+refused as `[gate-toolchain-target]`. Without the input the job fails for want
+of the standard library, which is loud; the pin keeps the tuple in one place
+with the command that names it. Measured, `MUT-GATE-TOOLCHAIN-TARGET-DROPPED`.
+
 ## `fn ci_gate_complaints(doc: &Yaml) -> Vec<String>` › `if scalar(step, "run").is_some() {`
 
-Only `run:` steps have a shell; a `uses:` step runs an action.
+Only `run:` steps have a shell; a `uses:` step runs an action. The shell is
+resolved for the gate job's runner, the target's `check_runner`, not for the
+runner its test legs use.
 
 ## `fn aggregate_complaints(doc: &Yaml, jobs: &Yaml, job_names: &BTreeSet<String>) -> Vec<String> {`
 
@@ -1116,9 +1146,11 @@ input on an allowlisted action at a pinned commit is enough to put
 ## `fn step_pin_complaints(job: &Yaml, named: &str, code: &str, scripts: &[&str]) -> Vec<String> {` › `if uses.starts_with(TOOLCHAIN_ACTION) {`
 
 The values, not only the key names. The toolchain action builds shell
-text from `components` and interpolates it into a Bash line, so an
-allowlisted key with an unpinned value is a command the candidate
-chose running inside an action this contract calls pinned.
+text from `components` and `targets` and interpolates it into a Bash line,
+so an allowlisted key with an unpinned value is a command the candidate
+chose running inside an action this contract calls pinned. `targets` is held
+to [`TOOLCHAIN_TARGETS`] here, on every job; which of those values a job
+must give is pinned by the job's own contract.
 
 ## `fn toolchain_complaints(`
 
@@ -1244,8 +1276,8 @@ normalised into agreement with whatever the workflow happens to say.
 Every way the MSRV leg fails to check the floor this crate publishes.
 
 Nothing above this function reaches that job. [`ci_gate_complaints`] selects
-a job by its `runs-on:` *and* a step whose `run:` is [`CLIPPY_GATE`], and
-`msrv` matches neither -- it runs on `${{ matrix.os }}` and it runs
+a job by its `runs-on:` *and* a step whose `run:` is a target's Clippy gate,
+and `msrv` matches neither -- it runs on `${{ matrix.os }}` and it runs
 `cargo check`. So until this existed the only structural claim on the MSRV
 leg was that the aggregate needs a job with that id: its matrix could be
 narrowed to one runner or hollowed out with `exclude:`, its command could
@@ -1264,20 +1296,44 @@ than history.
 
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
-A matrix job, so each `run:` step resolves a shell once per runner, and
-a workflow-level default reaches all three of them at once.
+A matrix job, so each `run:` step resolves a shell once per runner its
+entries name -- the distinct `check_runner`s of [`CI_TARGETS`], `ubuntu-latest`
+and `windows-latest` -- and a workflow-level default reaches every entry at
+once.
 
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(toolchain_complaints(job, MSRV_JOB, "msrv-toolchain", None));`
 
 Position only: this leg installs the manifest's floor, not `stable`, and
 the value is checked against `Cargo.toml` above.
 
-## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `let expected_runners: BTreeSet<String> = CI_TARGETS`
+## `fn msrv_entry(entry: &Yaml) -> Option<(String, String)> {`
 
-The platform half, compared against the same derived runner set the Clippy
-legs are, and the `test` job's table of legs is. A floor is a per-platform
-fact: a
-dependency that raises its MSRV behind a `cfg` fails on that target only.
+One `include:` entry as its `(os, target)` pair, or `None` where it has keys
+other than exactly `os` and `target` or a value that is not a string.
+
+## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `let expected_entries: BTreeSet<(String, String)> = CI_TARGETS`
+
+The platform half. The job checks the floor for three targets, one
+`include:` entry apiece, and the entries are compared against the pairs
+`(check_runner, triple)` derived from [`CI_TARGETS`], each once -- the same
+table the Clippy gates and the `test` job's legs are derived from. The macOS
+entry runs on `ubuntu-latest` and names its tuple, for the reason
+`lint (macos)` does: GitHub runs at most five macOS jobs at once for the
+account, each run asked for seven, and run 45175187088 showed each macOS job
+starting as another ended. A floor is a per-target fact: a dependency that
+raises its MSRV behind a `cfg`, or a call newer than the floor inside a
+`#[cfg(target_os = "macos")]` region, fails on that target only.
+
+`matrix:` holds `include:` alone; an axis or `exclude:` beside it changes which
+combinations run, so either is refused as `[msrv-job-matrix]` whatever it
+would do. A dropped entry, an entry retargeted to another's tuple and an entry
+twice are refused the same way. `runs-on:` stays `${{ matrix.os }}`, and the
+toolchain step's `targets:` is `${{ matrix.target }}`, the tuple the check
+names with `--target`; a missing or other `targets:` is
+`[msrv-job-toolchain]`. Measured, `MUT-MSRV-MATRIX-NARROWED`,
+`MUT-MSRV-MATRIX-EXCLUDED`, `MUT-MSRV-CROSS-TARGET-DROPPED`,
+`MUT-MSRV-TOOLCHAIN-TARGET-DROPPED` and, for the command's `--target`,
+`MUT-MSRV-COMMAND-UNTARGETED`.
 
 ## `pub(super) fn ci_msrv_job_complaints(doc: &Yaml) -> Vec<String> {` › `let install_at = steps_of(job).iter().position(|step| {`
 
@@ -1412,6 +1468,22 @@ are `BRIDGE-CI-SHAPE-TEST-IS-A-SUBSTRING-ORACLE`'s; the `MUT-CI-*` names are
 kept from `.github/scripts/test-docs-consistency.sh`, which recorded them as
 history when that gate withdrew its claim over this surface -- a parsed
 document is what lets the claim come back as an equality.
+
+When `lint (macos)` moved to `ubuntu-latest` and `msrv` to one `include:`
+entry per target, the rows on the two jobs were re-spelled with the same
+mutations: the `lint-macos` rows anchor the cross gate's run line or its
+`runs-on: ubuntu-latest`, and `MUT-GATE-RUNNER-DRIFT` now moves that job to
+`windows-latest`. `MUT-GATE-STEP-RETARGETED` stands on `lint (windows)`,
+because a step's `CARGO_BUILD_TARGET` no longer retargets a gate that names its
+tuple with `--target`. `MUT-MSRV-MATRIX-NARROWED` deletes the macOS entry and
+`MUT-MSRV-MATRIX-EXCLUDED` puts an `exclude:` naming it above `include:`. Five
+rows came with the move: `MUT-GATE-CROSS-TARGET-DROPPED` (`no-gate-job`),
+`MUT-GATE-TOOLCHAIN-TARGET-DROPPED` (`gate-toolchain-target`),
+`MUT-MSRV-CROSS-TARGET-DROPPED` (`msrv-job-matrix`),
+`MUT-MSRV-COMMAND-UNTARGETED` (`msrv-job-command`) and
+`MUT-MSRV-TOOLCHAIN-TARGET-DROPPED` (`msrv-job-toolchain`). Each is described
+where the check that refuses it is: under [`ci_gate_complaints`] and
+[`ci_msrv_job_complaints`].
 
 ## `pub(super) struct WorkflowEscape` › `pub(super) name: &'static str,`
 

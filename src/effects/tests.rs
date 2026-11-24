@@ -5387,9 +5387,9 @@ use ci_model::{
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
     ci_test_windows_hosted_job_complaints, ci_windows_build_witness_complaints, ci_workflow_text,
-    complaint_codes, declared_msrv_toolchain, declared_rust_version, field, field_names,
-    libtest_runs, mutate_workflow, parse_workflow, rustflags_complaints, scalar, shard_selections,
-    steps_of, three_component, workflow_complaints,
+    complaint_codes, cross_target, declared_msrv_toolchain, declared_rust_version, field,
+    field_names, libtest_runs, mutate_workflow, parse_workflow, rustflags_complaints, scalar,
+    shard_selections, steps_of, three_component, workflow_complaints,
 };
 
 #[test]
@@ -5525,6 +5525,167 @@ fn no_repository_file_overrides_what_ci_compiles_or_runs() {
          this crate: `default-members` decides, and a member with no tests makes every CI \
          command succeed without running this suite."
     );
+}
+
+fn host_unit_complaints(root: &Path) -> Vec<String> {
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml"))
+            .expect("Cargo.toml parses");
+    let build = manifest
+        .get("package")
+        .and_then(|package| package.get("build"));
+    let build_disabled = build.and_then(toml::Value::as_bool) == Some(false);
+    let mut complaints = Vec::new();
+    if root.join("build.rs").exists() && !build_disabled {
+        complaints.push(
+            "a `build.rs` file at the package root, which Cargo builds as a build script \
+             because `[package] build` is not `false`"
+                .to_owned(),
+        );
+    }
+    if let Some(value) = build.filter(|_| !build_disabled) {
+        complaints.push(format!(
+            "`[package] build = {value}`, which names a build script"
+        ));
+    }
+    for key in ["proc-macro", "proc_macro"] {
+        let declared = manifest
+            .get("lib")
+            .and_then(|lib| lib.get(key))
+            .and_then(toml::Value::as_bool);
+        if declared == Some(true) {
+            complaints.push(format!(
+                "`[lib] {key} = true`, which makes the library a procedural macro crate"
+            ));
+        }
+    }
+    for key in ["crate-type", "crate_type"] {
+        let names_proc_macro = manifest
+            .get("lib")
+            .and_then(|lib| lib.get(key))
+            .and_then(toml::Value::as_array)
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind.as_str() == Some("proc-macro")));
+        if names_proc_macro {
+            complaints.push(format!(
+                "`[lib] {key} = [\"proc-macro\", ...]` names `proc-macro`, which makes the \
+                 library a procedural macro crate"
+            ));
+        }
+    }
+    if manifest.get("workspace").is_some() {
+        complaints.push(
+            "a `[workspace]` table, so another member of the workspace could be a host unit"
+                .to_owned(),
+        );
+    }
+    complaints
+}
+
+#[test]
+fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {
+    let complaints = host_unit_complaints(&repo_root());
+    assert!(
+        complaints.is_empty(),
+        "the package declares a host unit: {}. `lint (macos)` and the macOS `msrv` entry run on \
+         Linux with `--target aarch64-apple-darwin`, so a host unit (a build script or a \
+         proc-macro) compiles for the Linux host and its macOS branches are never linted or \
+         checked; adding one requires restoring a native `macos-latest` Clippy and MSRV leg in \
+         the same change (finding `PR412-MACOS-HOST-UNITS-UNLINTED`).",
+        complaints.join("; ")
+    );
+}
+
+#[test]
+fn no_repository_file_host_unit_check_names_each_host_unit() {
+    const PACKAGE: &str =
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+    let fixture = |tag: &str, manifest: &str, build_file: bool| -> ScratchTree {
+        let tree = scratch_dir(tag);
+        fs::write(tree.path().join("Cargo.toml"), manifest).expect("the fixture's manifest");
+        if build_file {
+            fs::write(tree.path().join("build.rs"), "fn main() {}\n")
+                .expect("the fixture's build script");
+        }
+        tree
+    };
+    let cases: [(&str, String, bool, Option<&str>); 10] = [
+        ("host-unit-plain", PACKAGE.to_owned(), false, None),
+        (
+            "host-unit-build-file",
+            PACKAGE.to_owned(),
+            true,
+            Some("build.rs"),
+        ),
+        (
+            "host-unit-named-build",
+            format!("{PACKAGE}build = \"gen.rs\"\n"),
+            false,
+            Some("[package] build = \"gen.rs\""),
+        ),
+        (
+            "host-unit-build-disabled",
+            format!("{PACKAGE}build = false\n"),
+            true,
+            None,
+        ),
+        (
+            "host-unit-proc-macro",
+            format!("{PACKAGE}\n[lib]\nproc-macro = true\n"),
+            false,
+            Some("proc-macro"),
+        ),
+        (
+            "host-unit-proc-macro-underscore",
+            format!("{PACKAGE}\n[lib]\nproc_macro = true\n"),
+            false,
+            Some("proc_macro"),
+        ),
+        (
+            "host-unit-crate-type-proc-macro",
+            format!("{PACKAGE}\n[lib]\ncrate-type = [\"proc-macro\"]\n"),
+            false,
+            Some("crate-type"),
+        ),
+        (
+            "host-unit-crate-type-underscore-proc-macro",
+            format!("{PACKAGE}\n[lib]\ncrate_type = [\"proc-macro\"]\n"),
+            false,
+            Some("crate_type"),
+        ),
+        (
+            "host-unit-crate-type-library",
+            format!("{PACKAGE}\n[lib]\ncrate-type = [\"cdylib\", \"rlib\"]\n"),
+            false,
+            None,
+        ),
+        (
+            "host-unit-workspace",
+            format!("{PACKAGE}\n[workspace]\n"),
+            false,
+            Some("workspace"),
+        ),
+    ];
+    for (tag, manifest, build_file, cause) in cases {
+        let tree = fixture(tag, &manifest, build_file);
+        let complaints = host_unit_complaints(tree.path());
+        match cause {
+            None => assert!(
+                complaints.is_empty(),
+                "{tag}: the package declares no host unit, yet: {complaints:?}"
+            ),
+            Some(cause) => {
+                assert_eq!(
+                    complaints.len(),
+                    1,
+                    "{tag}: one host unit, so one complaint naming `{cause}`: {complaints:?}"
+                );
+                assert!(
+                    complaints.iter().all(|complaint| complaint.contains(cause)),
+                    "{tag}: the complaint does not name `{cause}`: {complaints:?}"
+                );
+            }
+        }
+    }
 }
 
 const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";
@@ -6846,6 +7007,17 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
             "no body in this tree is compiled by `{}` alone, so nothing here establishes \
              that its Clippy leg is needed",
             target.runner
+        );
+        let compiles_the_tuple = match cross_target(target.clippy_gate) {
+            Some(triple) => triple == target.triple,
+            None => target.check_runner == target.runner,
+        };
+        assert!(
+            compiles_the_tuple,
+            "the `{}` gate, `{}` on `{}`, does not compile `{}`. The census credits it with \
+             every region that tuple compiles, so it has to compile them: natively on `{}`, or \
+             by naming the tuple with `--target`.",
+            target.triple, target.clippy_gate, target.check_runner, target.triple, target.runner
         );
     }
 

@@ -5,8 +5,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::capacity::{Pool, pool_for};
-use crate::runner::{CallParts, ExecutionRole, RunFuture, Runner, RunnerCall, RunnerRequest};
+use crate::runner::{
+    CallParts, ExecutionRole, InvocationId, ProbeTarget, RunFuture, Runner, RunnerCall,
+    RunnerRequest,
+};
 use crate::workspace_manager::ComposedCommonDir;
+
+use super::identity::PreflightIdentities;
 
 pub(super) fn profiled(inner: Arc<dyn Runner>, pools: &[Pool]) -> Arc<dyn Runner> {
     let profiles = profiles(pools);
@@ -34,13 +39,26 @@ struct Profiled {
 
 impl Profiled {
     fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {
-        if request.role == ExecutionRole::Implement {
+        if request.role == ExecutionRole::Implement
+            || request.credential_profile.is_some()
+            || further_account_probe(&request.invocation)
+        {
             return None;
         }
         let agent = request.agent.as_ref()?;
         let profile = self.profiles.get(agent.as_str())?;
         Some(request.clone().with_credential_profile(profile.clone()))
     }
+}
+
+fn further_account_probe(invocation: &InvocationId) -> bool {
+    matches!(
+        invocation,
+        InvocationId::Probe {
+            target: ProbeTarget::Agent(_),
+            ordinal,
+        } if *ordinal >= PreflightIdentities::FURTHER_POOL_STRIDE
+    )
 }
 
 impl Runner for Profiled {
@@ -91,7 +109,7 @@ mod tests {
     use crate::topology::events::{AttemptNumber, GenerationId};
     use crate::topology::registry::TaskKey;
 
-    use super::profiled;
+    use super::{PreflightIdentities, profiled};
 
     #[derive(Debug, Default)]
     struct Recording {
@@ -262,6 +280,87 @@ mod tests {
             same(&seen_unprofiled, &unprofiled) && same(&seen_on_spare, &on_spare),
             "a worker request was changed on its way through: {seen_unprofiled:?}, \
              {seen_on_spare:?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_that_already_carries_a_profile_keeps_it() {
+        let pools = [
+            pool("max", "claude-code", Some("/profiles/personal")),
+            pool("spare", "claude-code", Some("/profiles/spare")),
+        ];
+        let unprofiled = crate::agent::probe_request(
+            "claude-code",
+            CommandSpec::new("claude")
+                .arg("auth")
+                .arg("status")
+                .arg("--json"),
+            2,
+            Duration::from_secs(30),
+        )
+        .expect("a probe request");
+        let on_spare = unprofiled
+            .clone()
+            .with_credential_profile(PathBuf::from("/profiles/spare"));
+
+        let seen_unprofiled = through(&pools, &unprofiled);
+        let seen_on_spare = through(&pools, &on_spare);
+
+        assert_eq!(
+            (
+                seen_unprofiled.credential_profile.clone(),
+                seen_on_spare.credential_profile.clone(),
+            ),
+            (
+                Some(PathBuf::from("/profiles/personal")),
+                Some(PathBuf::from("/profiles/spare")),
+            ),
+            "a probe with no profile takes its agent's first pool's, and one that already \
+             names `spare`'s keeps it, as pre-flight's discovery under a further pool needs"
+        );
+        assert!(
+            same(&seen_on_spare, &on_spare),
+            "a probe that carried a profile was changed on its way through: {seen_on_spare:?}"
+        );
+    }
+
+    #[test]
+    fn a_further_accounts_probe_reaches_the_runner_with_exactly_its_own_account() {
+        let pools = [
+            pool("max", "claude-code", Some("/profiles/personal")),
+            pool("default", "claude-code", None),
+        ];
+        let auth_status = |ordinal: u32| {
+            crate::agent::probe_request(
+                "claude-code",
+                CommandSpec::new("claude")
+                    .arg("auth")
+                    .arg("status")
+                    .arg("--json"),
+                ordinal,
+                Duration::from_secs(30),
+            )
+            .expect("a probe request")
+        };
+        let further = auth_status(PreflightIdentities::FURTHER_POOL_STRIDE + 2);
+        let own = auth_status(2);
+
+        let seen_further = through(&pools, &further);
+        let seen_own = through(&pools, &own);
+
+        assert_eq!(
+            (
+                seen_further.credential_profile.clone(),
+                seen_own.credential_profile.clone(),
+            ),
+            (None, Some(PathBuf::from("/profiles/personal"))),
+            "a further account's discovery, here the default account's, carries no profile and \
+             must reach the CLI with none, while the adapter's own probe takes its agent's first \
+             pool's profile"
+        );
+        assert!(
+            same(&seen_further, &further),
+            "a further account's probe was changed on its way through: {seen_further:?}"
         );
     }
 

@@ -83,8 +83,20 @@ its creation begins, so nothing of the run exists, and a resume at its
 pre-flight. What pre-flight checks of a profile is that it is an absolute
 path and an existing directory (besides the host runner, Claude Code and no
 `CLAUDE_CODE_OAUTH_TOKEN`). The agent's capability probe then runs under the
-profile. Nothing checks sign-in, so a profile that is not signed in passes
-pre-flight and fails at its first attempt (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+profile. For Claude Code alone, its sign-in check
+(`claude --setting-sources "" auth status --json`) runs next, on a fresh run
+and on a resume, once under each account Claude Code's pools use, in file
+order: each profile they name, and the default account when any of them names
+none or Claude Code has no pool (`Account::of_agent`). It stops at the first
+account that is signed out or whose check fails to answer, and that account
+refuses the run before it starts or resumes; a CLI that cannot say passes. The
+check asks with no user, project or local settings loaded, as a worker loads
+none, so a credential that only a settings file supplies (an `apiKeyHelper`,
+say) does not count. An agent whose pools use more than
+sixteen distinct accounts (`MAX_ACCOUNTS_PER_AGENT`) is refused before its
+sign-in is checked. Other agents' sign-in is not checked at pre-flight
+(`SIGN_IN_CHECKED`), so a signed-out Codex fails at its first attempt
+(`PR408-CODEX-SIGN-IN-NOT-PREFLIGHTED`).
 The legacy coordinator refuses any profiled pool.
 A rate limit moves a task between pools, and so between profiles. When a
 schema-4 worker's limit would defer its task and another pool of its agent is
@@ -748,9 +760,24 @@ and both warned of a log that was in fact intact.
 
 - It asks `engine::topology::observe::observe` first. `Some(observed)` is a
   schema-4 log, already checked by a full replay, and `observe_topology`
-  folds `observed.events()`.
+  folds `observed.accounting_events()`, the events `status`'s ledger
+  folds.
 - `None` is a legacy log. It is read as before: `events::read_all`, then
   `observe`. `read_all`'s torn-tail notice goes to `warnings`.
+
+**A schema-4 run's in-flight attempts count as `status` counts them.** If
+nothing holds the run and it has not finished, its coordinator died before
+the attempts it had started settled. `accounting_events` follows the
+committed log with the interrupted settlements its resume will append, so
+each such attempt counts once on the pool its `attempt_started` named, with
+its cost unknown. That is how `status` already counted it. A run another
+process holds is folded as committed: its live coordinator still owns those
+attempts, and they count when they settle. Until this read went through
+`accounting_events` it folded `observed.events()`, the committed log alone.
+Between a coordinator's death and its resume, `status` counted the attempt
+in flight and `capacity` and `validate` did not. The legacy reader keeps
+that gap: it folds the committed log alone, and `status::load`'s
+`settle_interrupted` is not applied here.
 - An error from either reader answers `Observations::default()`, with the
   run's id and `folded: false`, and pushes one warning naming the run and
   the error.
@@ -1004,6 +1031,20 @@ reads $1.00 over two attempts, one of them unpriced, and `report` renders
 its draw as `$1.0000? over 2 attempt(s)`. A fold that skips
 `attempt_interrupted` reports $1.00 over one attempt, with no mark that
 anything is missing from it.
+
+## `fn an_unresumed_runs_in_flight_attempt_counts_once_unpriced_on_the_pool_it_started_on() {`
+
+The same run as the test above, stopped one line earlier: the log ends at
+the second attempt's `attempt_started`, and nothing holds the run. Its
+coordinator died and nobody has resumed it. The pool reads $1.00 over two
+attempts, one of them unpriced, as when the attempt had settled as
+interrupted. `status` prints the same draw for this run,
+`claude-max: 2 attempt(s), $1.0000?`, and `report` renders it as
+`$1.0000? over 2 attempt(s)`. Then the test takes the run's lock, as a
+live coordinator holds it, and the pool reads one priced attempt: the
+attempt in flight is that coordinator's, not yet settled. A reader that
+folds only the committed log fails the first assertion with $1.00 over one
+attempt, with no mark that anything is missing.
 
 ## `fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {`
 

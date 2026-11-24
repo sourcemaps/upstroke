@@ -835,6 +835,1336 @@ fn pools_that_name_no_profile_leave_the_preflight_as_it_was() {
     );
 }
 
+const SECOND_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/agent");
+const THIRD_DIRECTORY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/engine");
+
+const CLAUDE_HELP: &str = concat!(
+    "-p --output-format --model --settings --setting-sources --permission-mode\n",
+    "  --effort <level> (low, medium, high, xhigh, max)\n"
+);
+
+const LOGGED_IN: &str = concat!(
+    r#"{"loggedIn": true, "authMethod": "claude.ai", "apiProvider": "firstParty", "#,
+    r#""subscriptionType": "max"}"#
+);
+
+const LOGGED_OUT: &str = concat!(
+    r#"{"loggedIn": false, "authMethod": "none", "#,
+    r#""apiProvider": "firstParty"}"#
+);
+
+fn answered(code: i32, stdout: &str) -> ProcessOutput {
+    ProcessOutput {
+        code: Some(code),
+        stdout: stdout.to_owned(),
+        stderr: String::new(),
+        duration: Duration::from_millis(1),
+        timed_out: false,
+        output_limited: false,
+    }
+}
+
+fn answers_signed_in(_profile: Option<&Path>) -> ProcessOutput {
+    answered(0, LOGGED_IN)
+}
+
+fn answers_signed_out(_profile: Option<&Path>) -> ProcessOutput {
+    answered(1, LOGGED_OUT)
+}
+
+fn answers_signed_in_under_the_first_profile_only(profile: Option<&Path>) -> ProcessOutput {
+    if profile == Some(Path::new(EXISTING_DIRECTORY)) {
+        answers_signed_in(profile)
+    } else {
+        answers_signed_out(profile)
+    }
+}
+
+fn answers_signed_in_under_a_profile_only(profile: Option<&Path>) -> ProcessOutput {
+    if profile.is_some() {
+        answers_signed_in(profile)
+    } else {
+        answers_signed_out(profile)
+    }
+}
+
+struct ClaudeCli {
+    seen: Mutex<Vec<RunnerRequest>>,
+    auth_status: fn(Option<&Path>) -> ProcessOutput,
+}
+
+impl ClaudeCli {
+    fn answering(auth_status: fn(Option<&Path>) -> ProcessOutput) -> Self {
+        Self {
+            seen: Mutex::new(Vec::new()),
+            auth_status,
+        }
+    }
+
+    fn requests(&self) -> Vec<RunnerRequest> {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn discoveries(&self) -> Vec<(String, Option<PathBuf>)> {
+        self.requests()
+            .into_iter()
+            .filter(|request| {
+                request.command.args == ["--setting-sources", "", "auth", "status", "--json"]
+            })
+            .map(|request| (request.invocation.render(), request.credential_profile))
+            .collect()
+    }
+}
+
+impl crate::runner::contract::tests::InlineRunner for ClaudeCli {
+    fn run_inline(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.clone());
+        if request.command.program != "claude" {
+            return Ok(answered(0, ""));
+        }
+        let args: Vec<&str> = request.command.args.iter().map(String::as_str).collect();
+        Ok(match args.as_slice() {
+            ["--version"] => answered(0, "2.1.226 (Claude Code)\n"),
+            ["--help"] => answered(0, CLAUDE_HELP),
+            ["--setting-sources", "", "auth", "status", "--json"] => {
+                (self.auth_status)(request.credential_profile.as_deref())
+            }
+            _ => answered(2, ""),
+        })
+    }
+}
+
+fn claude_code_preflight<'a>(runner: &'a dyn Runner, pools: &[Pool]) -> RunPreflight<'a> {
+    RunPreflight::new(
+        runner,
+        &crate::agent::BuiltinAdapters,
+        ShellKind::Bash,
+        Path::new("."),
+        vec![AGENT.to_owned()],
+    )
+    .with_pools(pools)
+    .reading_environment(no_token)
+}
+
+fn profiled_over(cli: &Arc<ClaudeCli>, pools: &[Pool]) -> Arc<dyn Runner> {
+    crate::engine::topology::profiled::profiled(Arc::clone(cli) as Arc<dyn Runner>, pools)
+}
+
+fn two_profiled_pools() -> [Pool; 2] {
+    [
+        pool("max", AGENT, Some(EXISTING_DIRECTORY)),
+        pool("spare", AGENT, Some(SECOND_DIRECTORY)),
+    ]
+}
+
+const SIGN_IN_REFUSAL_CLOSING: &str = concat!(
+    ". Nothing was spawned for the run and no event was appended; ",
+    "run the same command again once that account is signed in ("
+);
+
+fn a_sign_in_refusal(error: &UpstrokeError) -> String {
+    let text = error.to_string();
+    assert!(
+        matches!(error, UpstrokeError::Refused { .. }),
+        "a refusal, not some other failure: {text}"
+    );
+    assert!(
+        text.starts_with(&format!(
+            "pre-flight: agent `{AGENT}` is not signed in under "
+        )),
+        "the refusal shape, naming the agent: {text}"
+    );
+    assert_eq!(
+        text.matches(SIGN_IN_REFUSAL_CLOSING).count(),
+        1,
+        "a sign-in refusal ends in its own closing sentence, once: {text}"
+    );
+    assert!(
+        text.ends_with(')') && !text.ends_with('.'),
+        "and ends with how to sign in, with no full stop: {text}"
+    );
+    assert!(
+        !text.contains("resumable") && !text.contains("probed inside"),
+        "with nothing of the probe refusal's closing, which is false on a fresh run: {text}"
+    );
+    text
+}
+
+#[test]
+fn a_second_profiled_pool_that_is_signed_out_refuses_naming_that_pool_and_its_profile() {
+    let cli = Arc::new(ClaudeCli::answering(
+        answers_signed_in_under_the_first_profile_only,
+    ));
+    let pools = two_profiled_pools();
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    let error = preflight
+        .certify(&host_policy())
+        .expect_err("the second pool's account is signed out, so the pre-flight refuses");
+
+    let text = a_sign_in_refusal(&error);
+    assert!(
+        text.contains(&format!(
+            "pool `spare`'s account, the credential profile directory `{SECOND_DIRECTORY}`"
+        )),
+        "the refusal names the signed-out pool and its profile: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "`claude auth login` with `CLAUDE_CONFIG_DIR` set to `{SECOND_DIRECTORY}`"
+        )),
+        "and says how to sign that profile in: {text}"
+    );
+    assert!(
+        !text.contains("`max`") && !text.contains(&format!("`{EXISTING_DIRECTORY}`")),
+        "the signed-in pool is not the one named: {text}"
+    );
+    assert_eq!(
+        cli.discoveries(),
+        vec![
+            (
+                "p.agent-claude-code.o2".to_owned(),
+                Some(PathBuf::from(EXISTING_DIRECTORY))
+            ),
+            (
+                "p.agent-claude-code.o18".to_owned(),
+                Some(PathBuf::from(SECOND_DIRECTORY))
+            ),
+        ],
+        "the first pool's discovery keeps the adapter's identity, the second's has its own, \
+         and each runs under its own pool's profile"
+    );
+    assert!(preflight.probed().is_none(), "nothing was certified");
+    assert!(preflight.ledgers_balance(), "{:?}", preflight.running());
+}
+
+#[test]
+fn every_profiled_pool_signed_in_certifies_and_every_discovery_is_registered_and_settled() {
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let pools = [
+        pool("max", AGENT, Some(EXISTING_DIRECTORY)),
+        pool("spare", AGENT, Some(SECOND_DIRECTORY)),
+        pool("third", AGENT, Some(THIRD_DIRECTORY)),
+    ];
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    preflight
+        .certify(&host_policy())
+        .expect("every account the run would use is signed in");
+
+    let identities: Vec<String> = cli
+        .requests()
+        .iter()
+        .map(|request| request.invocation.render())
+        .collect();
+    assert_eq!(
+        identities,
+        [
+            "p.shell.o0",
+            "p.agent-claude-code.o0",
+            "p.agent-claude-code.o1",
+            "p.agent-claude-code.o2",
+            "p.agent-claude-code.o18",
+            "p.agent-claude-code.o34",
+        ],
+        "the shell, the two capability probes, then one discovery per profiled pool, the two \
+         further pools' at identities of their own"
+    );
+    assert_eq!(
+        cli.discoveries()
+            .into_iter()
+            .map(|(_, profile)| profile)
+            .collect::<Vec<_>>(),
+        [EXISTING_DIRECTORY, SECOND_DIRECTORY, THIRD_DIRECTORY]
+            .map(|profile| Some(PathBuf::from(profile)))
+            .to_vec(),
+        "each pool's discovery under its own profile, in file order"
+    );
+    assert_eq!(
+        preflight.settlements(),
+        (6, 0),
+        "six processes registered and each completed once"
+    );
+    assert!(preflight.running().is_empty(), "{:?}", preflight.running());
+    assert!(preflight.ledgers_balance());
+    assert_eq!(
+        preflight.probed().map(|probed| probed.agents),
+        Some(vec![AGENT.to_owned()])
+    );
+}
+
+#[test]
+fn an_unprofiled_agent_whose_default_account_is_signed_out_refuses_naming_that_account() {
+    let cli = ClaudeCli::answering(answers_signed_out);
+    let pools = [pool("max", AGENT, None)];
+    let preflight = claude_code_preflight(&cli, &pools);
+
+    let error = preflight
+        .certify(&host_policy())
+        .expect_err("the default account is signed out, so the pre-flight refuses");
+
+    let text = a_sign_in_refusal(&error);
+    assert!(
+        text.contains(
+            "under pool `max`'s account, as `max` names no credential profile, so it runs under \
+             the agent's default account"
+        ),
+        "the refusal names the agent's default account: {text}"
+    );
+    assert!(
+        text.ends_with("(`claude auth login`)") && !text.contains("CLAUDE_CONFIG_DIR"),
+        "and how to sign it in, with no profile: {text}"
+    );
+    assert_eq!(
+        cli.discoveries(),
+        vec![("p.agent-claude-code.o2".to_owned(), None)],
+        "one discovery, under no profile"
+    );
+    assert!(preflight.ledgers_balance());
+}
+
+#[test]
+fn a_discovery_that_cannot_say_whether_the_account_is_signed_in_certifies() {
+    fn no_json(_profile: Option<&Path>) -> ProcessOutput {
+        answered(1, "error: unknown command 'auth'")
+    }
+    fn timed_out(_profile: Option<&Path>) -> ProcessOutput {
+        ProcessOutput {
+            code: None,
+            timed_out: true,
+            ..answered(0, "")
+        }
+    }
+
+    for (label, auth_status) in [
+        ("no JSON", no_json as fn(Option<&Path>) -> ProcessOutput),
+        ("a timeout", timed_out),
+    ] {
+        for pools in [Vec::new(), two_profiled_pools().to_vec()] {
+            let cli = Arc::new(ClaudeCli::answering(auth_status));
+            let runner = profiled_over(&cli, &pools);
+            let preflight = claude_code_preflight(&*runner, &pools);
+
+            preflight.certify(&host_policy()).unwrap_or_else(|error| {
+                panic!("{label} is an unknown sign-in, which passes: {error}")
+            });
+            assert_eq!(
+                cli.discoveries().len(),
+                pools.len().max(1),
+                "{label}: one discovery per profiled pool, or one under the default account"
+            );
+            assert!(preflight.ledgers_balance(), "{label}");
+        }
+    }
+}
+
+#[test]
+fn a_fresh_runs_probes_refuse_a_signed_out_pool_in_the_resumes_words() {
+    use crate::engine::topology::create::Probes as _;
+
+    let pools = two_profiled_pools();
+    let cli = Arc::new(ClaudeCli::answering(
+        answers_signed_in_under_the_first_profile_only,
+    ));
+    let runner = profiled_over(&cli, &pools);
+    let ledger = Mutex::new(InvocationLedger::new());
+    let pair = crate::engine::topology::create::ProbePair::grant(&ledger);
+    let probes = crate::engine::topology::create::RunnerProbes::new(
+        ShellKind::Bash,
+        PathBuf::from("."),
+        &crate::agent::BuiltinAdapters,
+        String::new(),
+    )
+    .with_pools(&pools);
+
+    let on_fresh = probes
+        .agent(AGENT, &pair.agent_probe(&*runner))
+        .expect_err("the second pool's account is signed out, so the fresh run's probe refuses");
+
+    let text = a_sign_in_refusal(&on_fresh);
+    assert!(text.contains("pool `spare`"), "{text}");
+    assert!(
+        probes.probed_caps().is_empty(),
+        "a refused agent's capabilities are not recorded"
+    );
+    assert_eq!(
+        cli.discoveries()
+            .into_iter()
+            .map(|(identity, _)| identity)
+            .collect::<Vec<_>>(),
+        ["p.agent-claude-code.o2", "p.agent-claude-code.o18"]
+    );
+    assert!(pair.balances(), "every process the fresh probe ran settled");
+
+    let resumed_cli = Arc::new(ClaudeCli::answering(
+        answers_signed_in_under_the_first_profile_only,
+    ));
+    let resumed_runner = profiled_over(&resumed_cli, &pools);
+    let on_resume = claude_code_preflight(&*resumed_runner, &pools)
+        .certify(&host_policy())
+        .expect_err("a resume refuses the same pool");
+    assert_eq!(
+        text,
+        on_resume.to_string(),
+        "one refusal, worded once, on both paths"
+    );
+}
+
+#[test]
+fn a_profiled_pool_on_the_container_runner_is_refused_before_any_discovery() {
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let pools = two_profiled_pools();
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    let error = preflight
+        .certify(&container_policy())
+        .expect_err("a profile on the container runner is refused");
+
+    let text = error.to_string();
+    assert!(
+        text.ends_with(PROFILE_REFUSAL_CLOSING) && text.contains("host runner only"),
+        "the profile refusal, as before: {text}"
+    );
+    assert!(
+        cli.discoveries().is_empty(),
+        "no discovery ran: {:?}",
+        cli.discoveries()
+    );
+    assert!(
+        cli.requests().is_empty(),
+        "nor anything else: {:?}",
+        cli.requests()
+    );
+    assert_eq!(preflight.settlements(), (0, 0), "nothing was registered");
+}
+
+fn a_default_pool_then_a_profiled_spare() -> [Pool; 2] {
+    [
+        pool("max", AGENT, None),
+        pool("spare", AGENT, Some(SECOND_DIRECTORY)),
+    ]
+}
+
+const MAX_DEFAULT_ACCOUNT: &str = concat!(
+    "pool `max`'s account, as `max` names no credential profile, ",
+    "so it runs under the agent's default account"
+);
+
+#[test]
+fn lists_each_account_an_agents_pools_use_once_in_file_order() {
+    let pools = [
+        pool("max", AGENT, None),
+        pool("work", OTHER, Some(THIRD_DIRECTORY)),
+        pool("spare", AGENT, Some(SECOND_DIRECTORY)),
+        pool("again", AGENT, None),
+        pool("twice", AGENT, Some(SECOND_DIRECTORY)),
+    ];
+
+    assert_eq!(
+        Account::of_agent(&pools, AGENT).expect("two accounts are within the cap"),
+        vec![
+            Account::Default {
+                pool: Some("max".to_owned())
+            },
+            Account::Profile {
+                pool: "spare".to_owned(),
+                profile: PathBuf::from(SECOND_DIRECTORY)
+            },
+        ],
+        "the default account, named by the first pool that uses it, then the profile, named by \
+         the first pool that names it; another agent's pool is not one of them"
+    );
+    assert_eq!(
+        Account::of_agent(&pools, "nobody-pools-this").expect("one account is within the cap"),
+        vec![Account::Default { pool: None }],
+        "an agent with no pool in the run uses its default account alone"
+    );
+}
+
+#[test]
+fn refuses_a_first_pools_signed_out_default_account_though_its_profiled_spare_is_signed_in() {
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in_under_a_profile_only));
+    let pools = a_default_pool_then_a_profiled_spare();
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    let error = preflight
+        .certify(&host_policy())
+        .expect_err("the first pool's default account is signed out, so the pre-flight refuses");
+
+    let text = a_sign_in_refusal(&error);
+    assert!(
+        text.contains(&format!("is not signed in under {MAX_DEFAULT_ACCOUNT}; ")),
+        "the refusal names the first pool and the agent's default account: {text}"
+    );
+    assert!(
+        text.ends_with("(`claude auth login`)") && !text.contains("CLAUDE_CONFIG_DIR"),
+        "and how to sign the default account in, with no profile: {text}"
+    );
+    assert!(
+        !text.contains("`spare`") && !text.contains(SECOND_DIRECTORY),
+        "the signed-in spare is not the one named: {text}"
+    );
+    assert_eq!(
+        cli.discoveries(),
+        vec![("p.agent-claude-code.o2".to_owned(), None)],
+        "the default account's discovery reaches the CLI under no profile, at the adapter's own \
+         identity, and refuses there: the spare is not discovered"
+    );
+    assert!(preflight.probed().is_none(), "nothing was certified");
+    assert!(preflight.ledgers_balance(), "{:?}", preflight.running());
+}
+
+#[test]
+fn certifies_a_signed_in_default_account_and_profiled_spare_settling_every_discovery() {
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let pools = a_default_pool_then_a_profiled_spare();
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    preflight
+        .certify(&host_policy())
+        .expect("both accounts the run would use are signed in");
+
+    let identities: Vec<String> = cli
+        .requests()
+        .iter()
+        .map(|request| request.invocation.render())
+        .collect();
+    assert_eq!(
+        identities,
+        [
+            "p.shell.o0",
+            "p.agent-claude-code.o0",
+            "p.agent-claude-code.o1",
+            "p.agent-claude-code.o2",
+            "p.agent-claude-code.o18",
+        ],
+        "the shell, the two capability probes, then the default account's discovery and the \
+         spare's, at an identity of its own"
+    );
+    assert_eq!(
+        cli.discoveries()
+            .into_iter()
+            .map(|(_, profile)| profile)
+            .collect::<Vec<_>>(),
+        vec![None, Some(PathBuf::from(SECOND_DIRECTORY))],
+        "the default account's discovery under no profile, then the spare's under its own"
+    );
+    assert_eq!(
+        preflight.settlements(),
+        (5, 0),
+        "five processes registered and each completed once"
+    );
+    assert!(preflight.running().is_empty(), "{:?}", preflight.running());
+    assert!(preflight.ledgers_balance());
+    assert_eq!(
+        preflight.probed().map(|probed| probed.agents),
+        Some(vec![AGENT.to_owned()])
+    );
+}
+
+#[test]
+fn refuses_a_signed_out_default_account_on_a_fresh_run_in_the_resumes_words() {
+    use crate::engine::topology::create::Probes as _;
+
+    let pools = a_default_pool_then_a_profiled_spare();
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in_under_a_profile_only));
+    let runner = profiled_over(&cli, &pools);
+    let ledger = Mutex::new(InvocationLedger::new());
+    let pair = crate::engine::topology::create::ProbePair::grant(&ledger);
+    let probes = crate::engine::topology::create::RunnerProbes::new(
+        ShellKind::Bash,
+        PathBuf::from("."),
+        &crate::agent::BuiltinAdapters,
+        String::new(),
+    )
+    .with_pools(&pools);
+
+    let on_fresh = probes
+        .agent(AGENT, &pair.agent_probe(&*runner))
+        .expect_err("the first pool's default account is signed out, so the fresh probe refuses");
+
+    let text = a_sign_in_refusal(&on_fresh);
+    assert!(text.contains(MAX_DEFAULT_ACCOUNT), "{text}");
+    assert!(
+        probes.probed_caps().is_empty(),
+        "a refused agent's capabilities are not recorded"
+    );
+    assert_eq!(
+        cli.discoveries(),
+        vec![("p.agent-claude-code.o2".to_owned(), None)],
+        "the default account's discovery refuses, and the spare is not discovered"
+    );
+    assert!(pair.balances(), "every process the fresh probe ran settled");
+
+    let resumed_cli = Arc::new(ClaudeCli::answering(answers_signed_in_under_a_profile_only));
+    let resumed_runner = profiled_over(&resumed_cli, &pools);
+    let on_resume = claude_code_preflight(&*resumed_runner, &pools)
+        .certify(&host_policy())
+        .expect_err("a resume refuses the same account");
+    assert_eq!(
+        text,
+        on_resume.to_string(),
+        "one refusal, worded once, on both paths"
+    );
+}
+
+#[test]
+fn refuses_a_later_unprofiled_pools_signed_out_default_account_discovered_under_no_profile() {
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in_under_a_profile_only));
+    let pools = [
+        pool("max", AGENT, Some(EXISTING_DIRECTORY)),
+        pool("spare", AGENT, None),
+    ];
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    let error = preflight
+        .certify(&host_policy())
+        .expect_err("the later pool's default account is signed out, so the pre-flight refuses");
+
+    let text = a_sign_in_refusal(&error);
+    assert!(
+        text.contains(
+            "is not signed in under pool `spare`'s account, as `spare` names no credential \
+             profile, so it runs under the agent's default account; "
+        ),
+        "the refusal names the later pool and the agent's default account: {text}"
+    );
+    assert!(
+        text.ends_with("(`claude auth login`)") && !text.contains("CLAUDE_CONFIG_DIR"),
+        "and how to sign the default account in, with no profile: {text}"
+    );
+    assert!(
+        !text.contains("`max`") && !text.contains(EXISTING_DIRECTORY),
+        "the signed-in profile is not the one named: {text}"
+    );
+    assert_eq!(
+        cli.discoveries(),
+        vec![
+            (
+                "p.agent-claude-code.o2".to_owned(),
+                Some(PathBuf::from(EXISTING_DIRECTORY))
+            ),
+            ("p.agent-claude-code.o18".to_owned(), None),
+        ],
+        "the later pool's discovery reaches the CLI with no profile, though `profiled` stamps \
+         the agent's first pool's profile on a probe that carries none"
+    );
+    assert!(preflight.ledgers_balance(), "{:?}", preflight.running());
+}
+
+#[test]
+fn discovers_each_account_once_however_many_pools_use_it() {
+    for (label, pools, discovered) in [
+        (
+            "two unprofiled pools",
+            [pool("max", AGENT, None), pool("spare", AGENT, None)],
+            None,
+        ),
+        (
+            "two pools naming one profile",
+            [
+                pool("max", AGENT, Some(EXISTING_DIRECTORY)),
+                pool("spare", AGENT, Some(EXISTING_DIRECTORY)),
+            ],
+            Some(PathBuf::from(EXISTING_DIRECTORY)),
+        ),
+    ] {
+        let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+        let runner = profiled_over(&cli, &pools);
+        let preflight = claude_code_preflight(&*runner, &pools);
+
+        preflight
+            .certify(&host_policy())
+            .unwrap_or_else(|error| panic!("{label}: the one account is signed in: {error}"));
+        assert_eq!(
+            cli.discoveries(),
+            vec![("p.agent-claude-code.o2".to_owned(), discovered)],
+            "{label}: one account, so one discovery"
+        );
+        assert!(preflight.ledgers_balance(), "{label}");
+
+        let signed_out_cli = Arc::new(ClaudeCli::answering(answers_signed_out));
+        let signed_out_runner = profiled_over(&signed_out_cli, &pools);
+        let error = claude_code_preflight(&*signed_out_runner, &pools)
+            .certify(&host_policy())
+            .expect_err("the one account is signed out");
+        let text = a_sign_in_refusal(&error);
+        assert!(
+            text.contains("under pool `max`'s account") && !text.contains("`spare`"),
+            "{label}: the first pool that uses the account names it: {text}"
+        );
+        assert_eq!(
+            signed_out_cli.discoveries().len(),
+            1,
+            "{label}: one discovery, signed out or not"
+        );
+    }
+}
+
+const CODEX: &str = crate::agent::codex::ADAPTER_ID;
+
+#[derive(Debug)]
+struct UnaskedCodex;
+
+impl AgentAdapter for UnaskedCodex {
+    fn id(&self) -> &'static str {
+        CODEX
+    }
+
+    fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
+        Stub(CODEX).probe(runner)
+    }
+
+    fn build(&self, run: &crate::agent::TaskRun) -> Result<CommandSpec, UpstrokeError> {
+        Stub(CODEX).build(run)
+    }
+
+    fn parse(&self, out: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+        Stub(CODEX).parse(out)
+    }
+
+    fn discover(
+        &self,
+        _runner: &dyn Runner,
+        _caps: &Caps,
+    ) -> Result<crate::agent::Discovery, UpstrokeError> {
+        panic!("pre-flight must not ask Codex's sign-in")
+    }
+}
+
+struct UnaskedCodexAdapters;
+
+impl AdapterSource for UnaskedCodexAdapters {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        (id == CODEX).then_some(&UnaskedCodex as &dyn AgentAdapter)
+    }
+}
+
+#[test]
+fn certifies_codex_without_asking_its_sign_in_on_a_resume_and_a_fresh_run() {
+    use crate::engine::topology::create::Probes as _;
+
+    let pools = [pool("work", CODEX, None)];
+    let runner = Recording::default();
+    let preflight = RunPreflight::new(
+        &runner,
+        &UnaskedCodexAdapters,
+        ShellKind::Bash,
+        Path::new("."),
+        vec![CODEX.to_owned()],
+    )
+    .with_pools(&pools);
+
+    preflight
+        .certify(&host_policy())
+        .expect("Codex's sign-in is not checked, so its answering probe certifies it");
+    assert_eq!(
+        preflight.probed().map(|probed| probed.agents),
+        Some(vec![CODEX.to_owned()])
+    );
+    assert_eq!(
+        runner.programs(),
+        vec!["bash".to_owned(), CODEX.to_owned()],
+        "the shell probe and Codex's capability probe, and no discovery"
+    );
+    assert!(preflight.ledgers_balance());
+
+    let fresh_runner = Recording::default();
+    let ledger = Mutex::new(InvocationLedger::new());
+    let pair = crate::engine::topology::create::ProbePair::grant(&ledger);
+    let probes = crate::engine::topology::create::RunnerProbes::new(
+        ShellKind::Bash,
+        PathBuf::from("."),
+        &UnaskedCodexAdapters,
+        String::new(),
+    )
+    .with_pools(&pools);
+
+    probes
+        .agent(CODEX, &pair.agent_probe(&fresh_runner))
+        .expect("a fresh run does not ask Codex's sign-in either");
+    assert_eq!(
+        probes
+            .probed_caps()
+            .into_iter()
+            .map(|(agent, _)| agent)
+            .collect::<Vec<_>>(),
+        vec![CODEX.to_owned()]
+    );
+    assert_eq!(
+        fresh_runner.programs(),
+        vec![CODEX.to_owned()],
+        "Codex's capability probe alone"
+    );
+    assert!(pair.balances());
+}
+
+#[test]
+fn refuses_a_signed_out_claude_code_default_account_that_no_pool_names() {
+    let cli = ClaudeCli::answering(answers_signed_out);
+    let preflight = claude_code_preflight(&cli, &[]);
+
+    let error = preflight
+        .certify(&host_policy())
+        .expect_err("Claude Code's default account is signed out, so the pre-flight refuses");
+
+    let text = a_sign_in_refusal(&error);
+    assert!(
+        text.contains("under its default account, as no pool of this run names it; "),
+        "with no pool for the agent, the refusal names its default account: {text}"
+    );
+    assert!(
+        text.ends_with("(`claude auth login`)"),
+        "and how to sign it in: {text}"
+    );
+    assert!(
+        !text.contains("environment"),
+        "and no environment variable to set: {text}"
+    );
+    assert_eq!(
+        cli.discoveries(),
+        vec![("p.agent-claude-code.o2".to_owned(), None)],
+        "one discovery, under no profile"
+    );
+    assert!(preflight.ledgers_balance());
+}
+
+struct SettingsDependentCli {
+    cli: ClaudeCli,
+    with_settings: fn(Option<&Path>) -> ProcessOutput,
+}
+
+impl SettingsDependentCli {
+    fn answering(
+        without_settings: fn(Option<&Path>) -> ProcessOutput,
+        with_settings: fn(Option<&Path>) -> ProcessOutput,
+    ) -> Self {
+        Self {
+            cli: ClaudeCli::answering(without_settings),
+            with_settings,
+        }
+    }
+
+    fn bare_discoveries(&self) -> usize {
+        self.cli
+            .requests()
+            .iter()
+            .filter(|request| request.command.args == ["auth", "status", "--json"])
+            .count()
+    }
+}
+
+impl crate::runner::contract::tests::InlineRunner for SettingsDependentCli {
+    fn run_inline(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
+        let answered =
+            crate::runner::contract::tests::InlineRunner::run_inline(&self.cli, request)?;
+        if request.command.args != ["auth", "status", "--json"] {
+            return Ok(answered);
+        }
+        Ok((self.with_settings)(request.credential_profile.as_deref()))
+    }
+}
+
+fn settings_dependent_over(cli: &Arc<SettingsDependentCli>, pools: &[Pool]) -> Arc<dyn Runner> {
+    crate::engine::topology::profiled::profiled(Arc::clone(cli) as Arc<dyn Runner>, pools)
+}
+
+const NO_SETTINGS_LOADED: &str = concat!(
+    "reported no signed-in account. The check loads no user, project or local settings, as a ",
+    "worker loads none, so a credential that only a settings file supplies does not count. ",
+    "Nothing was spawned"
+);
+
+#[test]
+fn certifies_an_account_signed_in_with_no_settings_loaded_on_a_resume_and_a_fresh_run() {
+    for (label, pools) in [
+        ("the default account", vec![pool("max", AGENT, None)]),
+        ("two profiles", two_profiled_pools().to_vec()),
+    ] {
+        let cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_in,
+            answers_signed_out,
+        ));
+        let runner = settings_dependent_over(&cli, &pools);
+        let preflight = claude_code_preflight(&*runner, &pools);
+        preflight.certify(&host_policy()).unwrap_or_else(|error| {
+            panic!("{label}: signed in with no settings loaded, as a worker runs, passes: {error}")
+        });
+        assert_eq!(
+            cli.cli.discoveries().len(),
+            pools.len(),
+            "{label}: one discovery per account, each with no settings loaded"
+        );
+        assert_eq!(
+            cli.bare_discoveries(),
+            0,
+            "{label}: and none that loads them"
+        );
+        assert!(preflight.ledgers_balance(), "{label}");
+
+        let fresh_cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_in,
+            answers_signed_out,
+        ));
+        let fresh_runner = settings_dependent_over(&fresh_cli, &pools);
+        let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &pools);
+        on_fresh.unwrap_or_else(|error| panic!("{label}: a fresh run certifies it too: {error}"));
+        assert_eq!(
+            fresh_cli.cli.discoveries().len(),
+            pools.len(),
+            "{label}: the same discoveries on the fresh run"
+        );
+        assert_eq!(fresh_cli.bare_discoveries(), 0, "{label}");
+        assert!(balanced, "{label}");
+    }
+}
+
+#[test]
+fn refuses_an_account_signed_in_only_with_its_settings_loaded_on_a_resume_and_a_fresh_run() {
+    for (label, pools, account, profile) in [
+        (
+            "the default account",
+            vec![pool("max", AGENT, None)],
+            MAX_DEFAULT_ACCOUNT.to_owned(),
+            None,
+        ),
+        (
+            "a profile",
+            two_profiled_pools().to_vec(),
+            format!(
+                "pool `max`'s account, the credential profile directory `{EXISTING_DIRECTORY}`"
+            ),
+            Some(PathBuf::from(EXISTING_DIRECTORY)),
+        ),
+    ] {
+        let cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_out,
+            answers_signed_in,
+        ));
+        let runner = settings_dependent_over(&cli, &pools);
+        let preflight = claude_code_preflight(&*runner, &pools);
+        let on_resume = preflight
+            .certify(&host_policy())
+            .expect_err("signed in only with settings loaded, which a worker loads none of");
+
+        let text = a_sign_in_refusal(&on_resume);
+        assert!(
+            text.contains(&format!("is not signed in under {account}; ")),
+            "{label}: the refusal names the account: {text}"
+        );
+        assert!(
+            text.contains(NO_SETTINGS_LOADED),
+            "{label}: and says which settings the check loads: {text}"
+        );
+        assert_eq!(
+            cli.cli.discoveries(),
+            vec![("p.agent-claude-code.o2".to_owned(), profile.clone())],
+            "{label}: one discovery, with no settings loaded, and it refuses"
+        );
+        assert_eq!(
+            cli.bare_discoveries(),
+            0,
+            "{label}: no discovery loaded the settings"
+        );
+        assert!(
+            preflight.probed().is_none(),
+            "{label}: nothing was certified"
+        );
+        assert!(preflight.ledgers_balance(), "{label}");
+
+        let fresh_cli = Arc::new(SettingsDependentCli::answering(
+            answers_signed_out,
+            answers_signed_in,
+        ));
+        let fresh_runner = settings_dependent_over(&fresh_cli, &pools);
+        let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &pools);
+        assert_eq!(
+            on_fresh
+                .expect_err("a fresh run refuses the same account")
+                .to_string(),
+            text,
+            "{label}: one refusal, worded once, on both paths"
+        );
+        assert_eq!(
+            fresh_cli.cli.discoveries(),
+            vec![("p.agent-claude-code.o2".to_owned(), profile)],
+            "{label}: the same discovery on the fresh run"
+        );
+        assert_eq!(fresh_cli.bare_discoveries(), 0, "{label}");
+        assert!(
+            balanced,
+            "{label}: every process the fresh probe ran settled"
+        );
+    }
+}
+
+struct UnresolvedDiscovery(ClaudeCli);
+
+impl crate::runner::contract::tests::InlineRunner for UnresolvedDiscovery {
+    fn run_inline(
+        &self,
+        request: &RunnerRequest,
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
+        let answered = crate::runner::contract::tests::InlineRunner::run_inline(&self.0, request)?;
+        if request.command.args != ["--setting-sources", "", "auth", "status", "--json"] {
+            return Ok(answered);
+        }
+        Err(crate::runner::RunnerError::unresolved(
+            &request.invocation,
+            UpstrokeError::Refused {
+                message: "the boundary could not establish that this process ended".to_owned(),
+            },
+        ))
+    }
+}
+
+fn unresolved_over(cli: &Arc<UnresolvedDiscovery>, pools: &[Pool]) -> Arc<dyn Runner> {
+    crate::engine::topology::profiled::profiled(Arc::clone(cli) as Arc<dyn Runner>, pools)
+}
+
+#[test]
+fn returns_a_first_discoverys_unresolved_error_and_discovers_no_second_account() {
+    use crate::engine::topology::create::Probes as _;
+
+    let pools = a_default_pool_then_a_profiled_spare();
+    let cli = Arc::new(UnresolvedDiscovery(ClaudeCli::answering(answers_signed_in)));
+    let runner = unresolved_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+
+    let error = preflight
+        .certify(&host_policy())
+        .expect_err("the first discovery did not run to an answer, so the pre-flight refuses");
+
+    let text = error.to_string();
+    assert!(
+        matches!(error, UpstrokeError::Refused { .. }),
+        "a refusal: {text}"
+    );
+    assert!(
+        text.starts_with(&format!(
+            "pre-flight: the `{AGENT}` CLI's sign-in discovery: "
+        )),
+        "the discovery's own error, in a failed probe's shape: {text}"
+    );
+    assert!(
+        !text.contains("is not signed in under"),
+        "not a sign-in refusal: {text}"
+    );
+    assert_eq!(
+        cli.0.discoveries(),
+        vec![("p.agent-claude-code.o2".to_owned(), None)],
+        "the first account's discovery alone: the spare is not discovered"
+    );
+    assert_eq!(
+        preflight.running(),
+        vec!["p.agent-claude-code.o2".to_owned()],
+        "the unresolved discovery stays registered"
+    );
+    assert!(
+        !preflight.ledgers_balance(),
+        "so the ledger does not balance"
+    );
+    assert!(preflight.probed().is_none(), "nothing was certified");
+
+    let fresh_cli = Arc::new(UnresolvedDiscovery(ClaudeCli::answering(answers_signed_in)));
+    let fresh_runner = unresolved_over(&fresh_cli, &pools);
+    let ledger = Mutex::new(InvocationLedger::new());
+    let pair = crate::engine::topology::create::ProbePair::grant(&ledger);
+    let probes = crate::engine::topology::create::RunnerProbes::new(
+        ShellKind::Bash,
+        PathBuf::from("."),
+        &crate::agent::BuiltinAdapters,
+        String::new(),
+    )
+    .with_pools(&pools);
+
+    let on_fresh = probes
+        .agent(AGENT, &pair.agent_probe(&*fresh_runner))
+        .expect_err("the fresh run's first discovery did not run to an answer either");
+
+    let fresh_text = on_fresh.to_string();
+    assert!(
+        !fresh_text.contains("is not signed in under"),
+        "not a sign-in refusal: {fresh_text}"
+    );
+    assert!(
+        text.contains(&fresh_text),
+        "the fresh run returns the discovery's error, which the resume words as a failed \
+         probe: {fresh_text} / {text}"
+    );
+    assert_eq!(
+        fresh_cli.0.discoveries(),
+        vec![("p.agent-claude-code.o2".to_owned(), None)],
+        "the first account's discovery alone, on the fresh run too"
+    );
+    let running: Vec<String> = ledger
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .running()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(running, vec!["p.agent-claude-code.o2".to_owned()]);
+    assert!(!pair.balances());
+    assert!(
+        probes.probed_caps().is_empty(),
+        "a refused agent's capabilities are not recorded"
+    );
+}
+
+fn scratch_profiles(
+    tag: &str,
+    count: usize,
+) -> (crate::rundir::scratch_tree::ScratchTree, Vec<Pool>) {
+    let parent = std::env::temp_dir();
+    let tree = crate::rundir::scratch_tree::acquire(&parent, tag).unwrap_or_else(|refusal| {
+        panic!(
+            "a scratch tree for `{tag}` under {}: {refusal:?}",
+            parent.display()
+        )
+    });
+    let pools = (0..count)
+        .map(|index| {
+            let directory = tree.path().join(format!("profile-{index:02}"));
+            crate::rundir::create_private_dir(&directory, &mut crate::rundir::NoHooks)
+                .expect("a profile directory under the scratch tree");
+            let profile = directory.to_str().expect("a UTF-8 scratch path");
+            pool(&format!("pool-{index:02}"), AGENT, Some(profile))
+        })
+        .collect();
+    (tree, pools)
+}
+
+fn on_a_fresh_run(
+    runner: &dyn Runner,
+    pools: &[Pool],
+) -> (Result<Vec<(String, Caps)>, UpstrokeError>, bool) {
+    use crate::engine::topology::create::Probes as _;
+
+    let ledger = Mutex::new(InvocationLedger::new());
+    let pair = crate::engine::topology::create::ProbePair::grant(&ledger);
+    let probes = crate::engine::topology::create::RunnerProbes::new(
+        ShellKind::Bash,
+        PathBuf::from("."),
+        &crate::agent::BuiltinAdapters,
+        String::new(),
+    )
+    .with_pools(pools);
+    let outcome = probes
+        .agent(AGENT, &pair.agent_probe(runner))
+        .map(|()| probes.probed_caps());
+    (outcome, pair.balances())
+}
+
+#[test]
+fn lists_sixteen_accounts_and_refuses_a_seventeenth_distinct_one() {
+    let profiled: Vec<Pool> = (0..=MAX_ACCOUNTS_PER_AGENT)
+        .map(|index| {
+            let profile = format!("{EXISTING_DIRECTORY}/profile-{index:02}");
+            pool(&format!("pool-{index:02}"), AGENT, Some(&profile))
+        })
+        .collect();
+    let first = |count: usize| -> Vec<Pool> { profiled.iter().take(count).cloned().collect() };
+
+    let sixteen = first(MAX_ACCOUNTS_PER_AGENT);
+    assert_eq!(
+        Account::of_agent(&sixteen, AGENT)
+            .expect("sixteen accounts are within the cap")
+            .len(),
+        MAX_ACCOUNTS_PER_AGENT
+    );
+    let mut again = sixteen.clone();
+    again.extend(sixteen.iter().cloned());
+    assert_eq!(
+        Account::of_agent(&again, AGENT)
+            .expect("pools that repeat a listed account add none")
+            .len(),
+        MAX_ACCOUNTS_PER_AGENT
+    );
+    let mut with_default = first(MAX_ACCOUNTS_PER_AGENT - 1);
+    with_default.push(pool("max", AGENT, None));
+    assert_eq!(
+        Account::of_agent(&with_default, AGENT)
+            .expect("fifteen profiles and the default account are sixteen")
+            .len(),
+        MAX_ACCOUNTS_PER_AGENT
+    );
+    let mut other_agent = sixteen.clone();
+    other_agent.push(pool("work", OTHER, Some(THIRD_DIRECTORY)));
+    assert!(
+        Account::of_agent(&other_agent, AGENT).is_ok(),
+        "another agent's pool is not one of this agent's accounts"
+    );
+
+    let mut and_default = sixteen.clone();
+    and_default.push(pool("max", AGENT, None));
+    for (label, pools) in [
+        ("seventeen profiles", profiled.clone()),
+        ("sixteen profiles and the default account", and_default),
+    ] {
+        let error = Account::of_agent(&pools, AGENT)
+            .expect_err("a seventeenth distinct account is over the cap");
+        let text = error.to_string();
+        assert!(
+            matches!(error, UpstrokeError::Refused { .. }),
+            "{label}: a refusal: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "agent `{AGENT}`'s pools use more than {MAX_ACCOUNTS_PER_AGENT} distinct accounts"
+            )) && text.contains(&format!(
+                "at most {MAX_ACCOUNTS_PER_AGENT} accounts per agent"
+            )),
+            "{label}: the refusal names the agent and the cap: {text}"
+        );
+    }
+}
+
+#[test]
+fn refuses_seventeen_profiles_with_no_discovery_and_certifies_sixteen() {
+    let (_tree, pools) = scratch_profiles("preflight-account-cap", MAX_ACCOUNTS_PER_AGENT + 1);
+    let sixteen: Vec<Pool> = pools.iter().take(MAX_ACCOUNTS_PER_AGENT).cloned().collect();
+
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+    let on_resume = preflight
+        .certify(&host_policy())
+        .expect_err("seventeen distinct accounts are over the cap");
+    let text = on_resume.to_string();
+    assert!(
+        matches!(on_resume, UpstrokeError::Refused { .. }),
+        "a refusal: {text}"
+    );
+    assert!(
+        text.starts_with(&format!(
+            "pre-flight: agent `{AGENT}`'s pools use more than 16 distinct accounts"
+        )) && text.contains("at most 16 accounts per agent"),
+        "the refusal names the agent and the cap: {text}"
+    );
+    assert!(
+        text.contains("Nothing was spawned for the run and no event was appended")
+            && !text.contains("resumable")
+            && !text.contains("probed inside"),
+        "in words true on both paths: {text}"
+    );
+    assert!(
+        cli.discoveries().is_empty(),
+        "no discovery ran: {:?}",
+        cli.discoveries()
+    );
+    assert!(preflight.probed().is_none(), "nothing was certified");
+    assert!(preflight.ledgers_balance(), "{:?}", preflight.running());
+
+    let fresh_cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let fresh_runner = profiled_over(&fresh_cli, &pools);
+    let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &pools);
+    assert_eq!(
+        on_fresh
+            .expect_err("a fresh run refuses the same pools")
+            .to_string(),
+        text,
+        "one refusal, worded once, on both paths"
+    );
+    assert!(
+        fresh_cli.discoveries().is_empty(),
+        "no discovery ran on the fresh run: {:?}",
+        fresh_cli.discoveries()
+    );
+    assert!(balanced, "every process the fresh probe ran settled");
+
+    let expected: Vec<Option<PathBuf>> = sixteen
+        .iter()
+        .map(|pool| pool.profile.as_ref().map(PathBuf::from))
+        .collect();
+
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let runner = profiled_over(&cli, &sixteen);
+    let preflight = claude_code_preflight(&*runner, &sixteen);
+    preflight
+        .certify(&host_policy())
+        .expect("sixteen signed-in accounts are within the cap");
+    assert_eq!(
+        cli.discoveries()
+            .into_iter()
+            .map(|(_, profile)| profile)
+            .collect::<Vec<_>>(),
+        expected,
+        "sixteen discoveries, each under its own pool's profile, in file order"
+    );
+    assert!(preflight.ledgers_balance(), "{:?}", preflight.running());
+
+    let fresh_cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let fresh_runner = profiled_over(&fresh_cli, &sixteen);
+    let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &sixteen);
+    on_fresh.expect("a fresh run certifies the same sixteen");
+    assert_eq!(
+        fresh_cli
+            .discoveries()
+            .into_iter()
+            .map(|(_, profile)| profile)
+            .collect::<Vec<_>>(),
+        expected,
+        "sixteen discoveries on the fresh run too"
+    );
+    assert!(balanced);
+}
+
+#[test]
+fn discovers_once_for_a_thousand_pools_naming_one_profile() {
+    let pools: Vec<Pool> = (0..1_000)
+        .map(|index| pool(&format!("pool-{index:04}"), AGENT, Some(EXISTING_DIRECTORY)))
+        .collect();
+
+    let cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let runner = profiled_over(&cli, &pools);
+    let preflight = claude_code_preflight(&*runner, &pools);
+    preflight
+        .certify(&host_policy())
+        .expect("the one account is signed in");
+    assert_eq!(
+        cli.discoveries(),
+        vec![(
+            "p.agent-claude-code.o2".to_owned(),
+            Some(PathBuf::from(EXISTING_DIRECTORY))
+        )],
+        "one account, so one discovery, under its profile"
+    );
+    assert!(preflight.ledgers_balance());
+
+    let fresh_cli = Arc::new(ClaudeCli::answering(answers_signed_in));
+    let fresh_runner = profiled_over(&fresh_cli, &pools);
+    let (on_fresh, balanced) = on_a_fresh_run(&*fresh_runner, &pools);
+    on_fresh.expect("a fresh run certifies the same pools");
+    assert_eq!(
+        fresh_cli.discoveries(),
+        vec![(
+            "p.agent-claude-code.o2".to_owned(),
+            Some(PathBuf::from(EXISTING_DIRECTORY))
+        )],
+        "one discovery on the fresh run too"
+    );
+    assert!(balanced);
+}
+
 #[test]
 fn the_refusal_notes_keep_a_probe_whose_process_is_unresolved() {
     const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/preflight.md");

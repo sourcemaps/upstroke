@@ -35,6 +35,27 @@ Character for character is the point. `- run: echo cargo clippy ...` is
 `contains` check while the job merely echoes, succeeds, and lets the
 aggregate settle green over a platform Clippy never examined.
 
+It is the Linux and the Windows gate, each run natively on the runner whose
+tuple it compiles. The macOS gate is [`CLIPPY_GATE_MACOS_CROSS`].
+
+## `pub(super) const CLIPPY_GATE_MACOS_CROSS: &str =`
+
+The macOS Clippy gate: [`CLIPPY_GATE`] with `--target aarch64-apple-darwin`,
+run on `ubuntu-latest`. `cfg` follows the target, not the host, so a Linux
+Clippy for that tuple evaluates every `#[cfg(target_os = "macos")]` region of
+the package's target code as a Mac would. A build script or a proc-macro is a
+host unit and compiles for Linux even under `--target`, so the package has
+none: `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
+refuses one, and adding one means restoring a native `macos-latest` Clippy and
+MSRV leg. `lint (macos)` ran on `macos-latest` until GitHub's cap of five
+macOS jobs at once for the account met seven per run -- this leg, an `msrv`
+entry and the five macOS test legs -- and run 45175187088 showed each macOS
+job starting as another ended. The five test legs still run natively.
+
+Dropping the flag leaves a gate that is still green and still exact text for
+the Linux one: two jobs then Clippy the Linux tuple and none the macOS
+regions. Measured, `MUT-GATE-CROSS-TARGET-DROPPED`.
+
 ## `pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";`
 
 The command that builds and executes this file's fixtures, character for
@@ -738,12 +759,14 @@ was the guest's 20-minute job. Measured, `MUT-TEST-CAPABILITY-TIMEOUT-DROPPED`,
 The formatter gate and the six shell gates the `lint` job runs from the
 repository root, character for character.
 
-## `pub(super) const GATE_SCRIPTS: [&str; 8] = [`
+## `pub(super) const GATE_SCRIPTS: [&str; 10] = [`
 
-Every script a gate job may run. A union across the three gate jobs rather
-than a set per job: `lint (macos)` running the formatter would be
-redundant, not an escape, and the one command that must sit on exactly one
-job, the Windows build witness, is pinned to its carrier separately.
+Every script a gate job may run, the native and the macOS cross Clippy gate
+among them. A union across the three gate jobs rather than a set per job:
+`lint (macos)` running the formatter would be redundant, not an escape, and
+the one command that must sit on exactly one job, the Windows build witness,
+is pinned to its carrier separately; which gate a job is, is decided by its
+runner and its Clippy line together.
 
 ## `pub(super) const PINNED_ACTIONS: [&str; 4] = [`
 
@@ -773,6 +796,11 @@ Measured, `MUT-CACHE-CMD-FORMAT`.
 interpreter it puts on PATH; whether that one is acceptable is the gate's
 to decide, and it accepts CPython 3.12 only.
 
+`dtolnay/rust-toolchain` is given `components`, `targets` and `toolchain`.
+`targets` installs the standard library of a tuple other than the runner's,
+which the macOS cross gate and the `msrv` entries need; its values are held
+to [`TOOLCHAIN_TARGETS`], as `components`' are to [`TOOLCHAIN_COMPONENTS`].
+
 ## `pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];`
 
 The `components` values the toolchain action may be given.
@@ -783,6 +811,16 @@ input and interpolates it into a later Bash line, so a value carrying
 Clippy, checks out another tree, and exits zero — through an allowlisted
 action at a pinned commit with an allowlisted input name. Measured,
 `MUT-COMPONENTS-INJECTED`.
+
+## `pub(super) const TOOLCHAIN_TARGETS: [&str; 2] = ["aarch64-apple-darwin", MSRV_TOOLCHAIN_TARGETS];`
+
+The `targets` values the toolchain action may be given: the macOS tuple the
+cross gate names, and [`MSRV_TOOLCHAIN_TARGETS`], the `msrv` entry's own.
+The values are pinned for the reason `components`' are: the action
+interpolates this input into the same later Bash line. Which value a job
+must give is pinned per job on top of this set: `[gate-toolchain-target]`
+for a gate whose command carries `--target`, `[msrv-job-toolchain]` for the
+floor.
 
 ## `pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";`
 
@@ -1294,6 +1332,25 @@ leg compiles a dependency set no release ships and reports green over a floor
 it never tested. `CODING_STANDARDS.md` §2 and `CONTRIBUTING.md` both publish
 the command with the flag.
 
+`--target ${{ matrix.target }}` is the other half of the line. The job checks
+the floor for the three targets, one `include:` entry apiece, and the macOS
+entry runs on `ubuntu-latest` for the reason [`CLIPPY_GATE_MACOS_CROSS`]
+gives: the five-job macOS cap, and run 45175187088. Without the flag each
+entry checks its runner's own tuple, so the macOS entry compiles the Linux
+regions a second time and none of its own. Measured,
+`MUT-MSRV-COMMAND-UNTARGETED`.
+
+## `pub(super) const MSRV_ENTRY_KEYS: [&str; 2] = ["os", "target"];`
+
+The keys of each `msrv` `include:` entry, with the matrix's one key
+([`MSRV_MATRIX_FIELDS`]), the job's `runs-on:` ([`MSRV_RUNS_ON`]) and the
+toolchain step's `targets:` ([`MSRV_TOOLCHAIN_TARGETS`]). The entries are the
+pairs `(check_runner, triple)` over [`CI_TARGETS`], each once; an axis or an
+`exclude:` beside `include:` changes which combinations run, so `matrix:`
+holds `include:` alone. Measured, `MUT-MSRV-MATRIX-NARROWED`,
+`MUT-MSRV-MATRIX-EXCLUDED`, `MUT-MSRV-CROSS-TARGET-DROPPED` and
+`MUT-MSRV-TOOLCHAIN-TARGET-DROPPED`.
+
 ## `pub(super) const RUSTFLAGS_KEY: &str = "RUSTFLAGS";`
 
 The workflow-scope compiler flags, and the two names that decide what any
@@ -1363,9 +1420,11 @@ rather than a finding.
 
 The fields a step of a *gate* job may declare. Same reasoning, and `env:` is
 absent for a reason of its own: a step-level environment is enough to
-retarget the compile the gate performs -- `CARGO_BUILD_TARGET` on the macOS
-leg lints a target no `#[cfg(target_os = "macos")]` body belongs to, while
-the `run:` scalar still matches character for character. Measured,
+retarget the compile the gate performs -- `CARGO_BUILD_TARGET` on the Windows
+leg lints a target no `#[cfg(windows)]` body belongs to, while the `run:`
+scalar still matches character for character. `lint (macos)` names its tuple
+with `--target`, which Cargo takes over the variable, so the measured row
+stands on `lint (windows)`. Measured,
 `MUT-GATE-STEP-RETARGETED`. The steps that carry an `env:` outside the
 aggregate are steps of the two suite-running jobs -- the suite step of the
 `test` job and of [`TEST_WINDOWS_HOSTED_JOB`], with the capture and
@@ -1619,7 +1678,9 @@ The shell the aggregate's script needs. It is written in bash -- `[[ ]]` and
 
 ## `pub(super) struct CiTarget {`
 
-A runner CI uses, the target it compiles, and the shell its `run:` steps get.
+A target CI compiles, the runner whose test legs run it, the runner and the
+command of its Clippy gate and its MSRV check, and the shell its `run:` steps
+get.
 
 The tuple is the load-bearing half. What discharges a platform's clause is
 not a job *name* but the target whose `#[cfg(...)]` bodies that job compiles,
@@ -1628,11 +1689,32 @@ invocations actually set rather than collecting the names inside them.
 
 ## `pub(super) struct CiTarget` › `pub(super) runner: &'static str,`
 
-The `runs-on:` value.
+The `runs-on:` value of the test legs that compile and run this target
+natively, and the label the cfg census in `cfg.rs` reports a predicate's
+compilers by. For macOS it stays `macos-latest`: the five test legs run there.
+
+## `pub(super) struct CiTarget` › `pub(super) check_runner: &'static str,`
+
+The `runs-on:` value of the jobs that run this target's Clippy gate and its
+`msrv` entry. Linux and Windows check on their own runners; macOS checks on
+`ubuntu-latest`, by tuple, because GitHub runs at most five macOS jobs at
+once for the account and each run asked for seven (run 45175187088). The
+gate's shell is resolved for this runner, not for `runner`. Measured,
+`MUT-GATE-RUNNER-DRIFT`.
+
+## `pub(super) struct CiTarget` › `pub(super) clippy_gate: &'static str,`
+
+The exact `run:` line of this target's Clippy gate: [`CLIPPY_GATE`] where the
+check runner builds the tuple by default, [`CLIPPY_GATE_MACOS_CROSS`] for
+macOS. Where it carries `--target <triple>`, the gate job's toolchain step
+must install that tuple (`[gate-toolchain-target]`), and
+`every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`
+holds the triple to `triple`. Measured, `MUT-GATE-TOOLCHAIN-TARGET-DROPPED`.
 
 ## `pub(super) struct CiTarget` › `pub(super) triple: &'static str,`
 
-The target tuple that runner's stable toolchain builds by default.
+The target tuple that `runner`'s stable toolchain builds by default, and the
+one the target's Clippy gate and `msrv` entry compile.
 
 ## `pub(super) struct CiTarget` › `pub(super) default_shell: &'static str,`
 

@@ -2219,6 +2219,43 @@ root `workspace.default-members = [...]` are one table to Cargo and three
 different strings to a line scan, which is how the first two versions of
 this check read and how each was shown a spelling it missed.
 
+## `fn host_unit_complaints(root: &Path) -> Vec<String> {`
+
+The units Cargo compiles for the host rather than for `--target`, as the
+package at `root` declares them: a `build.rs` at its root, which Cargo
+builds as a build script unless `[package] build` is `false`; any other
+`[package] build`, which declares one; `[lib] proc-macro = true` or
+`proc_macro = true`, or a `[lib] crate-type` (or `crate_type`) list that
+names `proc-macro`, which Cargo treats the same way; and a `[workspace]`
+table, under which another member could be any of these. One complaint per
+unit found, each naming its cause. The manifest goes through TOML's parser,
+as the workspace check above does, so no spelling of a key hides it.
+
+## `fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {`
+
+The package has no host unit, and this is what keeps the macOS cross checks
+complete.
+
+Since #412, `lint (macos)` and the macOS `msrv` entry run on `ubuntu-latest`
+with `--target aarch64-apple-darwin` rather than on a Mac. `cfg` follows
+the target for the package's target code, so Clippy and the MSRV check see
+every `#[cfg(target_os = "macos")]` region of it as a Mac would. A host
+unit -- a build script or a proc-macro -- compiles for the host instead,
+which there is Linux: its macOS branches would be neither linted nor
+compiled at the MSRV, and both legs would still pass. Absence is the
+contract, as for the files above: adding a host unit is a deliberate act,
+and the same change restores a native `macos-latest` Clippy and MSRV leg
+(`PR412-MACOS-HOST-UNITS-UNLINTED`).
+
+## `fn no_repository_file_host_unit_check_names_each_host_unit() {`
+
+The check's own witness. The live tree has none of the four, so the test
+above would pass as well against a helper that read none of them. Each
+fixture here declares one host unit and must draw exactly one complaint,
+naming its cause; a plain package, a `build.rs` that `build = false`
+switches off, and a library whose `crate-type` names no `proc-macro`, are
+the controls and must draw none.
+
 ## `const WINDOWS_SUITE_TIMES: &str = "-Z unstable-options --report-time";`
 
 What the Windows shards hand each test harness after the leg's selection,
@@ -3069,7 +3106,12 @@ The MSRV leg checks the floor the manifest publishes, on every platform.
 
 Four claims. Three were held by nothing at all before this test: that the leg
 is enabled and unabsolved, that its command is the documented one *including*
-`--locked`, and that its matrix is every supported runner. The fourth, the
+`--locked`, and that its matrix is every supported target. The matrix is one
+`include:` entry per target of [`CI_TARGETS`], each on that target's
+`check_runner` and compiling its tuple with `--target ${{ matrix.target }}`:
+Linux and Windows on their own runners, macOS from `ubuntu-latest` by triple,
+because GitHub runs at most five macOS jobs at once for the account and each
+run asked for seven (run 45175187088). The fourth, the
 toolchain, was held loosely -- `.github/scripts/test-docs-consistency.sh`'s C2
 accepts `rust-version` "or a patch release of it" -- and is held exactly here.
 It is derived from the manifest and quoted from it on failure, because a
@@ -3220,8 +3262,19 @@ aggregate makes that gate required.
 The domain is derived from the tree rather than listed here: a written-down
 platform list is one nothing forces an author to extend, which is what the
 previous repair of this test shipped. The two halves join at the target
-tuple -- [`cfg_regions`] decides which runners compile each body, and the
-workflow contract requires a gate job whose `runs-on:` is that runner.
+tuple -- [`cfg_regions`] decides which runners compile each body, naming a
+target by the runner its test legs use, and the workflow contract requires,
+for each target, a gate job whose `runs-on:` is the target's `check_runner`
+and which runs its `clippy_gate`. Linux and Windows are linted natively.
+`lint (macos)` runs on `ubuntu-latest` with `--target aarch64-apple-darwin`:
+`cfg` follows the target, not the host, so it evaluates every
+`#[cfg(target_os = "macos")]` region of the package's target code as a Mac
+would; a host unit -- a build script or a proc-macro -- would compile for
+Linux, and
+`no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
+refuses one, and it left `macos-latest` because GitHub runs at most five
+macOS jobs at once for the account and each run asked for seven (run
+45175187088).
 
 **Why this is one test and not three.** `PR5D-MSVC-CLIPPY-NEVER-RUN` and
 `PR5-MACOS-CLIPPY-NEVER-RUN` are the same defect on two platforms, found
@@ -3245,6 +3298,12 @@ read them all as unconditional.
 Each leg is load-bearing, with a witness. A runner no body needs is a job
 this contract would keep demanding for no reason; a body only one runner
 compiles is why that runner's leg cannot be dropped.
+
+And each gate compiles the tuple the census credits it with: a gate that
+names no `--target` runs on the target's own runner, and one that does names
+the target's `triple`. Without it a `clippy_gate` naming another tuple would
+satisfy the workflow contract while the census still counted the macOS
+regions as linted.
 
 ## `pub(crate) struct CrateUnderTest {`
 

@@ -112,6 +112,39 @@ impl PreflightIdentities {
     pub fn agent(agent: &str, ordinal: u32) -> Result<InvocationId, UpstrokeError> {
         InvocationId::probe(ProbeTarget::Agent(AgentId::new(agent)), ordinal)
     }
+
+    pub const FURTHER_POOL_STRIDE: u32 = 16;
+
+    pub fn further_pool(
+        agent: &str,
+        further: u32,
+        ordinal: u32,
+    ) -> Result<InvocationId, UpstrokeError> {
+        let refused = |why: &str| UpstrokeError::Refused {
+            message: format!(
+                "agent `{agent}`'s probe ordinal {ordinal} under further pool {further} has no \
+                 identity of its own: {why}"
+            ),
+        };
+        if further == 0 {
+            return Err(refused(
+                "further pools count from 1, and the agent's first pool keeps the adapter's own \
+                 identities",
+            ));
+        }
+        if ordinal >= Self::FURTHER_POOL_STRIDE {
+            return Err(refused(&format!(
+                "each pool's ordinals are {} wide, and an ordinal that wide would share an \
+                 identity with the next pool's",
+                Self::FURTHER_POOL_STRIDE
+            )));
+        }
+        let shifted = further
+            .checked_mul(Self::FURTHER_POOL_STRIDE)
+            .and_then(|base| base.checked_add(ordinal))
+            .ok_or_else(|| refused("the shifted ordinal does not fit in a `u32`"))?;
+        Self::agent(agent, shifted)
+    }
 }
 
 #[must_use]
@@ -1152,6 +1185,46 @@ mod tests {
             );
         }
         assert!(PreflightIdentities::agent("claude-code_1", 0).is_ok());
+    }
+
+    #[test]
+    fn a_further_pools_probes_take_a_block_of_ordinals_of_their_own() {
+        let stride = PreflightIdentities::FURTHER_POOL_STRIDE;
+        let own: Vec<InvocationId> = (0..stride)
+            .map(|ordinal| PreflightIdentities::agent("claude-code", ordinal).expect("own"))
+            .collect();
+        let mut seen: std::collections::BTreeSet<String> =
+            own.iter().map(InvocationId::render).collect();
+        for further in 1..=3 {
+            for ordinal in 0..stride {
+                let id = PreflightIdentities::further_pool("claude-code", further, ordinal)
+                    .unwrap_or_else(|error| panic!("pool {further}, ordinal {ordinal}: {error}"));
+                assert_eq!(
+                    id,
+                    PreflightIdentities::agent("claude-code", further * stride + ordinal)
+                        .expect("the shifted probe"),
+                    "a further pool's probe is the same agent's probe, at a shifted ordinal"
+                );
+                assert!(is_slotted(&id), "and slotted, as every agent probe is");
+                assert!(
+                    seen.insert(id.render()),
+                    "`{id}` collides with an identity already minted"
+                );
+            }
+        }
+        assert_eq!(
+            PreflightIdentities::further_pool("claude-code", 1, 2)
+                .expect("Claude Code's discovery, under the first further pool")
+                .render(),
+            "p.agent-claude-code.o18"
+        );
+
+        for (further, ordinal) in [(0, 2), (1, stride), (u32::MAX, 0)] {
+            assert!(
+                PreflightIdentities::further_pool("claude-code", further, ordinal).is_err(),
+                "further pool {further}, ordinal {ordinal} was given an identity"
+            );
+        }
     }
 
     fn probe(agent: &str, ordinal: u32) -> InvocationId {
