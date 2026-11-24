@@ -79,15 +79,73 @@ string by construction.
 
 ## `impl AgentAdapter for ClaudeCodeAdapter` › `fn discover`
 
-`claude auth status --json` — a zero-spend auth probe that handles no
-token and reads no credential file: the CLI answers about itself, and
-this reads its answer.
+`claude --setting-sources "" auth status --json` — a zero-spend auth probe
+that handles no token and reads no credential file: the CLI answers about
+itself, and this reads its answer. Its ordinal (`probe_ordinal::AUTH_STATUS`)
+and timeout ([`PROBE_TIMEOUT`]) are the ones the bare `auth status --json`
+had.
+
+**It asks with no settings loaded, as a worker runs.** The first two
+arguments are [`settings_isolation`]'s, the pair [`build_args`] gives every
+worker, so the CLI answers with no user, project or local settings loaded,
+which is how each worker the answer vouches for runs. No `--settings` is
+passed. A worker's `--settings` file is [`permission_settings`]' JSON, whose
+only top-level key is `permissions`
+(`permission_settings_carry_permissions_as_their_only_top_level_key`), so it
+supplies no credential, and leaving it out changes nothing the CLI could
+sign in with. `discovery_asks_with_exactly_the_settings_arguments_a_worker_is_given`
+compares this request against `build_args`' own output, not a copy of it.
+
+Why, from round three of #408's review, which raised two findings. First,
+the discovery was a bare `auth status --json`, which loads the user's, the
+project's and the local settings. A settings file can supply a credential:
+its `env` can set `ANTHROPIC_API_KEY`, and `apiKeyHelper` names a command
+that prints a key. Workers load none of those files, so pre-flight could
+certify an account that only a settings file signed in, and every worker
+under it would meet that account signed out at its first attempt. Second,
+the refusal said only that the account was not signed in, while the
+operator's own `claude auth status`, run with those settings, would answer
+signed in. Pre-flight's refusal now says the check loads no user, project or
+local settings, as a worker loads none, so a credential that only a settings
+file supplies does not count (`preflight.md`, `signed_out`).
+
+`connect` and the capacity report's agent status call this same `discover`,
+so they too report an account as a worker would meet it.
+
+**What it still does not show.**
+
+- That a credential works. `auth status` reports the credential the CLI has
+  configured, and does not use it. An expired or invalid key, or a revoked
+  login, answers signed in and passes, and the run meets it at its first
+  attempt.
+- Anything, from a CLI that rejects `--setting-sources` here. [`probe`]
+  refuses a CLI whose `--help` does not advertise the flag
+  ([`REQUIRED_FLAGS`]), but one that advertises it and still refuses it
+  before `auth` exits with no JSON. [`parse_auth_status`] reads that as
+  `AuthState::Unknown`, and pre-flight passes an unknown sign-in.
+- A worker given more arguments than these. [`build_args`] appends a
+  profile's `extra_args` after its own, and a worker given its own
+  `--setting-sources` or `--settings` there could run in a settings context
+  this discovery did not ask in. Nothing produces `extra_args` today: the two
+  places that build a worker's profile leave it empty
+  (`src/engine/assembly.rs:140`, `src/review.rs:466`). A producer for them
+  would reopen the gap between discovery's context and the worker's.
 
 ## `fn discover` › `discovery.notes.push(`
 
 §13's tier classification comes from the catalog either way, but
 saying so is what stops the pools file reading as though the roster
 had been confirmed against this machine.
+
+## `fn settings_isolation() -> [String; 2] {`
+
+The two arguments that load no user, project or local settings:
+`--setting-sources` and an empty list. They are the one source for both of
+their uses. [`build_args`] gives them to every worker, at the place in its
+list they have always held, and `discover` sends them before
+`auth status --json`. So the sign-in discovery asks in the settings context
+the workers run in, and a change here changes both
+(`discovery_asks_with_exactly_the_settings_arguments_a_worker_is_given`).
 
 ## `fn effort_flag(effort: Effort) -> &'static str {`
 
@@ -99,12 +157,17 @@ machines without the CLI installed.
 Anything not explicitly allowed is denied rather than prompted:
 an unattended run must never sit waiting on a permission question.
 
-## `pub fn build_args(run: &TaskRun) -> Vec<String>` › `"--setting-sources".to_owned(),`
+## `pub fn build_args(run: &TaskRun) -> Vec<String>` › `args.extend(settings_isolation());`
 
 Load NO user/project/local settings: the per-run settings file is
 the whole permission surface. Without this, allow rules from
 ~/.claude/settings.json (or a repo's own .claude/settings.json)
 union with ours and silently widen the sandbox (§20).
+
+The pair is [`settings_isolation`]'s, which the sign-in discovery sends
+too, so pre-flight asks about an account in the settings context the
+worker runs in. It stays where the literal pair was, after
+`--permission-mode dontAsk`, so the order of this list is unchanged.
 
 ## `pub fn permission_settings(profile: &WorkerProfile, gate_cmds: &[String]) -> Value {`
 
@@ -299,6 +362,32 @@ not read as the pool running out.
 ## `fn json_error_failures_carry_a_reportable_detail()` › `let stdout = r#"{"is_error":true,"subtype":"error_during_execution"}"#;`
 
 Falls back to the subtype, then stderr, then a pointer.
+
+## `mod tests` › `struct AuthStatusRecorder {`
+
+A runner that records every request and answers each one with a signed-in
+`auth status` payload, so `discover` runs to an answer on a machine without
+the CLI, and the test reads what it asked.
+
+## `mod tests` › `fn discovery_asks_with_exactly_the_settings_arguments_a_worker_is_given() {`
+
+For a worker profile in each permission mode, with a per-run settings file:
+the flag `--setting-sources` and the value after it are taken from
+`build_args`' own output, and `discover`'s one request must begin with
+exactly those two arguments, then be `auth status --json` and nothing else.
+The worker is given `--settings`, and the discovery is not. Comparing against
+the worker's arguments rather than a literal copy is what makes this a check
+that the two ask in one settings context: a change to the worker's pair that
+missed the discovery fails here.
+
+## `mod tests` › `fn permission_settings_carry_permissions_as_their_only_top_level_key() {`
+
+In both permission modes, the per-run settings JSON has one top-level key,
+`permissions`. That is why the sign-in discovery can leave out the worker's
+`--settings`: the file carries no `env`, no `apiKeyHelper` and nothing else
+that could supply a credential, so leaving it out changes nothing a worker
+could sign in with. A key added here would need the discovery to pass the
+file too.
 
 ## `mod tests` › `fn every_preflight_process_has_its_own_ordinal() {`
 

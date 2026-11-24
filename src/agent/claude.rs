@@ -114,10 +114,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
 
     fn discover(&self, runner: &dyn Runner, _caps: &Caps) -> Result<Discovery, UpstrokeError> {
         let invocation = cli();
+        let args: Vec<String> = settings_isolation()
+            .into_iter()
+            .chain(["auth", "status", "--json"].map(str::to_owned))
+            .collect();
         let out = runner
             .run_blocking(&probe_request(
                 ADAPTER_ID,
-                invocation.spec(&["auth".to_owned(), "status".to_owned(), "--json".to_owned()])?,
+                invocation.spec(&args)?,
                 probe_ordinal::AUTH_STATUS,
                 PROBE_TIMEOUT,
             )?)
@@ -215,6 +219,10 @@ fn validate_help(version: &str, help: &str) -> Result<(), UpstrokeError> {
     Ok(())
 }
 
+fn settings_isolation() -> [String; 2] {
+    ["--setting-sources".to_owned(), String::new()]
+}
+
 fn effort_flag(effort: Effort) -> &'static str {
     match effort {
         Effort::Low => "low",
@@ -234,9 +242,8 @@ pub fn build_args(run: &TaskRun) -> Vec<String> {
         run.profile.model.clone(),
         "--permission-mode".to_owned(),
         "dontAsk".to_owned(),
-        "--setting-sources".to_owned(),
-        String::new(),
     ];
+    args.extend(settings_isolation());
     if let Some(effort) = run.profile.effort {
         args.push("--effort".to_owned());
         args.push(effort_flag(effort).to_owned());
@@ -830,6 +837,97 @@ mod tests {
             .position(|a| a == "--setting-sources")
             .expect("flag");
         assert_eq!(args[index + 1], "", "empty list loads no external sources");
+    }
+
+    struct AuthStatusRecorder {
+        seen: std::sync::Mutex<Vec<crate::runner::RunnerRequest>>,
+    }
+
+    impl crate::runner::contract::tests::InlineRunner for AuthStatusRecorder {
+        fn run_inline(
+            &self,
+            request: &crate::runner::RunnerRequest,
+        ) -> Result<ProcessOutput, crate::runner::RunnerError> {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.clone());
+            Ok(output(
+                Some(0),
+                r#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty"}"#,
+                "",
+            ))
+        }
+    }
+
+    #[test]
+    fn discovery_asks_with_exactly_the_settings_arguments_a_worker_is_given() {
+        let caps = Caps {
+            version: "2.1.226".to_owned(),
+            json_output: true,
+            session_resume: true,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        };
+        for permissions in [PermissionMode::Edit, PermissionMode::ReadOnly] {
+            let mut run = task_run();
+            run.profile = profile(permissions);
+            run.settings_path = Some(PathBuf::from("run-settings.json"));
+            let worker = build_args(&run);
+            let at = worker
+                .iter()
+                .position(|arg| arg == "--setting-sources")
+                .expect("the worker's settings-sources flag");
+            let isolation = worker.get(at..at + 2).expect("the flag and its value");
+
+            let recorder = AuthStatusRecorder {
+                seen: std::sync::Mutex::new(Vec::new()),
+            };
+            ClaudeCodeAdapter
+                .discover(&recorder, &caps)
+                .expect("a discovery that answered");
+            let seen = recorder
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert_eq!(seen.len(), 1, "one process: {seen:?}");
+            let asked = &seen[0].command.args;
+            assert!(
+                asked.starts_with(isolation),
+                "{permissions:?}: discovery begins with the worker's {isolation:?}: {asked:?}"
+            );
+            assert_eq!(
+                asked[isolation.len()..],
+                ["auth", "status", "--json"],
+                "{permissions:?}: then the subcommand, and nothing else: {asked:?}"
+            );
+            assert!(
+                worker.iter().any(|arg| arg == "--settings")
+                    && !asked.iter().any(|arg| arg == "--settings"),
+                "{permissions:?}: the worker's per-run `--settings` is not passed: {asked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn permission_settings_carry_permissions_as_their_only_top_level_key() {
+        for permissions in [PermissionMode::Edit, PermissionMode::ReadOnly] {
+            let settings = permission_settings(&profile(permissions), &["cargo test".to_owned()]);
+            let keys: Vec<&str> = settings
+                .as_object()
+                .expect("a settings object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["permissions"],
+                "{permissions:?}: the per-run settings carry no credential: {settings}"
+            );
+        }
     }
 
     #[test]

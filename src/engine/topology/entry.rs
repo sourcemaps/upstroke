@@ -386,7 +386,8 @@ impl FreshLeased {
             crate::agent::probe_workspace(),
             harness.adapters,
             checked.runner_policy_sha256().to_owned(),
-        );
+        )
+        .with_pools(&analysis.config.pools);
         let ledger = Mutex::new(InvocationLedger::new());
         let request = Request {
             repo_root: &opts.repo_root,
