@@ -10,6 +10,9 @@ pub(super) const CI_WORKFLOW: &str = ".github/workflows/ci.yml";
 
 pub(super) const CLIPPY_GATE: &str = "cargo clippy --all-targets --all-features -- -D warnings";
 
+pub(super) const CLIPPY_GATE_MACOS_CROSS: &str =
+    "cargo clippy --target aarch64-apple-darwin --all-targets --all-features -- -D warnings";
+
 pub(super) const TEST_COMMAND: &str = "cargo test --all-targets --all-features";
 
 pub(super) const TEST_SHARD_COMMAND: &str =
@@ -113,8 +116,9 @@ pub(super) const SHELL_GATES: [&str; 6] = [
     "bash .github/scripts/test-pr-ready-audit.sh",
 ];
 
-pub(super) const GATE_SCRIPTS: [&str; 9] = [
+pub(super) const GATE_SCRIPTS: [&str; 10] = [
     CLIPPY_GATE,
+    CLIPPY_GATE_MACOS_CROSS,
     WINDOWS_BUILD_WITNESS,
     FMT_GATE,
     SHELL_GATES[0],
@@ -134,12 +138,17 @@ pub(super) const PINNED_ACTIONS: [&str; 4] = [
 
 pub(super) const ACTION_INPUTS: [(&str, &[&str]); 4] = [
     ("actions/checkout@", &[]),
-    ("dtolnay/rust-toolchain@", &["components", "toolchain"]),
+    (
+        "dtolnay/rust-toolchain@",
+        &["components", "targets", "toolchain"],
+    ),
     ("Swatinem/rust-cache@", &[]),
     ("actions/setup-python@", &["python-version"]),
 ];
 
 pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];
+
+pub(super) const TOOLCHAIN_TARGETS: [&str; 2] = ["aarch64-apple-darwin", MSRV_TOOLCHAIN_TARGETS];
 
 pub(super) const GOLDEN_IMAGE_TOOLCHAIN: &str = "1.97.1";
 
@@ -182,7 +191,12 @@ pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [
 ];
 
 pub(super) const MSRV_JOB: &str = "msrv";
-pub(super) const MSRV_COMMAND: &str = "cargo check --locked --all-targets --all-features";
+pub(super) const MSRV_COMMAND: &str =
+    "cargo check --locked --target ${{ matrix.target }} --all-targets --all-features";
+pub(super) const MSRV_MATRIX_FIELDS: [&str; 1] = ["include"];
+pub(super) const MSRV_ENTRY_KEYS: [&str; 2] = ["os", "target"];
+pub(super) const MSRV_RUNS_ON: &str = "${{ matrix.os }}";
+pub(super) const MSRV_TOOLCHAIN_TARGETS: &str = "${{ matrix.target }}";
 
 pub(super) const RUSTFLAGS_KEY: &str = "RUSTFLAGS";
 pub(super) const RUSTFLAGS_VALUE: &str = "-D warnings";
@@ -263,6 +277,8 @@ pub(super) const AGGREGATE_SHELL: &str = "bash";
 
 pub(super) struct CiTarget {
     pub(super) runner: &'static str,
+    pub(super) check_runner: &'static str,
+    pub(super) clippy_gate: &'static str,
     pub(super) triple: &'static str,
     pub(super) default_shell: &'static str,
     pub(super) keys: &'static [(&'static str, &'static str)],
@@ -273,6 +289,8 @@ pub(super) struct CiTarget {
 pub(super) const CI_TARGETS: [CiTarget; 3] = [
     CiTarget {
         runner: "ubuntu-latest",
+        check_runner: "ubuntu-latest",
+        clippy_gate: CLIPPY_GATE,
         default_shell: "bash",
         triple: "x86_64-unknown-linux-gnu",
         keys: &[
@@ -289,6 +307,8 @@ pub(super) const CI_TARGETS: [CiTarget; 3] = [
     },
     CiTarget {
         runner: "macos-latest",
+        check_runner: "ubuntu-latest",
+        clippy_gate: CLIPPY_GATE_MACOS_CROSS,
         default_shell: "bash",
         triple: "aarch64-apple-darwin",
         keys: &[
@@ -305,6 +325,8 @@ pub(super) const CI_TARGETS: [CiTarget; 3] = [
     },
     CiTarget {
         runner: "windows-latest",
+        check_runner: "windows-latest",
+        clippy_gate: CLIPPY_GATE,
         default_shell: "pwsh",
         triple: "x86_64-pc-windows-msvc",
         keys: &[
