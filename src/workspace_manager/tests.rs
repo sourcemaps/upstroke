@@ -13589,6 +13589,160 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
     }
 }
 
+/// [`SampledChild::command`] runs the program it is given, on every
+/// platform: a spawn that went back to `Command::new("git")` fails here.
+#[test]
+fn sampled_git_child_runs_the_program_it_is_given() {
+    let program = Path::new("sampler-probe-real-git");
+    let command = SampledChild::command(program, Path::new("."), &["status".to_string()]);
+    assert_eq!(command.get_program(), program.as_os_str());
+}
+
+/// The MSYS2 environment directories Git for Windows installs its real git
+/// under, any of which can be the `<prefix>` of `git --exec-path`.
+const MINGW_PREFIXES: [&str; 4] = ["mingw64", "ucrt64", "clangarm64", "mingw32"];
+
+/// Whether `program` is Git for Windows' real git, `<MinGW prefix>\bin\git.exe`,
+/// rather than a launcher. It splits on both `\` and `/` itself, not through
+/// [`Path`]'s separator, so a Windows path reads the same on every platform and
+/// the mixed separators `git --exec-path` leads to are accepted.
+///
+/// It decides on the path's encoded bytes, not on a lossy string:
+/// `standards/08_standards_filesystems_persistence_paths.md` allows those for
+/// diagnostics only, and this is an identity decision. Both separators are
+/// ASCII, and an ASCII byte in an encoded `OsStr` is always that character, so
+/// splitting the bytes at them splits the path. `git.exe` and `bin` must match
+/// exactly; the prefix matches without regard to ASCII case.
+fn is_mingw_real_git(program: &Path) -> bool {
+    let mut components = program
+        .as_os_str()
+        .as_encoded_bytes()
+        .rsplit(|&byte| byte == b'\\' || byte == b'/')
+        .filter(|part| !part.is_empty());
+    components.next() == Some(b"git.exe".as_slice())
+        && components.next() == Some(b"bin".as_slice())
+        && components.next().is_some_and(|prefix| {
+            MINGW_PREFIXES
+                .iter()
+                .any(|mingw| prefix.eq_ignore_ascii_case(mingw.as_bytes()))
+        })
+}
+
+/// Whether the census sampler may run `program` as its git, on a Windows host
+/// when `windows` is set: there only Git for Windows' real git
+/// ([`is_mingw_real_git`]) may be sampled, because killing a launcher leaves the
+/// real git running (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). Elsewhere any
+/// program may. [`SampledChild::program`] asserts this with `cfg!(windows)`;
+/// taking the host as an argument lets a test ask about a Windows host on every
+/// platform.
+fn may_sample_as_git(program: &Path, windows: bool) -> bool {
+    !windows || is_mingw_real_git(program)
+}
+
+/// [`is_mingw_real_git`] accepts the real git under each of the four MinGW
+/// prefixes, and refuses Git for Windows' launchers, the MSYS2 `usr\bin\git.exe`
+/// and `git` by name.
+#[test]
+fn sampled_git_real_git_check_accepts_mingw_prefixes_and_refuses_launchers() {
+    for real in [
+        r"C:\Program Files\Git\mingw64\bin\git.exe",
+        r"C:\Program Files\Git\ucrt64\bin\git.exe",
+        r"C:\Program Files\Git\clangarm64\bin\git.exe",
+        r"C:\Program Files\Git\mingw32\bin\git.exe",
+        r"C:/Program Files/Git/ucrt64\bin\git.exe",
+    ] {
+        assert!(is_mingw_real_git(Path::new(real)), "{real} is the real git");
+    }
+    for launcher in [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        r"C:\Program Files\Git\usr\bin\git.exe",
+        "git",
+    ] {
+        assert!(
+            !is_mingw_real_git(Path::new(launcher)),
+            "{launcher} is not the real git"
+        );
+    }
+}
+
+/// [`may_sample_as_git`] asked about a Windows host refuses Git for Windows'
+/// launchers and `git` by name and accepts the real git; asked about any
+/// other host, it accepts `git` by name. It runs on every platform, so the
+/// refusal is checked on hosts that never sample on Windows.
+#[test]
+fn sampled_git_decision_refuses_launchers_on_a_windows_host() {
+    for launcher in [
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files\Git\bin\git.exe",
+        "git",
+    ] {
+        assert!(
+            !may_sample_as_git(Path::new(launcher), true),
+            "a Windows host must not sample {launcher}"
+        );
+    }
+    let real = r"C:\Program Files\Git\ucrt64\bin\git.exe";
+    assert!(
+        may_sample_as_git(Path::new(real), true),
+        "a Windows host samples {real}"
+    );
+    assert!(
+        may_sample_as_git(Path::new("git"), false),
+        "a host other than Windows samples git by name"
+    );
+}
+
+/// [`SampledChild::spawn`] runs [`SampledChild::program`], on every platform:
+/// the child records the program its own `Command` spawned, and that is the
+/// program `program()` answers. On Windows it must also be the real git.
+///
+/// What this cannot show is stated here. Off Windows, `program()` is `git` by
+/// name. A spawn that ran `git` by name instead would look the same there, so
+/// only a Windows run can catch that edit. Where git resolves, nothing shows
+/// that `program()` consults the decision. Where it does not resolve, both
+/// Windows-side tests fail on the same predicate: this one and
+/// `sampled_git_child_runs_the_resolved_real_git_on_windows`. A real git
+/// outside the four MinGW prefixes is refused.
+#[test]
+fn sampled_git_child_spawn_runs_the_sampled_program() {
+    let tree = scratch("sampled-git-spawn");
+    let mut child = SampledChild::spawn(tree.path(), &["--version".to_string()]);
+    let status = child.wait().expect("reap the sampled git child");
+    assert!(
+        status.success(),
+        "{:?} --version ended {status:?}",
+        child.spawned_program
+    );
+    assert_eq!(child.spawned_program, SampledChild::program());
+    if cfg!(windows) {
+        assert!(
+            is_mingw_real_git(&child.spawned_program),
+            "the census sampler spawned {:?}, not the real git",
+            child.spawned_program
+        );
+    }
+}
+
+/// [`SampledChild::program`] is [`super::fixture::sampled_git`]'s: on
+/// Windows the real `<MinGW prefix>\bin\git.exe` (`mingw64`, or `ucrt64` on
+/// newer images), and `git` by name elsewhere.
+#[test]
+fn sampled_git_child_runs_the_resolved_real_git_on_windows() {
+    let program = SampledChild::program();
+    assert_eq!(program, super::fixture::sampled_git());
+    if cfg!(windows) {
+        // The MinGW prefix varies by Git for Windows build (CI's hosted image used `ucrt64`);
+        // `cmd\git.exe` and the Git root's `bin\git.exe` are launchers and fail this check.
+        assert!(
+            is_mingw_real_git(program),
+            "the census sampler runs {program:?}, not the real git"
+        );
+    } else {
+        assert_eq!(program, Path::new("git"));
+    }
+}
+
 /// One site's sampling run: the packet's record, and the per-sample
 /// observations it was tallied from.
 ///
@@ -14406,7 +14560,9 @@ static SAMPLED_LAUNCHES: std::sync::Mutex<Vec<SampledLaunch>> = std::sync::Mutex
 ///
 /// It is deliberately **blind to the command it is killing**: no argv
 /// reaches it, so the per-command firing count in the sampling test cannot
-/// be defeated inside this type without first giving it one.
+/// be defeated inside this type without first giving it one. The program it
+/// records ([`Self::spawned_program`]) is not that: it is the same `git` for
+/// all four commands, so it tells none of them from another.
 ///
 /// [`Child::kill`]: std::process::Child::kill
 struct SampledChild {
@@ -14415,6 +14571,10 @@ struct SampledChild {
     /// reads off it is time the child was left *running* rather than the
     /// cost of starting it — and so an unwaited kill reads as the ~0 it is.
     spawned: std::time::Instant,
+    /// The program the [`Command`] whose `spawn()` returned [`Self::child`]
+    /// ran, read off that very `Command` with [`Command::get_program`]: the
+    /// program only, never its arguments. Written only by [`Self::spawn`].
+    spawned_program: PathBuf,
     /// What the clock said when a kill fired at this child, or `None` if
     /// none ever did. Written only by [`Self::kill`].
     fired: Option<std::time::Duration>,
@@ -14424,15 +14584,42 @@ struct SampledChild {
 }
 
 impl SampledChild {
-    /// Spawn the child in a process group of its own on Unix, so that
-    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
-    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
-    /// sampler killed the leader alone (round 2's group kill reached
-    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
-    /// macOS leg at `869e336a` met that child still populating the checkout
-    /// — `PR136`'s first fingerprint — at the forced removal.
-    fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let mut command = Command::new("git");
+    /// The program the sampler runs: [`super::fixture::sampled_git`]'s
+    /// `git`, as `fixture::KillableGitChild`'s is. On Windows that is the
+    /// real `<MinGW prefix>\bin\git.exe` (`mingw64`, or `ucrt64` on newer
+    /// images) rather than Git for Windows' `cmd\git.exe` launcher, whose
+    /// kill would leave the real git running
+    /// (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`); `git` by name everywhere else.
+    ///
+    /// It fails closed, on [`may_sample_as_git`]: on Windows this panics
+    /// unless the program is the real git. `sampled_git` falls back to `git`
+    /// when `git --exec-path` does not lead to the real binary, and that `git`
+    /// is the launcher; an inherited `GIT_EXEC_PATH=<root>\libexec\git-core`
+    /// leads it to `<root>\bin\git.exe`, which is a launcher too.
+    ///
+    /// What the tests cannot show is stated here. Off Windows, `program()` is
+    /// `git` by name. A spawn that ran `git` by name instead would look the
+    /// same there, so only a Windows run can catch that edit. Where git
+    /// resolves, nothing shows that `program()` consults the decision. Where
+    /// it does not resolve, both Windows-side tests fail on the same
+    /// predicate. A real git outside the four MinGW prefixes is refused.
+    fn program() -> &'static Path {
+        let program = super::fixture::sampled_git();
+        assert!(
+            may_sample_as_git(program, cfg!(windows)),
+            "the census kill sampler needs Git for Windows' real <MinGW prefix>\\bin\\git.exe \
+             (mingw64, ucrt64, clangarm64 or mingw32), and `fixture::sampled_git` resolved {program:?}: \
+             killing a launcher would leave the real git running (PR249-KILL-SAMPLER-WINDOWS-WRAPPER)"
+        );
+        program
+    }
+
+    /// The command [`Self::spawn`] starts: `program -C cwd -c
+    /// core.fsmonitor=false <args>`, its streams discarded, in a process
+    /// group of its own on Unix. Taking `program` as an argument lets a test
+    /// show that what runs is the program given, on every platform.
+    fn command(program: &Path, cwd: &Path, args: &[String]) -> Command {
+        let mut command = Command::new(program);
         command
             .arg("-C")
             .arg(cwd)
@@ -14446,10 +14633,26 @@ impl SampledChild {
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
         }
+        command
+    }
+
+    /// Spawn the child in a process group of its own on Unix, so that
+    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
+    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
+    /// sampler killed the leader alone (round 2's group kill reached
+    /// `fixture::KillableGitChild`, the other samplers' child), and CI's
+    /// macOS leg at `869e336a` met that child still populating the checkout
+    /// — `PR136`'s first fingerprint — at the forced removal.
+    fn spawn(cwd: &Path, args: &[String]) -> Self {
+        let mut command = Self::command(Self::program(), cwd, args);
+        // Read off the `Command` that spawns the child, before the spawn, so
+        // the clock read below stays the first thing after it.
+        let spawned_program = PathBuf::from(command.get_program());
         let child = command.spawn().expect("spawn the sampled git child");
         Self {
             child,
             spawned: std::time::Instant::now(),
+            spawned_program,
             fired: None,
             group_ended: None,
         }
