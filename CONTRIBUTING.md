@@ -1,15 +1,18 @@
 # Contributing to upstroke
 
-Contributions are welcome. Please open an issue before starting anything substantial: the build
-order in `DESIGN.md` §21 is deliberate, and it is worth checking that a change fits where the
-project currently is.
+upstroke is not accepting outside contributions at present. The project is developed by its
+owner, and opening it to other contributors is a question for later, once the build order in
+`DESIGN.md` §21 has settled. Bug reports and questions are welcome as issues. A pull request from
+outside the project is closed without review.
+
+The rest of this file records how a change enters `master` today, and the Contributor Licence
+Agreement that applies to any contribution the project accepts.
 
 Every change enters `master` through a draft pull request, green CI and PR-policy gates, an
 independent review and the owner's merge. [`MAINTAINING.md`](MAINTAINING.md) has the full
-lifecycle. Contributions from external forks are provisional: the required checks are
-candidate-controlled, so a fork's entire diff, workflow edits included, is reviewed before merge.
+lifecycle.
 
-## Before you send a PR
+## Before a change is sent
 
 CI enforces all ten of these, verbatim, from the repository root:
 
@@ -62,12 +65,11 @@ pull request is your acceptance, and it applies to every contribution you make t
 
 Licences are not forever: this project began under the AGPL and was relicensed to Apache-2.0 on
 2026-09-01. A move like that is only ever cheap while one party can license the whole codebase,
-which is what clause 2 preserves as outside contributions arrive: a future change, such as a
-licence exception or a newer licence version, should not require tracking down every past
+which is what clause 2 preserves for any contribution that does come in: a future change, such as
+a licence exception or a newer licence version, should not require tracking down every past
 contributor.
 
 The trade is explicit and worth stating plainly: your contribution may later be offered under
 terms you did not choose. Everything you contribute also remains available to everyone under
-the Apache License 2.0, permanently — that cannot be taken back. If clause 2 isn't acceptable
-to you, say so in the PR; a change can often be reworked as a suggestion instead, and that's a
-perfectly good way to contribute.
+the Apache License 2.0, permanently — that cannot be taken back. While outside contributions are
+closed, an issue (a bug report or a question) is the way to raise something with the project.
