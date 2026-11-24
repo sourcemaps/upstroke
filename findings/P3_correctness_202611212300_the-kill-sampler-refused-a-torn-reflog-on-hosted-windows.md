@@ -128,6 +128,40 @@ job this test was the only failure.
 
 - None of #410, #411 or #412 changes `src/workspace_manager/`.
 
+## A fifth sighting, 2026-11-24
+
+| run | job | platform | date | pull request | checkout |
+|---|---|---|---|---|---|
+| `45384932886` (`pull_request`) | `138413285908`, `test (windows-latest, 13 of 14)` | a GitHub-hosted `windows-latest` runner | 2026-11-24, 11:31:22Z to 11:40:16Z | #413 at `d62eff5d` (an empty commit on `d4b85ec8`, with its tree) | `278c049`, GitHub's merge of `d62eff5d` into `master` at `0161b067` |
+
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed
+(`evidence/job-45384932886-138413285908.log`, SHA-256
+`d59419e550a8e61992bfb3053c9a668a9b19fdb510413231688a81d8eb6257a7`):
+
+- Line 467:
+
+      test workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered ... FAILED <144.305s>
+- Line 477 is the site's summary line, `residue sampling Object.ProposalCherryPick: n=8 none=0
+  internal=2 after=5 unclassified=1`.
+- Line 479 is the panic at `src\workspace_manager\tests.rs:13226:9`. Line 480: the classifier
+  refused 1 of 8 samples, run 7, fsck exit code 2, with
+
+      error: worktrees/s7_WG9T4H5MXCSP/HEAD: invalid reflog entry c2a9d8494eebf65d2d1449153ebb325b5107dba7
+
+- Line 487: `test result: FAILED. 90 passed; 1 failed; 3 ignored`. This test was the job's only
+  failure.
+- The earlier sites' summary lines (`CandidateStage`, `CandidateWriteTree`) are present (lines 472
+  to 475), and there is no `Worktree.Add` line. The checkout step reports `git version
+  2.56.1.windows.1` (line 58).
+- **The same branch tree passed.** Run `45391229767`, on `e1440e97`, an empty commit on `d62eff5d`
+  with the same tree (`6a884542`), passed this test in `test (windows-latest, 13 of 14)` (job
+  `138435174173`, `ok <157.217s>`). That run checked out `fdebbbd`, GitHub's merge of `e1440e97`
+  into `master` at `c5061b81`, so its `master` side was newer than this run's.
+- #413 changes only `CONTRIBUTING.md`, `MAINTAINING.md` and `README.md`.
+- This run is the one the rate paragraph below lists among the runs "made because of the red" (it
+  followed run `45376131057`). It failed too, under this row's fingerprint. It was created at
+  11:31:20Z, after the end of that paragraph's population, so the paragraph's counts do not change.
+
 ## What is and is not established
 
 **Established.** In one sample of `Object.ProposalCherryPick`, after the kill was fired, the
@@ -136,7 +170,8 @@ classifier's fsck exited 2 on an `invalid reflog entry` in the reflog of a stagi
 name, `s1_WG9T4H5MXCSP`, has the shape of this site's staging slot. The failing test and the code
 it drives were not changed by #392, and the same test passed on #392's heads before and after.
 The three later sightings refused the same way, at the same site, in staging registrations of the
-same shape, one to four samples of eight.
+same shape, one to four samples of eight. The fifth, on #413, refused the same way, one sample of
+eight.
 
 **Not established: what the kill reached.** `SampledChild::spawn` runs `git` by name. On a Windows
 machine where that name resolves to Git for Windows' launcher (`cmd\git.exe`), the kill ends the
@@ -175,8 +210,9 @@ commit, then read the reflog after Git had appended the entry naming it.
 - the same fsck run again once every Git process of the sample has ended. If the error is gone, the
   first reading is ruled out.
 
-**Not established: the rate.** Four sightings, on 2026-11-20, 2026-11-23 (two) and 2026-11-24,
-each followed by a pass of the same tree. The runs of this test in that period were not counted.
+**Not established: the rate.** Five sightings, on 2026-11-20, 2026-11-23 (two) and 2026-11-24
+(two), each followed by a pass of the same branch tree. The runs of this test in that period were
+not counted.
 
 **The test's rate across this row and PR249-KILL-SAMPLER-WINDOWS-WRAPPER, counted 2026-11-24.** The
 population is every run of the `CI` workflow created from 2026-11-22 00:00Z to 2026-11-24 10:50Z
