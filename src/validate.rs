@@ -211,16 +211,12 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
             render::to_row(task, chain, second)
         })
         .collect();
-    let latest = latest_run_observations(
-        &opts.config_root,
-        !analysis.config.pools.is_empty(),
-        &mut warnings,
-    );
+    let gathered = gathered_capacity(&opts.config_root, &analysis.config, &mut warnings);
     Ok(Report {
         rows,
         warnings,
         strategy: render::strategy_echo(&analysis.config),
-        capacity: render::capacity_echo(&analysis.config, &latest),
+        capacity: render::capacity_echo(&analysis.config, &gathered),
         review: render::review_echo(&reviews, analysis.config.review_cross_family),
         effort: render::effort_echo(&analysis.config),
         gates: analysis.gates.into_iter().map(|gate| gate.name).collect(),
@@ -229,20 +225,24 @@ pub fn run(opts: &ValidateOptions) -> Result<Report, UpstrokeError> {
     })
 }
 
-fn latest_run_observations(
+fn gathered_capacity(
     repo_root: &Path,
-    has_pools: bool,
+    config: &Config,
     warnings: &mut Vec<String>,
-) -> capacity::LatestRun {
-    if !has_pools {
-        return capacity::LatestRun::default();
+) -> capacity::Gathered {
+    if config.pools.is_empty() {
+        return capacity::Gathered::default();
     }
-    let mut read = Vec::new();
-    let latest = capacity::latest_run_observations(repo_root, &mut read);
-    if latest.run_id.is_some() && !latest.folded {
-        warnings.append(&mut read);
-    }
-    latest
+    capacity::machine::gather(
+        &capacity::machine::GatherOptions {
+            scope: config.capacity_scope,
+            repo_root,
+            machine_dir: config.machine_dir.as_deref(),
+            pools: &config.pools,
+            now_unix: crate::util::unix_seconds_now(),
+        },
+        warnings,
+    )
 }
 
 impl Report {
@@ -676,8 +676,14 @@ mod tests {
         options.config_path = Some(root.path().join("upstroke.toml"));
 
         let captured = CapturedInputs::capture(&options);
+        let pools = options.pools_path.clone().expect("the fixture pools file");
+        let machine_settings = pools
+            .parent()
+            .expect("the fixture pools file has a directory")
+            .join(config::MACHINE_SETTINGS);
         let mut expected = vec![plan, root.path().join("upstroke.toml")];
-        expected.push(options.pools_path.clone().expect("the fixture pools file"));
+        expected.push(machine_settings);
+        expected.push(pools);
         expected.extend(
             GATE_DERIVATION_INPUTS
                 .iter()
@@ -1095,14 +1101,29 @@ mod tests {
         );
         assert!(rendered.contains("not full"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("local-logs") && rendered.contains("not read in v0.1"),
+            rendered.contains("local-logs") && rendered.contains("parsed but not read"),
             "rendered:\n{rendered}"
         );
         assert!(rendered.contains("never probes"), "rendered:\n{rendered}");
         assert!(rendered.contains("read-only"), "rendered:\n{rendered}");
         assert!(
-            rendered.contains("no run in this repository yet"),
-            "rendered:\n{rendered}"
+            rendered.contains("scope: machine — no run on this machine yet"),
+            "the preview folds the machine unless the settings say otherwise:\n{rendered}"
+        );
+
+        fs::write(
+            o.config_root.join("upstroke.toml"),
+            "[capacity]\nscope = \"repo\"\n",
+        )
+        .expect("the repository's settings");
+        let rendered = run(&o).expect("validates").render();
+        assert!(
+            rendered.contains("scope: repo — no run in this repository yet"),
+            "a repository that asks for its own runs alone is told that is what it got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("claude-max: unknown [unknown]") && rendered.contains("not full"),
+            "and the narrower scope reads an unmeasured pool no more generously:\n{rendered}"
         );
     }
 
@@ -1118,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn the_capacity_block_shows_the_pool_a_schema_4_latest_run_signalled_as_exhausted() {
+    fn the_capacity_block_shows_the_pool_a_schema_4_run_signalled_as_exhausted() {
         const RUN: &str = "01VALIDATESCHEMA4000000001";
         const RESET: &str = "2026-11-11T05:30:00Z";
         let dir = scratch_root("schema4signal");
@@ -1135,13 +1156,14 @@ mod tests {
             "rendered:\n{rendered}"
         );
         assert!(
-            rendered.contains(&format!(
-                "self-metered draw is folded from run {RUN}, the latest in this repository"
-            )),
+            rendered.contains(
+                "scope: machine — signals and self-metered draw are folded from 1 run across 1 \
+                 repository on this machine"
+            ),
             "rendered:\n{rendered}"
         );
         assert!(
-            !rendered.contains("no run in this repository yet"),
+            !rendered.contains("no run on this machine yet"),
             "rendered:\n{rendered}"
         );
         assert!(
@@ -1155,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn the_capacity_block_says_a_latest_run_it_could_not_read_could_not_be_read() {
+    fn the_capacity_block_says_a_run_it_could_not_read_could_not_be_read() {
         const RUN: &str = "01VALIDATEUNREAD0000000001";
         let dir = scratch_root("unreadrun");
         let mut o = opts("fixtures/sample-plan.md");
@@ -1166,14 +1188,14 @@ mod tests {
         let rendered = report.render();
 
         assert!(
-            rendered.contains(&format!(
-                "the latest run in this repository ({RUN}) could not be read, so estimates rest \
-                 on configuration alone"
-            )),
+            rendered.contains(
+                "scope: machine — the 1 run found on this machine could not be read, so no \
+                 rate-limit signal and no self-metered draw is shown; a warning names it"
+            ),
             "rendered:\n{rendered}"
         );
         assert!(
-            !rendered.contains("no run in this repository yet"),
+            !rendered.contains("no run on this machine yet"),
             "rendered:\n{rendered}"
         );
         assert!(

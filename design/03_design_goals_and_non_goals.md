@@ -10,7 +10,7 @@
 
 **Non-goals**
 
-- Not an agent: no file editing, no tool-use loop, no context management, no HTTP client, no model API keys.
+- Not an agent: no file editing, no tool-use loop, no context management, no HTTP client, no model API keys. The binary links no HTTP client at all: the capacity tracker (§13), which reads billing and usage endpoints outside any run, starts `curl` for it, and the credentials it is lent are the billing-scoped ones an operator names (an organization admin key, a token with a plan-read permission), not keys for calling a model.
 - Not a subscription proxy: never spoofs headers or re-exposes a subscription as an API endpoint. Subprocesses of official binaries only.
 - Not a UI (the engine): panes, dashboards, and notifiers are thin clients of the event log. The design-pane product is v0.3, built *on* the engine.
 - Does not repair bad plans. The design phase exists to make plans good; execution assumes they are.

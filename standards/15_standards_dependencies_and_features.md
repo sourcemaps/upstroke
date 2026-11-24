@@ -15,7 +15,9 @@ effect, MSRV and target support in proportion to risk.
 - The crate builds without a build script; introducing one, or a proc-macro dependency, names the
   new compile-time supply-chain surface in the pull request.
 - No dependency introduces model-API or engine HTTP behaviour (`DESIGN.md` §4), even behind a
-  feature.
+  feature. The capacity tracker, which is outside the engine and may speak HTTP, does it through a
+  `curl` subprocess so that this stays true of the whole dependency set: the crate links no HTTP
+  client and no TLS stack.
 
 `cargo deny` is the intended mechanism for the licence, advisory and source checks; until its
 configuration lands they are review duties.

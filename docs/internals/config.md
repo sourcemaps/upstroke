@@ -33,9 +33,14 @@ that boundary only (`SWEEP-CONFIG-PARSE-007`, closed by the sweep of
 (`SWEEP-CONFIG-PARSE-008`), by the same attribute on `RawStrategy` -- the
 rule `[[routing.overrides]]`, `[[pins]]`, `[routing.effort]` and the per-kind
 routing tables already followed. An unknown key there now refuses the load as
-an `UpstrokeError::Config` carrying the deserializer's own text, which names
-the key as written and the accepted `mode` and `spend_down_after`. Only a key
-is refused: an unrecognised `mode` value still warns and the load succeeds.
+an `UpstrokeError::Config` carrying the deserializer's own message, which names
+the key as written and the accepted `mode` and `spend_down_after`. That
+message reaches the operator through `read::toml_error_message`, as every
+refusal of a settings or pools file does: the line and column the error
+points at, then the message, and never the file's text, with any value the
+message quotes that is longer than 16 characters withheld (a key or schema
+name is kept up to 64). Only a key is refused: an unrecognised `mode` value
+still warns and the load succeeds.
 No forward-compatibility key is lost at the top level: nothing in the tree's
 fixtures, docs or examples writes a top-level key outside the seven.
 
@@ -63,10 +68,12 @@ witnessed against removing `#[serde(deny_unknown_fields)]` from
 refusal's text is the deserializer's, so what is asserted is what an operator
 needs from it -- the key as written and both accepted keys -- and that no
 warning stands in for it. Each name is matched inside the backticks serde
-quotes it in, because the TOML error also echoes the offending source line,
-where `spend_down_afer` appears whatever the error says about it. The capture
-is built in memory and goes through `load_captured`, as in the test above and
-for the same reason.
+quotes it in. The refusal used to echo the offending source line as well,
+where `spend_down_afer` appeared whatever the error said about it; it carries
+none of the file's text now (`read::toml_error_message`), and the backticks
+still keep the assertion about what serde says rather than about a substring
+that happens to occur. The capture is built in memory and goes through
+`load_captured`, as in the test above and for the same reason.
 
 ## `gates: Option<toml::Value>,`
 
@@ -631,6 +638,31 @@ terminal-attached run and CI both want.
 `kind = "container"` is refused for every schema-1..3 fresh run and
 resume before any effect — see [`refuse_legacy_container_selection`].
 
+## `pub capacity_scope: capacity::Scope,`
+
+`[capacity] scope` (§17): which runs feed the capacity views, every run on
+the machine or this repository's alone. The machine by default. It selects
+what `upstroke capacity` and the preview fold and nothing about a run: a run
+still binds on its own signals (§13).
+
+## `pub machine_dir: Option<PathBuf>,`
+
+The machine directory: the directory of the pools file this load used,
+`~/.upstroke` unless a pools path was given. Everything machine-level is
+found from it — the settings file beside the pools file, the usage reports
+under `capacity/usage/`, the run index under `runs/` — so a caller that
+relocates the pools file relocates all of it, which is what keeps a test's
+machine inside its scratch tree. `None` when no pools file location resolves
+at all, which is a machine with no home directory and no `--pools`.
+
+## `pub machine_settings: Option<PathBuf>,`
+
+The machine-level settings file, when it decided something: present only
+where this load took at least one key from it that the repository's file
+left alone. A machine-level file that exists and is overridden everywhere is
+`None`, as an absent one is, because a run that claimed it would be claiming
+an influence the file did not have.
+
 ## `struct EngineSettings {`
 
 Everything `[engine]` contributes, kept together so adding a knob does not
@@ -724,6 +756,50 @@ See [`CapturedConfig`].
 ## `pub fn load_captured_with(`
 
 [`load_captured`] with the adapter registry injected — see [`load_with`].
+
+Since 2026-11-23 this is also where the two scopes meet (§17). With no
+machine-level file captured it is what it was: the repository's file,
+interpreted. With one, three things happen in an order that is the design:
+
+1. **The machine-level file is interpreted alone, first**, and its refusal
+   carries its own path. It must be a valid configuration by itself, because
+   it is what a repository with no file of its own runs under.
+2. **The two tables are merged** (`layers::merge`: tables key by key,
+   anything else replaced whole) and the result is interpreted under the
+   repository file's path, since the repository's keys are the ones that
+   win. A refusal there is passed through `layers::beneath`, which adds that
+   a second file is applied, because the cause can be a key that file
+   supplied or the two together. The merged table is no file's text, so a
+   refusal of its `try_into` has no line or column to give: it is serde's
+   message alone, through `read::toml_error_message` like every other.
+3. **Warnings are attributed, not duplicated.** The machine pass's warnings
+   name the machine file. The merged pass raises the same ones again under
+   the repository's path for every key that survived the merge; those are
+   dropped, by comparing each against the machine pass's warnings with the
+   path swapped, so a typo in the machine file is reported once and against
+   the file that holds it.
+
+The note naming what the machine file supplied (`layers::supplied`) is pushed
+only when that list is non-empty.
+
+Both paths are cloned on the way in (`machine.path.clone()`,
+`repo_path.clone()`): `interpret` consumes the path it reports under, moving
+it into whichever refusal it returns, and this function still needs each one
+afterwards, for the note, for `layers::beneath` and for the warning
+comparison.
+
+## `fn interpret(`
+
+Everything this module makes of one settings table, before pools. It was the
+body of [`load_captured_with`] until the machine level arrived, and is a
+function of its own so that the same interpretation can be run over the
+machine-level file alone and over the merge. It returns a [`Config`] with no
+pools and no machine directory; the caller fills both in.
+
+A `try_into` refusal of `[routing.effort]` or of a routing entry is serde's
+message passed through `read::toml_error_message` with no text, so it is the
+message alone: a `toml::Value` has dropped the spans that would place it, and
+the section the refusal names is what an operator finds it by.
 
 ## `if key == "review" {`
 
@@ -846,10 +922,27 @@ hands the capture to [`load_captured`]; taking the lease and capturing again
 then compares two things that are directly comparable, because one of them is
 what was parsed.
 
+## `machine: Option<FileSnapshot>,`
+
+The machine-level settings file, `upstroke.toml` beside the pools file.
+Captured whether or not it exists, so that the confirmation a run makes
+under its locks covers a file that was created in between. `None` in two
+cases: there is no pools file location to be beside, and the path is the
+repository's own settings file (`layers::same_file`), which happens when a
+pools file is kept in a repository's root. That second case is one file and
+one layer, and reading it twice would report every key in it as the
+machine's.
+
 ## `pools: Option<FileSnapshot>,`
 
 Absent when this load has no pools file to read at all — no `--pools`
 and no `~/.upstroke/pools.toml` — which is silence rather than emptiness.
+
+## `pub const MACHINE_SETTINGS: &str = "upstroke.toml";`
+
+The machine-level settings file's name. The same name as the repository's,
+deliberately: it is the same schema, and an operator moving a setting from
+one scope to the other moves it between two files of one kind.
 
 ## `#[must_use]`
 

@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- Capacity is now tracked for the machine rather than for a repository. `upstroke capacity` and the
+  `validate` and `--dry-run` preview fold the rate-limit signals and the self-metered draw of
+  every run on the machine, found through each schema-4 run's private half under
+  `~/.upstroke/runs/`, where they folded the latest run of the repository they were started in;
+  the draw counts the current calendar month (UTC), which is what `monthly_allowance` is measured
+  against. `[capacity] scope = "repo"`, or `upstroke capacity --scope repo`, folds this
+  repository's runs alone. A run that cannot be read still shows nothing and is named in a
+  warning, and the scope line now counts such runs. Nothing routes on any of this yet.
+  Only an attempt that passed, in a run of any schema, clears another run's rate limit on its
+  pool, and only when its worker finished after that limit was met, dated by the attempt's start
+  and measured duration; a failed attempt, whatever it failed on and whether or not it reached the
+  provider, an attempt settled late from earlier work, and one with no recorded start no longer
+  read the pool as serving again. Each still clears its own run's limits.
+- `upstroke capacity --refresh` is new: the capacity tracker. For each pool that names a
+  `usage_provider` in `pools.toml` it asks that provider's documented usage endpoint what the
+  account has drawn this month, through a `curl` subprocess, and stores the answer under
+  `~/.upstroke/capacity/usage/`, where the capacity views read it as a ceiling that can lower an
+  estimate and never raise one. The providers are `anthropic-cost`, `openai-cost`,
+  `github-ai-credits` and `github-premium-requests`; the credential is read from the environment
+  variable named by `usage_token_env`, and `usage_account` names the account where a provider
+  reports per account. `upstroke connect` carries the three keys across a rewrite and writes none
+  itself. This is the only command that reaches a network, and `run` and `resume` never call it:
+  the engine still speaks no HTTP, and the binary links no HTTP client.
+- Settings now have a machine level. An `upstroke.toml` beside the pools file
+  (`~/.upstroke/upstroke.toml`) is read beneath every repository's own: tables merge key by key,
+  a scalar or an array (`[[gates]]`, `[[pins]]`) from the repository replaces the machine's whole,
+  and a run that takes a setting from the machine-level file says which. The machine-level file
+  must be a valid configuration on its own. A repository with no such file beside its pools file
+  is read exactly as before.
 - `upstroke capacity` and `validate` now show the usage-limit signals and spend of a schema-4 run
   when it is the repository's latest. They used to warn that its log was not a valid event and
   report no run.

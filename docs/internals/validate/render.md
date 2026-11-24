@@ -86,19 +86,24 @@ primary's own model implemented is off, and the primary reviews them itself.
 §13's capacity block, for a command that executes nothing.
 
 `validate` and `--dry-run` **do not probe** (§18): every figure here comes
-from files — the pools file, and the latest run's event log in this
-repository. That is a real distinction rather than a technicality, and the
-block says which side of it each line is on, because `upstroke capacity` shows
-strictly more by being allowed to spawn the vendors' CLIs.
+from files — the pools file, the event log of every run in scope (the
+machine's by default, since 2026-11-23; this repository's latest run before
+that), and the provider reports the capacity tracker stored. That is a real
+distinction rather than a technicality, and the block says which side of it
+each line is on, because `upstroke capacity` shows strictly more by being
+allowed to spawn the vendors' CLIs, and `upstroke capacity --refresh` more
+again by asking the providers. The `scope:` line is the gatherer's own
+account of what it folded.
 
 The same reason the review line says "if installed": a preview that reads as
 a promise is worse than one that reads as a plan.
 
-It takes `capacity::LatestRun` whole, because the line under the estimates
-has three forms and needs all of it. A run that was folded is named as the
-source of the draw. A run that exists but could not be read is named as
-that, by id, with estimates resting on configuration alone. Only a
-repository with no run says "no run in this repository yet".
+It takes `capacity::Gathered` whole, because the `scope:` line under the
+estimates is `Gathered::describe`'s and needs all of it. Runs that were
+folded are counted, with the repositories they belong to. Runs that were
+found and could not be read are counted as that, beside the warnings that
+name them. Only a scope with no run at all says "no run on this machine
+yet", or "in this repository" under the repository scope.
 
 ## `if let Some(binding) = second_opinion {`
 

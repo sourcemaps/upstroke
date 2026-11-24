@@ -13,7 +13,7 @@ use super::{
     DEFAULT_WAIT_ON_BLOCK, Duration, Effort, EngineLimits, EngineSettings, GateConfig,
     InteractionMode, InteractionSettings, OnTaskFailure, Path, RUNNER_KEYS, RawEngine, RawGate,
     RawInteraction, RawRunner, RunnerKind, RunnerMount, RunnerSelection, ShellKind, UpstrokeError,
-    check_budget,
+    check_budget, toml_error_message,
 };
 
 fn config_error(repo_path: &Path, message: String) -> UpstrokeError {
@@ -31,6 +31,7 @@ pub(super) fn read_runner(
         return Ok(RunnerSelection::host_default());
     };
     let runner: RawRunner = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -216,6 +217,7 @@ pub(super) fn parse_budgets(
         return Ok(Budgets::default());
     };
     let budgets: Budgets = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -230,6 +232,57 @@ pub(super) fn parse_budgets(
             .map_err(|message| config_error(repo_path, format!("[budgets] {message}")))?;
     }
     Ok(budgets)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawCapacity {
+    scope: Option<String>,
+
+    #[serde(flatten)]
+    unknown: std::collections::BTreeMap<String, toml::Value>,
+}
+
+pub(super) fn parse_capacity(
+    raw: Option<toml::Value>,
+    repo_path: &Path,
+) -> Result<crate::capacity::Scope, UpstrokeError> {
+    use crate::capacity::Scope;
+
+    let Some(value) = raw else {
+        return Ok(Scope::default());
+    };
+    let capacity: RawCapacity = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
+        config_error(
+            repo_path,
+            format!(
+                "[capacity]: {e} (expected a table with an optional `scope` string, one of: {})",
+                Scope::ACCEPTED.join(", ")
+            ),
+        )
+    })?;
+    if !capacity.unknown.is_empty() {
+        let keys: Vec<&str> = capacity.unknown.keys().map(String::as_str).collect();
+        return Err(config_error(
+            repo_path,
+            format!(
+                "unknown key `{}` in [capacity] (accepted: `scope`)",
+                keys.join("`, `")
+            ),
+        ));
+    }
+    match capacity.scope {
+        None => Ok(Scope::default()),
+        Some(text) => Scope::parse(&text).ok_or_else(|| {
+            config_error(
+                repo_path,
+                format!(
+                    "[capacity] `scope = \"{text}\"` is not recognized (accepted: {})",
+                    Scope::ACCEPTED.join(", ")
+                ),
+            )
+        }),
+    }
 }
 
 const MAX_GATE_TIMEOUT_SECS: u64 = u64::MAX / 1000;
@@ -272,6 +325,7 @@ pub(super) fn parse_gates(
         let g: RawGate = match entry.try_into() {
             Ok(g) => g,
             Err(e) => {
+                let e = toml_error_message(&e, None);
                 let problem = format!(
                     "[[gates]] entry {n}: {e} (each entry takes `name`, `cmd`, and an optional \
                      `timeout_secs` integer)"
@@ -446,6 +500,7 @@ pub(super) fn parse_engine(
         });
     };
     let engine: RawEngine = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -595,6 +650,7 @@ pub(super) fn parse_interaction(
         });
     };
     let interaction: RawInteraction = value.try_into().map_err(|e| {
+        let e = toml_error_message(&e, None);
         config_error(
             repo_path,
             format!(
@@ -607,6 +663,7 @@ pub(super) fn parse_interaction(
     let ask_before = match interaction.ask_before {
         None => AskBefore::default(),
         Some(value) => value.try_into().map_err(|e| {
+            let e = toml_error_message(&e, None);
             config_error(
                 repo_path,
                 format!(
