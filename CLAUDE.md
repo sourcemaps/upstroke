@@ -18,7 +18,11 @@ before touching the engine, the event log, or anything that handles capacity or 
 seven, the ones a change is most likely to trip over:
 
 - **Agents edit files; the engine owns git.** Agents are told never to commit.
-- **The engine never speaks HTTP.** All model interaction is inside agent subprocesses.
+- **The engine never speaks HTTP.** All model interaction is inside agent subprocesses. The
+  capacity tracker (`src/tracker.rs`, `upstroke capacity --refresh`) is the one thing that does,
+  through a `curl` subprocess, and it is not the engine: `run` and `resume` never call it, its
+  entry points are on the effect denylist, and it asks only endpoints their provider documents
+  (`DESIGN.md` §13).
 - **Ground truth is the diff, not the transcript.**
 - **Every state transition is an event.** State is derived by replaying `events.jsonl`; resume is
   replay-then-continue. There is no second path.
@@ -140,7 +144,7 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `findings/` | The standing finding ledger, one file per open finding; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
 | `reviews/` | `reviews/FINDINGS.md`, the predecessor ledger, closed to new sections, and the dated review records still on master; historical review records are in the private lab repository |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
-| `src/` | One crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters, with `proc/` for subprocess handling), `engine/` (the conductor), `topology/` (the v0.2 execution topology), `runner/` (host and container execution), `events/`, `validate/`, `status/`, `effects/`, `connect/`, and flat modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`, `capacity.rs`, `rundir.rs`, `workspace.rs`, `workspace_manager.rs`, `export.rs`. Large modules are being split into per-concern children; check the tree rather than this list |
+| `src/` | One crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters, with `proc/` for subprocess handling), `engine/` (the conductor), `topology/` (the v0.2 execution topology), `runner/` (host and container execution), `events/`, `validate/`, `status/`, `effects/`, `connect/`, `capacity/` (the estimator, the machine-level fold, the usage-report schema), `tracker/` (the capacity tracker: provider endpoints and the `curl` transport), and flat modules such as `review.rs`, `gates.rs`, `ladder.rs`, `route.rs`, `rundir.rs`, `workspace.rs`, `workspace_manager.rs`, `export.rs`. Large modules are being split into per-concern children; check the tree rather than this list |
 
 ## Traps that have already cost time
 

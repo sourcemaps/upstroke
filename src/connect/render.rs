@@ -44,7 +44,14 @@ pub(super) fn pools_file_at(agents: &[AgentReport], written_at: &str) -> String 
              location (CLAUDE_CONFIG_DIR), so one vendor can back several pools (§13, §17). You\n\
              write it; `upstroke connect` never does, and carries it across --force. A run refuses a\n\
              profile it cannot honour, a relative path (`~` is not expanded) and a missing directory\n\
-             among them.",
+             among them.\n\
+             \n\
+             `usage_provider` opts a pool into `upstroke capacity --refresh` (§13, §17), which asks\n\
+             that provider's documented usage endpoint what the account has drawn this month.\n\
+             `usage_token_env` is the NAME of the environment variable holding the credential (the\n\
+             credential itself never belongs in this file), and `usage_account` the account, where\n\
+             the provider reports per account. You write them; `upstroke connect` never does, and\n\
+             carries them across --force.",
             env!("CARGO_PKG_VERSION"),
         ),
     );
@@ -127,6 +134,19 @@ fn pool_section(out: &mut String, pool: &Pool) {
     }
     if let Some(endpoint) = &pool.endpoint {
         let _ = writeln!(out, "endpoint = {}", toml_string(endpoint));
+    }
+    if let Some(usage) = &pool.usage {
+        let _ = writeln!(
+            out,
+            "usage_provider = {}",
+            toml_string(&usage.provider.to_string())
+        );
+        if let Some(token_env) = &usage.token_env {
+            let _ = writeln!(out, "usage_token_env = {}", toml_string(token_env));
+        }
+        if let Some(account) = &usage.account {
+            let _ = writeln!(out, "usage_account = {}", toml_string(account));
+        }
     }
 }
 

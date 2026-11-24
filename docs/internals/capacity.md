@@ -19,8 +19,34 @@ The capacity engine (DESIGN.md §13) — **read-only in v0.1**.
 Three things live here: the pool types `~/.upstroke/pools.toml` parses into,
 the estimator that turns observations into a per-pool remaining figure, and
 the folds that collect those observations from a run's event log: `observe`
-for a legacy log, `observe_topology` for a schema-4 one, and
-`latest_run_observations`, which picks between them by the log's schema.
+for a legacy log and `observe_topology` for a schema-4 one. `upstroke
+capacity` and `validate` reach the same rules through
+`capacity::machine::gather`, which reads every run in scope by the reader of
+its log's schema.
+
+Since 2026-11-23 the module has three children, each with its own rustdoc in
+its source rather than a notes file. `src/capacity/evidence.rs` is where the
+fold's rules are applied: a log is first reduced to evidence that names pools
+and nothing else, so that the logs of several runs can be put in one sequence,
+and `observe`, `observe_topology` and `exhausted_pools_of` below are one call
+each into it.
+`src/capacity/machine.rs` gathers that evidence from every run on the machine
+and reads the provider reports the capacity tracker stored.
+`src/capacity/usage.rs` is the schema of those reports. The tracker itself,
+the one module that speaks HTTP, is `src/tracker.rs`, and nothing in this
+module or its children starts its transport: they read what it wrote.
+
+What it writes is one report per pool, in its store under the machine
+directory (`~/.upstroke/capacity/usage/` by default), through
+`tracker::publish`. Each is written to a staging file beside its destination
+and renamed into place, so a reader finds the old report or the new one and
+never part of either, and a failed write or rename leaves no staging file:
+`publish` removes it after either. Until 2026-11-24 only a failed rename
+removed it, and a write that failed part way, at a full disk or a file-size
+limit, left what it had written in the store as a `.staged-*.tmp`, one more
+for every refresh that failed the same way. A write that fails before
+creating the file leaves nothing to remove, and that is no failure to clean
+up.
 
 §13's sequencing is the reason no estimate routes anything yet: v0.1 ships
 the estimator so `upstroke capacity` and the dry-run preview can show what each
@@ -35,7 +61,8 @@ exhausted, and a worker's rate limit fails over to another such pool (see
 agent's first pool, which still names the pool of its reviews and selects the
 profile its review and probe processes run under.
 
-The estimator is a pure function over plain values ([`estimate`]), so every
+The estimator is a pure function over plain values ([`estimate`], and
+[`estimate_gathered`] over what the machine-level gatherer read), so every
 rule in §13 is exercisable with no CLI installed and no file on disk. Only
 collection touches the world, and even that is a fold over events someone
 else read.
@@ -48,10 +75,13 @@ Three properties hold by construction and are pinned by tests:
    `max(0, raw × (1 − safety_margin) − reserve)` — the margin covers usage
    on other machines that local parsing cannot see, and the reserve is
    headroom the engine leaves for the operator's own interactive work.
-3. **Trust order is ranked and fixed.** `Signal > SelfMetered > Assumed >
-   Unknown` ([`Confidence`]), and a lower-ranked source can never overwrite
-   a higher one — a rate-limit signal is ground truth, and a self-metered
-   guess must not talk it back up.
+3. **Trust order is ranked and fixed.** `Signal > SelfMetered > Reported >
+   Assumed > Unknown` ([`Confidence`]), and a lower-ranked source can never
+   overwrite a higher one — a rate-limit signal is ground truth, and a
+   self-metered guess must not talk it back up. A provider's report
+   (`Reported`) is the case the rule was sharpened for: it may *lower* a
+   self-metered ceiling, since both are ceilings and the lower of two true
+   ceilings is true, and it may never raise one.
 
 ### Credential profiles
 
@@ -153,7 +183,11 @@ discard ground truth, which is why an unknown entry errors.
 ## `pub enum Source` › `ProviderEndpoint,`
 
 (4) Provider usage endpoints — fragile, never load-bearing. Parsed in
-v0.1, never read.
+v0.1 and never read there. Read since 2026-11-23, for a pool that names a
+`usage_provider`: the capacity tracker (`src/tracker.rs`) asks the endpoint
+and stores what it reports, and `src/capacity/machine.rs` reads that back.
+Listed with no provider named, it is still parsed and not read, and the
+estimate says so.
 
 ## `pub enum Source` › `LocalLogs,`
 
@@ -168,11 +202,6 @@ the operator's interactive sessions. Parsed in v0.1, never read.
 
 (1) Rate-limit signals from the CLIs — ground truth.
 
-## `impl Source` › `pub fn read_in_v0_1(self) -> bool {`
-
-Whether v0.1 actually reads this source. The two that are only parsed
-get a note on the estimate rather than a pretend number.
-
 ## `pub enum Allowance {`
 
 `monthly_allowance = "auto"` or a number of units.
@@ -180,6 +209,126 @@ get a note on the estimate rather than a pretend number.
 `Auto` is honest rather than convenient: it means the size of the allowance
 is not known to upstroke, which is different from it being zero and different
 again from it being unlimited.
+
+## `pub enum UsageProvider {`
+
+The provider usage endpoints the capacity tracker knows, as the configuration
+vocabulary names them. The enum is here, with the other pool vocabulary, and
+what each variant means on the wire is `src/tracker/provider.rs`'s: a match
+there is exhaustive, so a variant added here does not compile until it has a
+request and a parser.
+
+**The admission rule is DESIGN.md §13's**: an endpoint its provider documents,
+taking a credential the provider issues for the purpose. The four here meet
+it. The subscription-window endpoints that most usage tools read do not —
+Claude Code's is undocumented and takes the Claude.ai OAuth credential, which
+Anthropic's terms reserve for its own applications — and are absent on
+purpose, not for want of a parser.
+
+## `impl UsageProvider` › `pub fn parse(s: &str) -> Option<Self> {`
+
+Exact. `PoolKind::parse` and `Source::parse` trim and fold case, and this
+does not, for a reason of its own: `connect` carries the key across a rewrite
+by writing the parsed value back, so a spelling the reader accepted and the
+writer would not reproduce is a file `connect` refuses to replace on its next
+run, for a difference the operator cannot see.
+
+## `impl UsageProvider` › `pub const fn needs_account(self) -> bool {`
+
+Whether the endpoint reports per account, and so needs `usage_account` in its
+address. GitHub's billing usage does; the two organization cost endpoints
+answer for the organization the key belongs to. It also decides whether a
+stored report records an account, and so whether changing `usage_account`
+retires the report (see [`Reported`]).
+
+## `pub const MAX_TOKEN_ENV_CHARS: usize = 64;`
+
+The longest `usage_token_env` the reader takes; a longer value is refused as
+having a credential's shape ([`looks_like_a_credential`]). `src/tracker.rs`
+reads the same bound and prints a configured name longer than it cut short,
+so whether a name is printed whole is decided by the length the reader
+accepts. It is shorter than `MAX_USAGE_KEY_CHARS`, which still bounds the
+character-class checks and `usage_account`.
+
+## `pub enum UsageKeyDefect {`
+
+Why three strings from a pools file are not a usage source. The messages are
+the configuration reader's refusals and `connect`'s warnings alike, which is
+why they live here and not in either.
+
+`TokenEnvNotAName` deliberately does not say what was written. The value of
+`usage_token_env` is a variable's name, and the usual way for it not to be
+one is that a key was pasted there; an error that quoted it would put the key
+on a terminal and in whatever captured the output.
+
+`TokenEnvLooksLikeACredential` keeps the same rule for a value that is a name
+by its characters and still has a credential's shape. It lists the shapes it
+refuses and never the value. Like `TokenEnvNotAName` it carries no field, so
+there is nothing it could repeat a pasted key from; the reader prefixes the
+pool's table and `connect` the pool's name. Since 2026-11-23
+`TokenEnvNotAName` states the 64 characters of `MAX_TOKEN_ENV_CHARS` and not
+the 128 of `MAX_USAGE_KEY_CHARS`: a name between the two is refused too, as
+credential-shaped, and the bound worth stating is the one an operator can
+meet.
+
+## `impl UsageSource` › `pub fn from_keys(`
+
+The one validation of the usage keys, shared by the configuration reader and
+by `connect`'s carry, so that `connect` cannot write a file the reader then
+refuses. A key with no provider is a refusal rather than a no-op because the
+likeliest cause is `usage_provider` misspelled, which is otherwise a pool
+that is silently never asked.
+
+`usage_token_env` takes the name of an environment variable, never a
+credential, and two checks hold it to that. `names_an_environment_variable`
+refuses what is not a name by its characters (`TokenEnvNotAName`), and then a
+value with a credential's shape is refused ([`looks_like_a_credential`],
+`TokenEnvLooksLikeACredential`). The first check alone was not enough. A
+GitHub fine-grained token is `github_pat_` followed by letters, digits and
+underscores, so it is a name by its characters. Until 2026-11-23 the reader
+took one, the tracker looked it up as a variable, found nothing, and printed
+it whole in the line saying the variable was not set
+(`PR409-PASTED-GITHUB-TOKEN-LEAK`). The order of the two checks decides only
+which refusal is given to a value that fails both, such as one starting
+`sk-`. Neither refusal repeats the value.
+
+## `impl UsageSource` › `pub fn gaps(&self) -> Vec<String> {`
+
+What a valid source still lacks for a refresh: no credential variable, or no
+account where the provider needs one. Warnings and not refusals, because the
+tracker's inputs are not a reason to refuse a run, and the tracker says the
+same thing itself when it skips the pool.
+
+## `fn looks_like_a_credential(text: &str) -> bool {`
+
+Whether a value written for `usage_token_env` has the shape of a credential
+and not of a variable's name: it starts with one of `CREDENTIAL_PREFIXES`, or
+it is longer than `MAX_TOKEN_ENV_CHARS` (64) characters.
+
+The prefixes are GitHub's `github_pat_`, `ghp_`, `gho_`, `ghu_`, `ghs_` and
+`ghr_`, the `sk-` of OpenAI's keys and the `sk-ant-` of Anthropic's, and
+Slack's `xoxb-`. They are matched exactly, case included: providers issue them
+in lower case, and an upper-case name such as `GHP_TOKEN` is an ordinary
+variable. `sk-ant-` is already covered by `sk-` and is listed so the list
+names every shape the finding names. The three with a `-` are never names by
+their characters anyway; they are listed so that this rule says what a
+credential looks like by itself, whatever the character check beside it
+allows. The length is the catch-all for a token whose prefix is not listed:
+a variable's name longer than 64 characters is rare, and many credentials are
+longer (a fine-grained GitHub token is 93). The rule leans towards refusing.
+A wrong refusal costs the operator a shorter variable name, and a wrong pass
+prints a credential.
+
+It is private, since nothing outside this module needs it.
+`src/tracker.rs` guards by length alone, through `MAX_TOKEN_ENV_CHARS`.
+
+## `pub fn names_an_account(text: &str) -> bool {`
+
+Letters, digits, `.`, `_` and `-`, not starting with `.` or `-`. The account
+is placed in the request's address, so the check is what stands between a
+pools file and a path the operator did not mean. `src/tracker/provider.rs`
+checks it again where the address is built: constructing a `UsageSource`
+confers no authority (CODING_STANDARDS.md §14).
 
 ## `pub const DEFAULT_SAFETY_MARGIN: f64 = 0.15;`
 
@@ -209,6 +358,12 @@ and displayed, and acted on for Claude Code on the host runner of a
 schema-4 run, which sets it as `CLAUDE_CONFIG_DIR` on the work, review
 and probe processes of the agent whose bound pool this is (see the
 module docs).
+
+## `pub struct Pool` › `pub usage: Option<UsageSource>,`
+
+Which provider usage endpoint the capacity tracker asks for this pool, and
+with what: `usage_provider`, `usage_token_env` and `usage_account` (§17).
+`None` for every pool `connect` writes; only an operator opts a pool in.
 
 ## `pub struct Pool` › `pub usable: bool,`
 
@@ -287,7 +442,13 @@ the source of truth). Attempts that name no pool contribute nothing — an
 unattributed cost belongs to no subscription, and guessing which would be
 worse than leaving the pool unmeasured.
 
-## `pub fn observe(events: &[Event]) -> Observations {` › `EventBody::PoolExhausted { data, .. } => {`
+## `pub fn observe(events: &[Event]) -> Observations {` › `evidence::fold(&evidence::of_legacy(events), 0)`
+
+The fold itself is `src/capacity/evidence.rs`'s since 2026-11-23, so that the
+rules below are written once and apply alike to one run's log and to every
+run on the machine. `of_legacy` reduces the log to its `pool_exhausted`
+signals and its settled attempts; `fold` applies them in order; the `0` is
+"count every draw", since one run's fold has no period to cut at.
 
 A signal sets its pool's reset to its own: the latest signal wins. The
 engine writes a second `pool_exhausted` for a pool already exhausted only
@@ -295,13 +456,16 @@ when a later refusal names a different reset — the five-hour limit
 clearing into the weekly one — and that later time is the one the
 estimate must report, not the five-hour reset already past. A rate-limited
 settlement, unlike a signal, never replaces a known reset (see
-`retire_signals`).
+[The fold's rules](#pub-mod-evidence) below).
 
 ## `pub fn observe_topology(events: &[TopologyEvent]) -> Observations {`
 
 Fold a schema-4 run's events into observations: `observe`'s sibling for a
-`TopologyEvent` log. `upstroke capacity` and `validate` reach it through
-`latest_run_observations`.
+`TopologyEvent` log. Like `observe` it is one call into the evidence fold,
+`evidence::fold(&evidence::of_topology(events), 0)`, so the rules below are
+`evidence::of_topology`'s. They are applied to one run's log here, and to
+every run in scope by `capacity::machine::gather`, which is how `upstroke
+capacity` and `validate` reach them.
 
 `exhausted` is exactly `exhausted_pools_of(events)`, the map a resumed
 `TopologyRun` starts from, so the report and the run cannot disagree about
@@ -311,8 +475,8 @@ which pools a log holds exhausted.
 exactly once, in one of three ways. A failed one settles as
 `attempt_finished`, and the fold refuses an `attempt_finished` whose record
 says success. An accepted one settles as `candidate_prepared` and writes no
-`attempt_finished`. Both carry the attempt's record, and it is summed
-through `accumulate`, the worker's pool and each review's, as `observe`
+`attempt_finished`. Both carry the attempt's record, and its draws are
+counted through `draws_of`, the worker's pool and each review's, as `observe`
 does.
 
 The third settlement is `attempt_interrupted`, which a resume writes for an
@@ -327,7 +491,7 @@ three counts each attempt once.
 
 When the log records no `attempt_started` for the interrupted attempt, or
 its start names no pool, nothing can be attributed to a pool and the fold
-adds nothing. That is `accumulate`'s rule for a record naming no pool.
+adds nothing. That is `draws_of`'s rule for a record naming no pool.
 
 An interrupted attempt used to add nothing here at all. A pool it had drawn
 on then showed its dollars as complete, while the same run's report
@@ -339,15 +503,15 @@ log records a verification's passes in one of four carriers: a verified
 `merge_prepared` (`verification.reviews`), a `CodeRejected`
 `merge_rejected` (`disposition.verification.reviews`),
 `merge_verification_unavailable` (`reviews`) and
-`merge_verification_charged` (`reviews`). After the attempt arms, the fold
-reads them through `IntegrationReviews::replay(events).all()`, the replay
-`RunReport::from_topology` adds to its pool rows, and adds each pass to the
-pool it names through `Spend::add`: its amount summed when known, counted
-unpriced when not. Reading all four carriers counts each pass once, because
+`merge_verification_charged` (`reviews`). `evidence::of_topology` reads them
+off those four events, the same four `IntegrationReviews::replay` reads for
+the pool rows of `RunReport::from_topology`, each dated by its own event, and
+the fold adds each pass to the pool it names through `Spend::add`: its amount
+summed when known, counted unpriced when not. Reading all four carriers counts each pass once, because
 the fold admits one record of a sequence's passes, so no two carriers hold
 the same pass.
 
-A pass naming no pool adds nothing, as in `accumulate`. An interrupted
+A pass naming no pool adds nothing, as for an attempt's own passes. An interrupted
 verification (`merge_verification_interrupted`) records no pass and names
 no pool, so only the passes its `merge_verification_charged` recorded are
 counted, as in the run report's pool rows.
@@ -365,12 +529,14 @@ resumed `TopologyRun` starts from it, as the legacy resume starts its
 `exhausted_pools` from `observe`. Without it the resumed run forgets every
 signal its log holds, and the next refusal naming the same reset writes a
 second `pool_exhausted`. `observe` reads `Event`, not `TopologyEvent`, so
-this is a sibling rather than a change to it. `observe_topology` takes its
-`exhausted` from here unchanged.
+this is a sibling rather than a change to it: the two differ in how a log
+becomes evidence (`evidence::of_legacy`, `evidence::of_topology`) and share
+the fold that applies it. `observe_topology` is the same evidence with the
+spend kept, so its `exhausted` is this map.
 
 The rules are `observe`'s. A `pool_exhausted` sets its pool's reset. A
 settled attempt's record retires the pools it proves serving and marks a
-rate-limited pool with no reset if none is recorded (`retire_signals`). An
+rate-limited pool with no reset if none is recorded. An
 accepted attempt settles as `candidate_prepared`, not `attempt_finished`,
 and its record retires the same way, as the live run's `record_promoted`
 does. `attempt_interrupted` carries no record and changes nothing.
@@ -387,16 +553,21 @@ event is `attempt_finished`, the record retires first and the signal is
 recorded after. If it is anything else, or the log ends there, the signal
 is recorded at once. That is the stop this ordering leaves: the signal is
 durable, the settlement is not, and the resume holds the pool at that
-reset.
+reset. The holding is `evidence::of_topology`'s: it emits a held signal after
+the settlement that follows it, so the order it hands the fold is the order
+the live run applied, and the fold needs no notion of holding.
 
 It is effect-free in `effects/wrappers.toml`.
 
-## `fn record_signals<'a>(`
+## `pub mod evidence;`
 
-Record each held `pool_exhausted`: its pool, at its reset. A later one for
-the same pool replaces the earlier, as in `observe`.
-
-## `fn retire_signals`
+**The fold's rules.** They were three private functions of this file until
+2026-11-23 — `record_signals`, `retire_signals` and the body of `observe` —
+and are `evidence::fold` now. What follows is their record, kept because the
+reasons outlive the names. In `fold`'s terms: a `What::Signal` records its
+pool at its reset, a later one for the same pool replacing the earlier; a
+`What::Work` first retires the pools it proves served, then marks the pool
+it proves refused.
 
 Withdraw the exhausted mark from any pool this attempt proves is serving
 again.
@@ -411,9 +582,11 @@ successful attempts it had served since.
 
 Events arrive in order, so a later signal re-marks a pool this retired —
 which is right: the pool went down again. The retiring half is
-`retire_served_pools`, which the live engine calls too.
+`retire_served_pools`, which the live engine calls too; both it and the
+fold take the pools from `served_pools`, so the two cannot disagree about
+which a record proves.
 
-## `fn retire_signals` › `if let Some(pool) = limited_pool(record) {`
+**The refused pool is marked from the settlement.** `limited_pool` names it.
 
 In a legacy log the attempt settlement itself is the durable source of a
 rate-limit signal. The legacy writer, which runs only when a run of
@@ -426,9 +599,8 @@ the signal durable and the settlement not, and `exhausted_pools_of` holds
 the pool at the signal's reset. In either log a rate-limited settlement
 that no signal accompanies still marks its pool here.
 
-## `fn retire_signals` › `exhausted.entry(pool.clone()).or_insert(None);`
-
-Mark the pool, but keep a reset already known for it. The sequential
+**Mark the pool, but keep a reset already known for it**
+(`obs.exhausted.entry(pool.clone()).or_insert(None)` in `fold`). The sequential
 engine writes one `pool_exhausted` per outage, carrying the reset it read
 from the first refusal (and one more only when a later refusal names a
 different reset), and every other deferral after it settles as one more
@@ -447,7 +619,7 @@ for a worker failure, the last review's pool for a reviewer failure. Any
 other failure, or none, names no pool, and so does an attempt that ran on
 no pool.
 
-`retire_signals` marks this pool exhausted. The schema-4 run's
+`evidence::fold` marks this pool exhausted. The schema-4 run's
 `back_off` reads the same pool from a deferred task's last
 `attempt_finished` when a reviewer was limited, to find the reset it waits
 toward, so the two cannot disagree about which subscription refused. For
@@ -490,7 +662,7 @@ It is effect-free in `effects/wrappers.toml`, like the rest of this module:
 it reads the record it is given and removes entries from the map it is
 given, and reaches no primitive and no path.
 
-## `fn retire_served_pools` › `for review in &record.reviews {`
+## `fn served_pools(record: &AttemptRecord) -> Vec<&String> {` › `.filter(|review| review.outcome != ReviewPassOutcome::Unavailable)`
 
 A review pass that reached a verdict proves its own pool served, which on
 a cross-vendor second opinion is a different subscription entirely.
@@ -537,13 +709,13 @@ the ledger's per-pool column and the estimator's self-metered source must
 be the same number, or one of them is wrong and nothing says which. All
 three sum through `accumulate`.
 
-## `fn accumulate` › `if let Some(pool) = &record.pool {`
+## `fn draws_of(record: &AttemptRecord) -> impl Iterator<Item = (&String, Option<f64>)> {`
 
 An attempt naming no pool contributes nothing: unattributed cost belongs
 to no subscription, and guessing which would be worse than leaving the
 pool unmeasured.
 
-## `fn accumulate` › `for review in &record.reviews {`
+## `fn review_draws(reviews: &[ReviewRecord]) -> impl Iterator<Item = (&String, Option<f64>)> {`
 
 A cross-vendor second opinion drains a different subscription than the
 implementer it judged (§11.3), so each pass is attributed on its own.
@@ -574,11 +746,13 @@ An **upper bound** on the fraction still available, after
 `safety_margin` and `reserve`, clamped to `0.0..=1.0`.
 
 Deliberately not "the fraction remaining". Self-metering sees only what
-this engine spawned in this repository, so `1 − draw/allowance` is what
+this engine spawned — in one run, in this repository this month, or on
+this machine this month, by the basis — so `1 − draw/allowance` is what
 is left *if nothing else drew on the pool* — and something else almost
-always did: earlier runs, other repositories, and the operator's own
-interactive sessions (§13's source 3, which v0.1 parses and does not
-read). Every one of those can only reduce what is left, never increase
+always did: other machines, and the operator's own interactive sessions
+(§13's source 3, which is parsed and not read). The machine basis closes
+the two gaps this note used to list first, earlier runs and other
+repositories, and those two only. Every one of those can only reduce what is left, never increase
 it, so the figure is sound as a ceiling and false as a measurement.
 Rendered with `≤` for exactly that reason.
 
@@ -601,6 +775,12 @@ Nothing measured it.
 Derived from the pool's declared shape rather than from anything
 observed — e.g. a local endpoint that cannot run out.
 
+## `pub enum Confidence` › `Reported,`
+
+The provider's own usage endpoint said so, as the capacity tracker stored
+it. Below self-metering, as §13's trust order has it: an endpoint can change
+or fail without notice, and what this engine spawned it knows for certain.
+
 ## `pub enum Confidence` › `SelfMetered,`
 
 Self-metering of what this engine spawned.
@@ -608,6 +788,99 @@ Self-metering of what this engine spawned.
 ## `pub enum Confidence` › `Signal,`
 
 A rate-limit signal from the CLI itself.
+
+## `pub struct Reported {`
+
+The ceiling a stored provider report still supports for one pool, already
+reduced to a fraction: `remaining` is raw, before the pool's margin and
+reserve. `src/capacity/machine.rs` builds it (`reading`), since what a report
+is worth depends on the clock and on the pool's allowance, and the estimator
+is given neither.
+
+It depends on the account as well. A provider that reports per account
+([`UsageProvider::needs_account`]) answers for the account in the request's
+address, and "usage inside one window only grows" is true of one account.
+Until 2026-11-23 a stored report did not record which account it was, and
+`reading` checked only its provider: a pool refreshed for `account-a` at 90
+of 100 drawn and then switched to `account-b` showed `account-a`'s "≤10%
+[provider-reported]" for `account-b`, with no note, until the window reset
+(`PR409-USAGE-CACHE-ACCOUNT-IDENTITY`). A report now records the account it
+was fetched for: the pool's `usage_account` at the refresh, and none for a
+provider that reports per key, whatever the pool sets. One function decides
+that, `capacity::usage::account_for`; the tracker writes with it and
+`reading` checks with it, so the two cannot disagree. `reading` builds no
+`Reported` from a report whose account is not the one the pool names now.
+Its note says which account the report came from and which the pool now
+names, as the note for a changed `usage_provider` does, and that
+`upstroke capacity --refresh` replaces it. A report that records no account,
+for a provider that needs one, was stored before accounts were recorded. It
+cannot be told apart from another account's, so it bounds nothing either,
+with a note saying it predates account recording.
+
+Until 2026-11-24 that last rule had a hole. `reading` took a report's
+account to match when it equalled what `account_for` answered for the pool,
+so a report that records no account and a pool that names no
+`usage_account` matched, `None` to `None`: a GitHub report stored before
+accounts were recorded still bound such a pool, although the refresh skips
+that pool and so would never replace the report
+(`PR409-USAGE-CACHE-MISSING-ACCOUNT`). Where the provider reads an account,
+the account must now be known on both sides and equal, and `None` matches
+nothing. The note for a pool that names no `usage_account` says the refresh
+will not run for it until it names one.
+
+It depends on the credential too. A provider that reports per key
+(`anthropic-cost`, `openai-cost`) answers for the organization its key
+belongs to, and its report records no account. Until 2026-11-24 nothing
+recorded which key it was, so a report fetched with the key in
+`ORG_A_ADMIN_KEY`, at 90 of 100 spent, still supplied the ceiling after the
+pool's `usage_token_env` was changed to `ORG_B_ADMIN_KEY`, another
+organization's, with no note (`PR409-USAGE-CACHE-CREDENTIAL-IDENTITY`). A
+report now records the name of the environment variable the tracker read
+its credential from, for every provider, and `reading` binds it only while
+that name is the pool's `usage_token_env`. As with the account, a report
+that records none, or a pool that names none, matches nothing. The name is
+what is recorded and compared, so a variable that comes to hold another
+organization's key under the same name is not seen. The binding is to the
+configuration, not to the credential, which a report never holds.
+
+One function decides whether a report is about the source the pool names
+now: `other_source` in `src/capacity/machine.rs`. It checks the provider,
+then the account where the provider reads one, then the variable, and the
+first that differs gives the note. It compares with
+`capacity::usage::account_for` and `capacity::usage::token_env_for`, the
+helpers the tracker records the two fields with, and the tracker also reads
+the credential from the variable `token_env_for` names, so the writer and
+the reader cannot disagree. Every refusal is a note in the style of the
+provider's: what the report came from and what the pool names now, or that
+the report predates recording it, and that `upstroke capacity --refresh`
+replaces it. Where the pool names no `usage_account` its provider needs, or
+no `usage_token_env`, the note says instead that the refresh will not run
+for the pool until it names one. A note names variables and accounts, never
+a credential.
+
+Both fields are optional, so a report stored before either still decodes.
+The tracker leaves the account out of a per-key provider's report and
+writes the variable in every report. A report stored before the variable
+was recorded therefore bounds nothing, with its note, until a refresh
+replaces it. A build from before a field refuses a report that has it, as
+an unknown field, and that report then bounds nothing there. Every report
+now carries `token_env`, so a build from before 2026-11-24 can read none of
+the reports a later build writes. The report stores names, never a
+credential. It refuses an account that is not an account name
+(`names_an_account`), and a variable that is not a variable's name or is
+longer than `MAX_TOKEN_ENV_CHARS`, on the way in and on the way out. That
+bound is the one within which `src/tracker.rs` prints a name whole, so a
+note never prints whole a recorded name the tracker would have cut short.
+
+## `pub enum Basis {`
+
+What the observations were folded from, which decides how the draw is worded:
+"this run drew", "this repository's runs drew, this month,", "upstroke on this
+machine drew, this month,". The sentence used to be fixed at "this run", which
+is still true of the snapshot a run writes about itself and false of the
+capacity views since they became machine-level. The self-metered note takes
+its list of what went unseen from the same place, so a machine-level ceiling
+no longer says other repositories are missing from it.
 
 ## `pub struct PoolEstimate {`
 
@@ -628,6 +901,18 @@ Everything the estimate could not account for, said out loud.
 ## `impl PoolEstimate` › `pub fn describe(&self) -> String {`
 
 One line: the pool, what is left, and how confident that is.
+
+## `pub fn estimate_gathered(pools: &[Pool], gathered: &Gathered) -> Vec<PoolEstimate> {`
+
+[`estimate`] over what `machine::gather` read: the same rules, with the
+provider reports and the basis the gatherer established. `estimate` is the
+one-run form, with no report and the `Run` basis, and is what a run's own
+`capacity_snapshot` still uses.
+
+The notes the gatherer attached to a pool's report are cloned into the
+estimate (`notes.extend(report_notes.iter().cloned())`): an estimate owns its
+notes, as it owns every other line of itself, and the gatherer's copy is
+borrowed for every pool in turn.
 
 ## `pub fn estimate(pools: &[Pool], obs: &Observations) -> Vec<PoolEstimate> {`
 
@@ -658,11 +943,29 @@ draw is reported beside an Unknown remaining rather than dressed up as
 one — §13's conservatism is about never overstating what is left, and
 "we measured some spend" is not a measurement of the ceiling.
 
+## `fn estimate_one` › `if let Some(report) = reported {`
+
+(4) The provider's report, last and below everything above it. **It only
+ever sets or lowers a ceiling.** Against a signal it is a note and the
+signal stands; an unmetered pool it says nothing about; a self-metered
+ceiling it replaces only when its own is lower, and otherwise the note says
+the report allowed more and was not used. That is "never load-bearing" made
+into arithmetic: both figures are ceilings, the lower of two true ceilings is
+true, and an endpoint that breaks high can cost nothing while one that breaks
+low costs only caution. It never yields `Exhausted`, whatever it reports: a
+report of everything drawn is `AtMost(0.0)`, and "exhausted" stays the word
+of a rate-limit signal alone.
+
+This arm sits outside `take` on purpose. `take` is rank-ordered replacement,
+and replacement is exactly what a lower-ranked source must not do here.
+
 ## `fn estimate_one` › `let unread: Vec<String> = pool`
 
-The two sources v0.1 parses but does not read. Saying so is the point: a
-pool that lists `local-logs` and gets an estimate anyway would read as
-though interactive usage had been accounted for.
+The sources that are parsed and not read: `local-logs` always, and
+`provider-endpoint` where the pool names no `usage_provider`, which is then
+the thing to add. Saying so is the point: a pool that lists `local-logs` and
+gets an estimate anyway would read as though interactive usage had been
+accounted for.
 
 ## `pub fn effective_remaining(raw: f64, pool: &Pool) -> f64 {`
 
@@ -717,12 +1020,29 @@ would be a lie by tense.
 
 ## `pub struct CapacityOptions {`
 
-`upstroke capacity [--config <path>] [--pools <path>]` (§18).
+`upstroke capacity [--config <path>] [--pools <path>] [--scope machine|repo]`
+(§18). `--refresh` is not here: it is the capacity tracker's, a different
+module (`src/tracker.rs`), which the CLI runs before it asks for this report.
+Nothing in this file starts it.
 
 ## `pub struct CapacityOptions` › `pub repo_root: std::path::PathBuf,`
 
-Where to look for runs to self-meter from. Outside a git repository
-there simply are none, which the report says rather than erroring on.
+This repository, whose own run directory is always listed: it is where a run
+of schemas 1–3, which keeps no owner record under the machine directory, can
+be found at all. Outside a git repository there are no such runs, which the
+report says rather than erroring on.
+
+## `pub struct CapacityOptions` › `pub scope: Option<Scope>,`
+
+`--scope`. `None` takes `[capacity] scope` from the settings, whose own
+default is the machine (§17), so the flag outranks the file.
+
+## `pub struct CapacityOptions` › `pub now_unix: Option<u64>,`
+
+The moment the report is taken at, which decides which calendar month the
+draw counts and whether a stored provider report's window has reset. `None`
+reads the clock; a test gives the moment, so that neither is a function of
+when the suite ran.
 
 ## `pub struct CapacityReport` › `pub agents: Vec<AgentStatus>,`
 
@@ -730,84 +1050,237 @@ Live probe + discovery per agent named by a pool. **This** is where
 probing belongs: `capacity` is allowed to spawn the vendors' CLIs, and
 `validate` is not (§18).
 
-## `pub struct CapacityReport` › `pub run_id: Option<String>,`
+## `pub struct CapacityReport` › `pub gathered: Gathered,`
 
-The latest run in this repository. `Some` whenever there is one, whether or
-not its log could be folded. It used to be `None` for a run whose log could
-not be read, and the report then said "no run in this repository yet" about
-a repository that had one.
-
-## `pub struct CapacityReport` › `pub run_folded: bool,`
-
-Whether the observations behind `estimates` were folded from `run_id`'s
-log. This is the one field added to tell a run that was read from a run
-that could not be: `render` says which, by id, and says "no run" only when
-`run_id` is `None`. It is `false` when there is no run.
-
-## `pub struct LatestRun {`
-
-What `latest_run_observations` answers: the observations, the latest run's
-id, and whether the observations were folded from that run. `Default` is
-the repository with no run: nothing observed, no id, not folded.
-
-## `pub fn latest_run_observations(`
-
-The one way `upstroke capacity` (`report`) and `validate` read "the latest
-run", whichever schema wrote it. Each used to carry its own copy of a
-legacy-only read. A schema-4 log made that read fail, so on a repository
-whose latest run was schema 4 both showed no exhausted pool and no spend,
-and both warned of a log that was in fact intact.
-
-- It asks `engine::topology::observe::observe` first. `Some(observed)` is a
-  schema-4 log, already checked by a full replay, and `observe_topology`
-  folds `observed.accounting_events()`, the events `status`'s ledger
-  folds.
-- `None` is a legacy log. It is read as before: `events::read_all`, then
-  `observe`. `read_all`'s torn-tail notice goes to `warnings`.
-
-**A schema-4 run's in-flight attempts count as `status` counts them.** If
-nothing holds the run and it has not finished, its coordinator died before
-the attempts it had started settled. `accounting_events` follows the
-committed log with the interrupted settlements its resume will append, so
-each such attempt counts once on the pool its `attempt_started` named, with
-its cost unknown. That is how `status` already counted it. A run another
-process holds is folded as committed: its live coordinator still owns those
-attempts, and they count when they settle. Until this read went through
-`accounting_events` it folded `observed.events()`, the committed log alone.
-Between a coordinator's death and its resume, `status` counted the attempt
-in flight and `capacity` and `validate` did not. The legacy reader keeps
-that gap: it folds the committed log alone, and `status::load`'s
-`settle_interrupted` is not applied here.
-- An error from either reader answers `Observations::default()`, with the
-  run's id and `folded: false`, and pushes one warning naming the run and
-  the error.
-
-The warning says nothing from that run is shown, neither its signals nor
-its spend. The two copies it replaces said "showing signals only" and
-"rests on rate-limit signals alone". Neither was true: the signals are in
-the same log, and a log that cannot be read yields none of them.
-
-A repository with no run answers `LatestRun::default()` and warns of
-nothing. "The latest run" is `rundir::latest_run`'s answer, with the
-limits its own notes state.
-
-It is effect-free in `effects/wrappers.toml`: it reads through
-`rundir::latest_run`, the topology observer and `events::read_all`, and
-reaches no primitive of its own.
+What the estimates were folded from: the observations, the provider reports
+still in force, how many runs in how many repositories, and how many runs were
+found and could not be read. It replaced `run_id` and `run_folded`: the one
+run the figures used to come from, and whether that run's log had been read.
+What `run_folded` existed to tell apart is kept, over many runs:
+`Gathered::unread` counts the runs that were found and not read, and `render`
+says "no run" only when none was found.
 
 ## `pub fn report(`
 
-Collect everything `upstroke capacity` reports: pools from config, the
-rate-limit signals and self-metered spend of the latest run in this repo,
-legacy or schema 4, and a live probe per agent.
+Collect everything `upstroke capacity` reports: pools from config, the signals
+and the self-metered draw of every run in scope, legacy or schema 4, the
+provider reports the tracker stored, and a live probe per agent. It reads
+files and starts each agent's probe; it writes nothing and asks no provider.
 
-## `let latest = latest_run_observations(&opts.repo_root, &mut warnings);`
+## `let gathered = machine::gather(`
 
-Self-metering needs a repository with runs in it. Pools are user-level
-(§17), so a listing outside a repo is still worth having — it just cannot
-say what has been drawn. Reporting that beats refusing to run. A run that
-is there but cannot be read is reported as that, with a warning, and the
-listing still renders.
+Until 2026-11-23 this was `latest_run_observations`: the latest run of this
+repository, read by whichever reader its schema needs. That function was
+itself a repair. `report` and `validate` had each carried a copy of a
+legacy-only read (`rundir::latest_run`, then `events::read_all`), a schema-4
+log made that read fail (`line 2 is not a valid event`), and so on a
+repository whose latest run was schema 4 both showed no exhausted pool and no
+spend, and both warned of a log that was in fact intact.
+
+What it left was the unit. A pool is drained by every repository on the
+machine, and a limit met in one is the state of the pool in all; and an
+allowance is a month's, not a run's. `machine::gather` keeps that reader's
+rules and applies them to every run in scope:
+
+- It asks `engine::topology::observe::observe` first, in `evidence_in`.
+  `Some(observed)` is a schema-4 log, already checked by a full replay, and
+  `evidence::of_topology` reduces `observed.accounting_events()`, the events
+  `status`'s ledger folds.
+- `None` is a legacy log. It is read by `events::read_all` and reduced by
+  `evidence::of_legacy`. `read_all`'s torn-tail notice is not passed on: the
+  committed lines are all the evidence there is, the schema-4 reader has
+  never reported its own torn tail here, and `status` is where an incomplete
+  final line is said.
+
+**A schema-4 run's in-flight attempts count as `status` counts them**, in
+every run the gatherer reads, whether its scope is the machine or this
+repository. If nothing holds a run and it has not finished, its coordinator
+died before the attempts it had started settled. `accounting_events` follows
+that run's committed log with the interrupted settlements its resume will
+append, so each such attempt counts once on the pool its `attempt_started`
+named, with its cost unknown. That is how `status` counts it. A run another
+process holds, in this repository or another, is folded as committed: its
+live coordinator still owns those attempts, and they count when they settle.
+A settlement added here is dated when the log is read, as the one a resume
+writes is dated at the resume, so the draw of the month it is read in counts
+it, whenever its attempt started. Until the gatherer's read went through
+`accounting_events` it folded `observed.events()`, the committed log alone,
+so between a coordinator's death and its resume `status` counted the attempt
+in flight and `capacity` and `validate` did not. The legacy reader keeps that
+gap: it folds the committed log alone, and `status::load`'s
+`settle_interrupted` is not applied here.
+
+- An error from either reader folds nothing from that log. Where no other
+  log of the run can be read, it counts the run in `Gathered::unread` and
+  pushes one warning naming the run and the error; where one can, that log is
+  folded and the warning names both (below).
+
+The warning says nothing from that run is shown, neither its signals nor its
+spend. Earlier copies said "showing signals only" and "rests on rate-limit
+signals alone". Neither was true: the signals are in the same log, and a log
+that cannot be read yields none of them.
+
+An owner record under the machine directory that exists and leads to no log
+is counted in `Gathered::unread` too, beside its warning: one that cannot be
+read, is not an owner record, names another run than the private half it is
+in, or names a directory that is not that run's under a repository's
+`.upstroke/runs/`. Until 2026-11-23 these were warned of and not counted, so
+a machine whose one run had a torn `owner.json` was described as having no
+run, under a warning naming that run's record
+(`PR409-UNREAD-OWNER-SCOPE-COUNT`). Two private halves are still not counted.
+One with no owner record is a run of schemas 1–3 or a creation that never
+wrote one: neither can be located from here, and neither is a fault worth a
+line on every listing. And one whose run this repository lists is read from
+that listing, so its record leaves nothing out, whatever it holds. It is
+neither warned of nor counted, since counting it would call a folded run
+unread.
+
+**A run is folded once, by its id.** Until 2026-11-24 `gather` folded each
+log once by its canonical path. That still makes a log listed from its
+repository and again from its owner record one log, but it never made two
+logs of one run one run. A repository copied to a second directory with its
+run artifacts, `.upstroke/` included, holds a second log of each of its runs,
+with the same id and the same events. While the machine's owner record still
+names the original, both logs are found from the copy, and from anywhere else
+only the original's: a run that spent $20 counted $40 from the copy and $20
+from the original, and nothing said so (`PR409-COPIED-RUN-COUNTED-TWICE`).
+Before the gatherer, when only the latest run of one repository was read, a
+copy could not count twice.
+
+The logs that carry one id, each once by its canonical path, are now one run,
+and `log_to_fold` folds one of them. Of those that can be read, that is the
+one the run's owner record names, else the one holding the most committed
+events, else the first by path. The choice is made from the logs and the
+record alone, never from the repository the command was started in or the
+order the logs were listed in. Logs that hold the same committed events are
+one run seen twice, and nothing is said of them. A log that holds other
+events is named in a warning beside the one folded, with the run's id and why
+that one was chosen, and so is a log that cannot be read beside one that can.
+Neither is counted in `Gathered::unread`, which counts a run once, by its id,
+and only when none of its logs can be read; `Gathered::runs` and
+`Gathered::repositories` count the logs folded. So the scope line still says
+what the estimates rest on: a run whose evidence is shown is never also "1
+more run could not be read". The events compared are the committed ones
+(`Observed::events`) and not `accounting_events`, whose added settlements are
+dated when the log is read. Today a run has at most two logs in scope, the one
+this repository lists and the one its owner record names, so where both can
+be read the record decides. The other two rules make the choice total, and
+`capacity::machine`'s own tests pin them.
+
+The evidence of every run is put in one sequence by `evidence::merge`, by
+time, with each run's own order kept. Event times are whole seconds, so two
+runs can have evidence of the same second. Until 2026-11-23 that evidence
+went in the order the runs were listed, which puts the runs of the repository
+`gather` was started in first. A refusal on a pool in one repository's run
+and a success on it in another's, in the same second, then cleared the pool
+when asked from the first repository and left it exhausted when asked from
+the second: one machine, two answers (`PR409-MACHINE-CWD-TIE-ORDER`). Each
+run is now handed to `merge` keyed by its id and then its log's path, and at
+an equal time the order follows the evidence and the keys, never the listing.
+Evidence that marks a pool refused waits while another run's evidence of that
+second still to come marks the pool served. So a success in one run does not
+clear a refusal another run met in the same second, and the pool reads
+exhausted, which is the conservative reading of two facts of one second.
+Otherwise the run whose key sorts first goes first. A run's own order is kept
+throughout, so a refusal and then a success of one second in one run still
+clear the pool. Two runs whose refusals and successes of one second cross,
+one refusing `p` before it serves `q` and the other refusing `q` before it
+serves `p`, have no order that puts both refusals after both successes, and
+there the run whose key sorts first goes first. Until 2026-11-24 one of the
+two refusals was then cleared. Both now stand, by the rule below, whatever the
+schema of either log, and the answer does not depend on which repository
+asked.
+
+**Whose refusal a success retires.** The order alone cannot say whether a
+success came after another run's refusal
+(`PR409-DELAYED-SETTLEMENT-CLEARS-NEWER-LIMIT`). A schema-4 run marks a pool
+served at the event that carries the attempt's record, `attempt_finished` or
+`candidate_prepared`, which it writes after the attempt's gates and its
+judgement, and `fold` used to retire every refusal of each pool the record
+served. So a worker that served `shared` from 11:00:00 to 11:01:00 and settled
+at 11:20 cleared another run's refusal of `shared` at 11:05, reset at 16:00,
+although nothing served `shared` after 11:05: that run alone held the pool to
+16:00, and the two merged gave the witness's pool at most 99% left. Dating the
+evidence by its service instead does not work: `merge` raises a run's
+timestamps that run backwards to the latest already seen, so the serving run's
+own later evidence would raise it back past the refusal.
+
+So `fold` asks whose refusal it is. It holds refusals per pool and per run: a
+pool is exhausted while any run's refusal of it stands, and it shows the reset
+of the refusal applied last. A signal adds or replaces its run's refusal of
+its pool, with its own reset, and a rate-limited settlement does the same,
+keeping the reset the pool shows. Each piece of evidence carries its run,
+which `merge` records as the run's place in key order. Evidence of one log is
+one run, so one log alone folds exactly as it did, and a resume, which replays
+`exhausted_pools_of` (§4.4), sees no change. The record of an attempt that
+passed, one with no failure, also carries `served_at`: the latest
+`attempt_started` of that attempt before it, plus the record's duration in
+whole seconds, never later than the record's own event. A schema-4 log names
+the attempt by its key, generation and number, and a log of schemas 1–3 by
+its task and number, where the record is the one its `attempt_finished`
+carries; the record an `attempt_interrupted` carries always fails. Work
+retires its own run's refusal of a pool always, in that run's order, whether
+its attempt passed or failed, and another run's only when its `served_at` is
+known and strictly later than that refusal's time. A refusal whose time cannot
+be read yields to its own run alone, and so does every refusal to work whose
+attempt failed or has no dated start, in a log of either kind. `evidence.rs`'s
+tests pin each case, the witness ported among them.
+
+A success of a log of schemas 1–3 was at first left undated, and kept the
+rule every success had before: it retired every run's refusal of the pool
+that the merged order put before it, so a legacy log's late settlement still
+retired another run's newer refusal, and `merge`'s wait was what kept another
+run's refusal of its own second standing. The sequential engine writes an
+attempt's `attempt_started` before its worker runs and settles the attempt
+after its gates and its judgement, as a schema-4 run does, so since
+2026-11-24 its records are dated the same way, and `fold` no longer asks
+which schema a log is of.
+
+**Only an attempt that passed retires another run's refusal** (ruling r51).
+Until 2026-11-24 a failed attempt's record was dated as well, and
+`served_pools`, which is `master`'s and which the live run binds on, counts
+every failure but an interruption and the worker's own rate limit as service.
+So a worker whose CLI never reached its provider cleared another run's
+refusal (`PR409-WORKER-ERROR-CLEARS-OTHER-RUNS-LIMIT`). Claude Code exiting 1
+after one second with nothing on stdout and `Could not connect to
+api.anthropic.com: Network is unreachable` on stderr is an `AgentError` with
+no usage and no cost. Started on `shared` at 11:06:00 and settled at 11:06:02,
+its record was dated 11:06:01, and it retired another run's refusal of
+`shared` at 11:05:00, reset at 16:00: repository scope kept the reset, and
+machine scope held no pool and read `shared` as unknown. Nor does a failed
+record date its usage when the provider did answer: a worker served at 11:04
+that timed out at 11:34 would have cleared a refusal at 11:05. So `served_at`
+is `None` for every record with a failure, whatever its kind, origin, usage or
+cost, in a log of either schema, and a failed attempt retires its own run's
+refusals alone. `served_pools`, `retire_served_pools` and `merge` are
+unchanged, so one log alone folds exactly as it did and a resume sees no
+change. `a_worker_error_does_not_clear_another_runs_limit`, below, ports the
+witness through the adapter and the gatherer, and `evidence.rs`'s tests pin
+the failures `AgentError`, `Timeout`, `GateFailed` and a reviewer's
+`ReviewFailed`, each with and without usage, in logs of both schemas.
+
+Four limits remain, each stated here because the rule cannot see past it. A
+reviewer's pool is dated by its worker's end, the earliest its review can
+have run, so a review that served after another run's refusal leaves that
+refusal standing when its worker ended before it. A failed attempt that the
+provider did answer, a worker whose gates then failed, say, retires only its
+own run's refusal, so the machine view errs toward exhausted until an attempt
+passes on the pool. The pool is the unit: a refusal that named one model,
+`You've hit your Fable limit` (§13), holds the whole pool, and an attempt that
+passed on that pool retires it whatever model the attempt ran, though the
+model named may still be limited. And inside one run the rule is `master`'s,
+which keeps two in-run twins of the defects above, both filed `deferred`. A
+late settlement still retires that run's own newer refusal: a worker that
+served before a refusal its own run met, and settled after it, clears that
+refusal (`PR409-LATE-SETTLEMENT-RETIRES-OWN-RUNS-NEWER-REFUSAL`). And a failed
+attempt still retires its own run's refusal of the pool it ran on, a worker
+that never reached its provider included, since the live run retires every
+pool `served_pools` names when it settles an attempt
+(`PR409-WORKER-ERROR-RETIRES-OWN-RUNS-HELD-POOL`).
+
+Pools are user-level (§17), so a listing outside a repo is still worth
+having, and with the machine scope it now says what other repositories drew.
+A repository with no run, on a machine with none, warns of nothing.
 
 ## `let runner = crate::runner::host::HostRunner::new();`
 
@@ -833,25 +1306,32 @@ A CLI that is not installed is a fact worth reporting, not a
 reason to refuse the whole listing: an operator asking about
 capacity on a machine missing one vendor still wants the other.
 
-## `Some(run_id) if self.run_folded => {`
+## `let _ = writeln!(out, "scope: {} — {}", self.scope, self.gathered.describe());`
 
-The line under the estimates has three forms, and each is true of what the
-figures above it rest on. A run that was folded is named as the source of
-the draw. A run that exists but could not be read is named too: "the
-latest run in this repository (id) could not be read, so estimates rest on
-configuration alone", beside the warning that carries the error. Only a
-repository with no run says "no run in this repository yet". The middle
-form used to be the last one, which told an operator with an unreadable
-log that there was no run to look at.
+The line under the estimates says what the figures above it rest on, and each
+of its forms is true of that (`Gathered::describe`, in
+`src/capacity/machine.rs`). Runs that were folded are counted, each once
+however many logs carry its id, with the repositories of the logs folded.
+Runs that were found and could not be read are counted too, beside the
+warnings that carry each error, whether it was the log that could not be
+read or an owner record that leads to no log: "1 more
+run could not be read and nothing from it is shown", or, with none readable,
+"the 1 run found on this machine could not be read". Only a scope with no run
+at all says "no run on this machine yet". The unreadable form used to be that
+last one, which told an operator with an unreadable log that there was no run
+to look at; it then named the one latest run, and now counts every run it
+applies to.
 
 ## `pub(crate) mod tests {`
 
 `pub(crate)` so that `validate`'s tests can write the same run directories
 through `schema_4_run_signalling` and
-`legacy_run_with_a_line_that_is_not_json`. This file forbids the governed
+`legacy_run_with_a_line_that_is_not_json`, and `tracker`'s through
+`schema_4_run_limited_then_drawing`. This file forbids the governed
 write primitives in its tests too, so every fixture here writes through a
 funnel (`rundir::create_public_dir`, `rundir::write_plan`, `EventLog`) or
-through `workspace_manager::fixture::write_file`.
+through `workspace_manager::fixture::write_file` and
+`workspace_manager::fixture::create_dir`.
 
 ## `fn an_unmeasured_pool_is_unknown_never_full()` › `let estimates = estimate(&[pool("claude-max")], &Observations::default());`
 
@@ -976,9 +1456,12 @@ with the fold's own refusal, so no test here reads a log that
 ## `fn begin_attempt(&mut self, key: crate::topology::registry::TaskKey, pool: &str) {`
 
 `task_dispatched` and `attempt_started` for a task's first attempt, with
-the region and the rung binding the fold itself derives. The settlement
-that follows is the existing `finished` (task 0) or `prepared` (task 1), or
-`interrupted` for either.
+the region and the rung binding the fold itself derives, stamped with the
+instant `topology` stamps every event with. `begin_attempt_at` writes the
+two at a given time instead, and `stamped` restamps any event, for a test
+whose runs' evidence has to be dated. The settlement that follows is the
+existing `finished` (task 0) or `prepared` (task 1), or `interrupted` for
+either.
 
 ## `fn rewritten_with(self, line: &[u8]) {`
 
@@ -990,6 +1473,16 @@ consumes the run, so the `EventLog` is closed first.
 A schema-4 run whose one attempt was refused: `task_dispatched`,
 `attempt_started`, a `pool_exhausted` for the pool at the reset, then the
 rate-limited `attempt_finished`. Nothing after it serves the pool.
+
+## `pub(crate) fn schema_4_run_limited_then_drawing(`
+
+`schema_4_run_signalling`, then an accepted attempt on the other task that
+drew a stated amount on a stated pool: a real schema-4 run with a signal in
+it and spend in it. `tracker`'s end-to-end tests fold it from another
+repository through its owner record. The gatherer reads a schema-4 log with
+the checked observer, which replays it, so a log written by hand is refused
+and a fixture has to be a run the fold accepts line by line. The accepted
+attempt's one obliged review pass names no pool, so it adds no draw.
 
 ## `pub(crate) fn legacy_run_with_a_line_that_is_not_json(`
 
@@ -1004,14 +1497,24 @@ not a run, and `latest_run` never names it.
 adapter it records "no adapter in this build" and spawns nothing, so the
 tests below can call `report` itself and read what it renders.
 
-## `fn the_latest_run_reader_holds_a_schema_4_logs_signalled_pool_at_its_reset() {`
+## `fn the_gatherer_holds_a_schema_4_logs_signalled_pool_at_its_reset() {`
 
-The defect this reader was written for. The latest run is schema 4 and its
-log holds a `pool_exhausted` that nothing later retires. The reader
-answers that pool at that reset, the run's id, and no warning, and
+The defect the schema-aware read was written for, when it was
+`latest_run_observations`. The repository's run is schema 4 and its log
+holds a `pool_exhausted` that nothing later retires. The gatherer answers
+that pool at that reset, one run folded and none unread, and no warning, and
 `report` renders the pool as `exhausted [signal]`. The legacy-only read
 refused the log at its second line (`task_dispatched` is not a legacy
-event), so the pool read `unknown` and the run id was `None`.
+event), so the pool read `unknown` and no run was reported.
+
+## `const FIXTURE_NOW: u64 = 1_794_369_600;`
+
+2026-11-11T04:00:00Z, an hour after the instant `topology` stamps its
+events with. The gatherer counts the draw of the calendar month its clock is
+in, so a test that read the real clock would lose these fixtures' spend on
+the first of the next month. `folded` is the gatherer over one repository
+with that clock and no machine directory; `capacity_report` is `report` with
+it.
 
 ## `fn a_schema_4_logs_spend_counts_every_settled_attempt_once_worker_and_reviews_alike() {`
 
@@ -1036,15 +1539,19 @@ anything is missing from it.
 
 The same run as the test above, stopped one line earlier: the log ends at
 the second attempt's `attempt_started`, and nothing holds the run. Its
-coordinator died and nobody has resumed it. The pool reads $1.00 over two
-attempts, one of them unpriced, as when the attempt had settled as
-interrupted. `status` prints the same draw for this run,
+coordinator died and nobody has resumed it. The gatherer, over the
+repository the run is in, folds the one run with no warning, and the pool
+reads $1.00 over two attempts, one of them unpriced, as when the attempt had
+settled as interrupted. `status` prints the same draw for this run,
 `claude-max: 2 attempt(s), $1.0000?`, and `report` renders it as
-`$1.0000? over 2 attempt(s)`. Then the test takes the run's lock, as a
-live coordinator holds it, and the pool reads one priced attempt: the
-attempt in flight is that coordinator's, not yet settled. A reader that
-folds only the committed log fails the first assertion with $1.00 over one
-attempt, with no mark that anything is missing.
+`upstroke on this machine drew, this month, $1.0000? over 2 attempt(s)`.
+The interrupted settlement the gatherer adds is dated when it reads the
+log, after the start of `FIXTURE_NOW`'s month, so it is counted whenever the
+suite runs. Then the test takes the run's lock, as a live coordinator holds
+it, and the pool reads one priced attempt: the attempt in flight is that
+coordinator's, not yet settled. A gatherer that folds only the committed log
+fails the first assertion on the pool with $1.00 over one attempt, with no
+mark that anything is missing.
 
 ## `fn an_interrupted_attempt_whose_start_names_no_pool_adds_to_no_pools_spend() {`
 
@@ -1068,27 +1575,137 @@ passes, one unpriced, and `claude-max` still reads $1.00 over one attempt.
 The map equals `RunReport::from_topology`'s `pool_drain`, row for row. A
 fold reading only attempt settlements reports no `reviewer-pool` at all.
 
-## `fn the_latest_run_reader_folds_a_legacy_log_as_observe_over_read_all_does() {`
+## `fn the_gatherer_folds_a_legacy_log_as_observe_over_read_all_does() {`
 
 The unchanged half. A legacy log, with a signal and a priced attempt so
 that the comparison is not of two empty values, is answered with exactly
-`observe(&read_all(..))`, its run id, and no warning.
+`observe(&read_all(..))`, one run in one repository, and no warning.
 
-## `fn a_latest_run_neither_reader_accepts_is_reported_unread_and_shows_nothing_of_it() {`
+## `fn a_run_neither_reader_accepts_is_reported_unread_and_shows_nothing_of_it() {`
 
 Both ways a log can fail: a legacy log the legacy reader refuses at line
 2, and a schema-4 log the topology observer refuses at line 6. Each
-answers empty observations, the run's id, `folded: false`, and one warning
+answers empty observations, no run folded and one unread, and one warning
 that names the run, carries the reader's error, and says nothing from the
-run is shown. It does not say "signals only". `report` then renders "the
-latest run in this repository (id) could not be read" and does not render
-"no run in this repository yet".
+run is shown. It does not say "signals only". `report` then renders "the 1
+run found on this machine could not be read" and does not render "no run on
+this machine yet".
 
 ## `fn a_repository_with_no_run_reports_no_run_and_warns_of_nothing() {`
 
-The other side of the same line: with no run directory at all the reader
-answers the default, and "no run in this repository yet" is what `report`
-renders.
+The other side of the same line: with no run directory at all the gatherer
+answers nothing folded and nothing unread, its own line reads "no run in
+this repository yet" for the repository scope it was asked for, and "no run
+on this machine yet" is what `report`, which folds the machine, renders.
+
+## `fn on_the_machine(`
+
+The gatherer over every run on a machine directory, started in `repo`, with
+`FIXTURE_NOW` for its clock and no pools: `folded` with the machine scope.
+`owner_record` writes a private half's `owner.json` with the bytes it is
+given, and `owner_record_of` writes the one a schema-4 run keeps, naming the
+run and its public directory, in the two fields the gatherer reads.
+
+## `fn review409_machine_signal_does_not_depend_on_launch_repository() {`
+
+The witness from `PR409-MACHINE-CWD-TIE-ORDER`'s review, ported. Two
+repositories on one machine, each with a schema-4 run that an owner record
+locates. The `refusing` run's attempt was refused on `shared`, with a
+signalled reset. The `serving` run was refused on `claude-max` and then landed
+an attempt on `shared`. The fixture stamps every event with one second, so
+that success and the other run's refusal are of the same second. Started in
+either repository, the gatherer folds two runs across two repositories and
+holds the same pools, `claude-max` and `shared`, each at its reset. Before the
+tie rule, started in `refusing`, the success came after the refusal and
+cleared `shared`, and started in `serving` it came first and `shared` stayed
+exhausted. The refusing run's id sorts first, so an order by run id alone
+would give one answer from both repositories with `shared` cleared. That is
+why the test asserts which pools are held, and not only that the two answers
+agree.
+
+## `fn a_worker_error_does_not_clear_another_runs_limit() {`
+
+The witness from `PR409-WORKER-ERROR-CLEARS-OTHER-RUNS-LIMIT`'s review,
+ported. Claude Code's adapter parses the process output the witness gave it,
+exit 1 after one second, nothing on stdout and `Could not connect to
+api.anthropic.com: Network is unreachable` on stderr, as an `AgentError` with
+no usage and no cost, and the failed record is built from what it parsed. Two
+repositories on one machine each hold a checked schema-4 run that an owner
+record locates. The `refusing` run's attempt was refused on `shared` at
+11:05:00, with a signalled reset at 16:00. The `erring` run's attempt started
+on `shared` at 11:06:00 and settled at 11:06:02 with the failed record. The
+repository scope, started in `refusing`, and the machine scope, started in
+either repository, all hold `shared` at 16:00, and the estimate of `shared`
+over each reads it exhausted with that reset. Before the fix the failed record
+was dated 11:06:01, so the machine scope held no pool and the estimate read
+`shared` as unknown, while the repository scope kept the reset.
+`begin_attempt_at` and `stamped` give the runs their times; every other
+schema-4 run these tests write is stamped with the one instant `topology`
+gives.
+
+## `fn unreadable_owner_must_be_counted_in_the_scope_line() {`
+
+The witness from `PR409-UNREAD-OWNER-SCOPE-COUNT`'s review, ported. The
+machine has one private half, whose `owner.json` is `{`, and the repository
+has no run. The gatherer folds nothing, counts one run unread, and warns once,
+naming the record as not an owner record. The scope line says the one run
+found on this machine could not be read, where it used to say there was no
+run on this machine yet.
+
+## `fn a_private_half_with_no_owner_record_is_not_counted() {`
+
+The other side: a private half with no `owner.json`, which a run of schemas
+1–3 leaves. Nothing is folded, counted or warned of, and the line says there
+is no run on this machine yet.
+
+## `fn an_owner_record_that_leads_nowhere_is_not_counted_for_a_run_read_from_its_repository() {`
+
+The repository lists a schema-4 run, and that run's private half holds a torn
+`owner.json`. Started in that repository, the gatherer folds the run from the
+listing and holds its pool at its reset, and it neither warns of the record
+nor counts it, since nothing is missing. Started in another repository, the
+record is the only way to the run, and it is counted.
+
+## `fn copy_run(from: &std::path::Path, to: &std::path::Path, run_id: &str) {`
+
+A repository copied with its run artifacts: every file of a run's public
+directory under `from`, written to the same place under `to`. `canonical_log`
+is a run's log as the gatherer names it, by its canonical path, which is how
+the warnings below name both logs.
+
+## `fn a_copied_run_is_not_counted_as_a_second_machine_draw() {`
+
+The witness from `PR409-COPIED-RUN-COUNTED-TWICE`'s review, ported. A schema-4
+run in `original` was refused on `limited` and then drew $20 on `api`. Its
+public directory is copied to `copied`, and the machine's owner record names
+the original. The pools file beside that record gives `api` an allowance of
+100 with no margin and no reserve. Asked from either repository, `report`
+warns of nothing and shows `api`'s draw as $20 over one attempt: from the copy
+the two logs hold the same events, so the run is folded once and nothing is
+said. Before the fix the copy counted $40 over two attempts, so at most 60% of
+the pool was left where the original showed 80%. The witness restamped the
+log's events with the time it ran and read the wall clock; the port reads at
+`FIXTURE_NOW`, in the month the fixture's events are dated, so it does not
+depend on the day it runs.
+
+## `fn copies_of_a_run_that_differ_fold_the_one_its_owner_record_names_and_warn() {`
+
+Two logs of one run that differ. The original's, which the owner record names,
+holds the refusal on `limited`. The copy's holds that refusal and then a $20
+draw on `api`, so it holds more events. From the original only its own log is
+found; from the copy both are, and the one the owner record names is folded,
+although the other is longer, with one warning naming the run, both logs and
+why. The two answers are one `Gathered`: one run across one repository, `limited`
+held at its reset, and no draw on `api`.
+
+## `fn a_copy_that_cannot_be_read_beside_one_that_is_folded_is_named_and_not_counted() {`
+
+A copy whose log the reader refuses at its sixth line, beside the original the
+owner record names. The run is folded from the original, and the copy is not
+counted unread: one warning names both logs and the refusal, and the scope
+line says one run was folded. Counting it would add "1 more run could not be
+read and nothing from it is shown", which is false of a run whose evidence is
+shown.
 
 ## `fn self_metering_cannot_talk_an_exhausted_pool_back_up()` › `let mut p = pool("claude-max");`
 

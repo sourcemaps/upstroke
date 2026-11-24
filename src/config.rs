@@ -34,6 +34,7 @@ struct RawRepoConfig {
     interaction: Option<toml::Value>,
     budgets: Option<toml::Value>,
     runner: Option<toml::Value>,
+    capacity: Option<toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +183,10 @@ struct RawPool {
     endpoint: Option<String>,
 
     profile: Option<String>,
+
+    usage_provider: Option<String>,
+    usage_token_env: Option<String>,
+    usage_account: Option<String>,
 
     #[serde(flatten)]
     unknown: BTreeMap<String, toml::Value>,
@@ -396,6 +401,12 @@ pub struct Config {
     pub wait_on_block: Duration,
 
     pub runner: RunnerSelection,
+
+    pub capacity_scope: capacity::Scope,
+
+    pub machine_dir: Option<PathBuf>,
+
+    pub machine_settings: Option<PathBuf>,
 }
 
 struct EngineSettings {
@@ -539,7 +550,72 @@ pub fn load_captured_with(
     warnings: &mut Vec<String>,
 ) -> Result<Config, UpstrokeError> {
     let (raw, repo_path) = read_repo_config(&captured.repo)?;
+    let machine = match &captured.machine {
+        Some(snapshot) => read_machine_settings(snapshot)?,
+        None => None,
+    };
+    let mut config = match machine {
+        None => interpret(raw, repo_path, limits, warnings)?,
+        Some(machine) => {
+            let mut machine_warnings = Vec::new();
+            interpret(
+                machine.raw,
+                machine.path.clone(),
+                limits,
+                &mut machine_warnings,
+            )?;
+            let repo_table = settings_table(&captured.repo)?;
+            let supplied = layers::supplied(&machine.table, &repo_table);
+            let merged = layers::merge(machine.table, repo_table);
+            let layered = |error: UpstrokeError| layers::beneath(error, &machine.path);
+            let raw: RawRepoConfig = merged
+                .try_into()
+                .map_err(|error: toml::de::Error| UpstrokeError::Config {
+                    path: repo_path.clone(),
+                    message: toml_error_message(&error, None),
+                })
+                .map_err(layered)?;
+            let mut merged_warnings = Vec::new();
+            let mut config =
+                interpret(raw, repo_path.clone(), limits, &mut merged_warnings).map_err(layered)?;
+            if !supplied.is_empty() {
+                warnings.push(format!(
+                    "machine-level settings from {} apply beneath {}: {}",
+                    machine.path.display(),
+                    repo_path.display(),
+                    supplied.join(", ")
+                ));
+                config.machine_settings = Some(machine.path.clone());
+            }
+            let restated: Vec<String> = machine_warnings
+                .iter()
+                .map(|warning| {
+                    warning.replace(
+                        &machine.path.display().to_string(),
+                        &repo_path.display().to_string(),
+                    )
+                })
+                .collect();
+            warnings.extend(machine_warnings);
+            warnings.extend(
+                merged_warnings
+                    .into_iter()
+                    .filter(|warning| !restated.contains(warning)),
+            );
+            config
+        }
+    };
+    config.pools = read_pools(captured.pools.as_ref(), has_adapter, warnings)?;
+    config.machine_dir = captured.machine_dir();
+    Ok(config)
+}
 
+fn interpret(
+    raw: RawRepoConfig,
+    repo_path: PathBuf,
+    limits: EngineLimits,
+    warnings: &mut Vec<String>,
+) -> Result<Config, UpstrokeError> {
     let mut chains: BTreeMap<TaskKind, KindChain> = TaskKind::ALL
         .iter()
         .map(|k| {
@@ -571,6 +647,7 @@ pub fn load_captured_with(
             let policy: RawRoleEffort = match value.try_into() {
                 Ok(policy) => policy,
                 Err(e) => {
+                    let e = toml_error_message(&e, None);
                     return Err(UpstrokeError::Config {
                         path: repo_path,
                         message: format!(
@@ -593,6 +670,7 @@ pub fn load_captured_with(
                     let rr: RawKindRouting = match value.try_into() {
                         Ok(rr) => rr,
                         Err(e) => {
+                            let e = toml_error_message(&e, None);
                             return Err(UpstrokeError::Config {
                                 path: repo_path,
                                 message: format!(
@@ -638,6 +716,7 @@ pub fn load_captured_with(
             let kr: RawKindRouting = match value.try_into() {
                 Ok(kr) => kr,
                 Err(e) => {
+                    let e = toml_error_message(&e, None);
                     return Err(UpstrokeError::Config {
                         path: repo_path,
                         message: format!("routing entry `{key}`: {e}"),
@@ -826,15 +905,14 @@ pub fn load_captured_with(
     let engine = parse_engine(raw.engine, &repo_path, limits, warnings)?;
     let interaction = parse_interaction(raw.interaction, &repo_path)?;
     let budgets = parse_budgets(raw.budgets, &repo_path)?;
-
-    let pools = read_pools(captured.pools.as_ref(), has_adapter, warnings)?;
+    let capacity_scope = parse_capacity(raw.capacity, &repo_path)?;
 
     Ok(Config {
         chains,
         overrides,
         pins,
         strategy,
-        pools,
+        pools: Vec::new(),
         budgets,
         ask_before: interaction.ask_before,
         gates,
@@ -856,6 +934,9 @@ pub fn load_captured_with(
         notify: interaction.notify,
         wait_on_block: interaction.wait_on_block,
         runner,
+        capacity_scope,
+        machine_dir: None,
+        machine_settings: None,
     })
 }
 
@@ -873,9 +954,11 @@ fn parse_runner(
 
 mod parse;
 use self::parse::{
-    parse_budgets, parse_engine, parse_gates, parse_interaction, parse_role_effort, read_runner,
-    refuse_legacy_container_selection,
+    parse_budgets, parse_capacity, parse_engine, parse_gates, parse_interaction, parse_role_effort,
+    read_runner, refuse_legacy_container_selection,
 };
+
+mod layers;
 
 fn repo_config_location(repo_config: Option<&Path>, discover_in: &Path) -> (PathBuf, bool) {
     match repo_config {
@@ -942,6 +1025,8 @@ pub fn snapshot_file(path: &Path, required: bool) -> FileSnapshot {
 pub struct CapturedConfig {
     repo: FileSnapshot,
 
+    machine: Option<FileSnapshot>,
+
     pools: Option<FileSnapshot>,
 }
 
@@ -953,20 +1038,40 @@ impl CapturedConfig {
         pools_file: Option<&Path>,
     ) -> Self {
         let (repo_path, repo_required) = repo_config_location(repo_config, discover_in);
+        let pools = pools_location(pools_file);
+        let machine = pools
+            .as_ref()
+            .and_then(|(pools_path, _)| pools_path.parent())
+            .map(|machine_dir| machine_dir.join(MACHINE_SETTINGS))
+            .filter(|machine_path| !layers::same_file(machine_path, &repo_path))
+            .map(|machine_path| snapshot_file(&machine_path, false));
         Self {
             repo: snapshot_file(&repo_path, repo_required),
-            pools: pools_location(pools_file)
-                .map(|(path, required)| snapshot_file(&path, required)),
+            machine,
+            pools: pools.map(|(path, required)| snapshot_file(&path, required)),
         }
     }
 
     pub fn files(&self) -> impl Iterator<Item = &FileSnapshot> {
-        std::iter::once(&self.repo).chain(self.pools.as_ref())
+        std::iter::once(&self.repo)
+            .chain(self.machine.as_ref())
+            .chain(self.pools.as_ref())
+    }
+
+    fn machine_dir(&self) -> Option<PathBuf> {
+        self.pools
+            .as_ref()
+            .and_then(|pools| pools.path().parent())
+            .map(Path::to_path_buf)
     }
 }
 
+pub const MACHINE_SETTINGS: &str = "upstroke.toml";
+
 mod read;
-use self::read::{read_pools, read_repo_config};
+use self::read::{
+    read_machine_settings, read_pools, read_repo_config, settings_table, toml_error_message,
+};
 
 fn discovered_pools_path() -> Option<PathBuf> {
     Some(util::user_upstroke_dir()?.join("pools.toml"))
@@ -1091,6 +1196,7 @@ mod tests {
                     required: true,
                     content: Ok(Some(body.as_bytes().to_vec())),
                 },
+                machine: None,
                 pools: None,
             };
             let mut warnings = Vec::new();
@@ -1122,6 +1228,7 @@ mod tests {
                 required: true,
                 content: Ok(Some(body.as_bytes().to_vec())),
             },
+            machine: None,
             pools: None,
         };
         let mut warnings = Vec::new();
@@ -2654,9 +2761,15 @@ pool_fraction = 0.5
             "[pools.one]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n",
         );
         let captured = CapturedConfig::capture(Some(&repo), &hermetic(), Some(&pools));
+        let machine = pools
+            .parent()
+            .expect("the pools file is in a directory")
+            .join(MACHINE_SETTINGS);
         assert_eq!(
             captured.files().map(FileSnapshot::path).collect::<Vec<_>>(),
-            vec![repo.as_path(), pools.as_path()]
+            vec![repo.as_path(), machine.as_path(), pools.as_path()],
+            "the machine-level settings file beside the pools file is captured too, present or \
+             not, so a run confirms it has not changed either"
         );
 
         fs::write(
@@ -2977,6 +3090,554 @@ credential_volumes = { claude-code = "creds-cc" }
         assert!(
             warnings.iter().any(|w| w.contains("`timeout_sec`")),
             "the unknown key is announced: {warnings:?}"
+        );
+    }
+
+    struct Layers {
+        _tree: crate::rundir::scratch_tree::ScratchTree,
+        repo: PathBuf,
+        machine_dir: PathBuf,
+    }
+
+    impl Layers {
+        fn new(tag: &str, machine: Option<&str>, repo: Option<&str>) -> Self {
+            let tree = tree(tag);
+            let repo_dir = tree.path().join("repo");
+            let machine_dir = tree.path().join("machine");
+            for dir in [&repo_dir, &machine_dir] {
+                fs::create_dir_all(dir).expect("a layer directory");
+            }
+            fs::write(machine_dir.join("pools.toml"), "# no pools\n").expect("the pools file");
+            if let Some(text) = machine {
+                fs::write(machine_dir.join(MACHINE_SETTINGS), text).expect("machine settings");
+            }
+            if let Some(text) = repo {
+                fs::write(repo_dir.join("upstroke.toml"), text).expect("repo settings");
+            }
+            Self {
+                _tree: tree,
+                repo: repo_dir,
+                machine_dir,
+            }
+        }
+
+        fn machine_file(&self) -> PathBuf {
+            self.machine_dir.join(MACHINE_SETTINGS)
+        }
+
+        fn repo_file(&self) -> PathBuf {
+            self.repo.join("upstroke.toml")
+        }
+
+        fn load(&self, warnings: &mut Vec<String>) -> Result<Config, UpstrokeError> {
+            load(
+                None,
+                &self.repo,
+                Some(&self.machine_dir.join("pools.toml")),
+                warnings,
+            )
+        }
+    }
+
+    #[test]
+    fn machine_level_settings_apply_where_the_repository_is_silent_and_the_repository_wins() {
+        let layers = Layers::new(
+            "config-layers-merge",
+            Some(
+                "[engine]\nmax_parallel = 3\nmax_merge_repairs = 5\n\n[budgets]\nrun_usd = 20.0\n\n\
+                 [routing.strategy]\nmode = \"value-max\"\n",
+            ),
+            Some("[engine]\nmax_merge_repairs = 4\n\n[budgets]\ntask_usd = 2.0\n"),
+        );
+        let mut warnings = Vec::new();
+        let cfg = layers.load(&mut warnings).expect("both layers load");
+        assert_eq!(
+            cfg.max_parallel, 3,
+            "the machine's, the repository is silent"
+        );
+        assert_eq!(cfg.max_merge_repairs, 4, "the repository's, both speak");
+        assert_eq!(cfg.budgets.run_usd, Some(20.0));
+        assert_eq!(cfg.budgets.task_usd, Some(2.0));
+        assert_eq!(cfg.strategy.mode, "value-max");
+        assert_eq!(cfg.machine_settings, Some(layers.machine_file()));
+        assert_eq!(cfg.machine_dir, Some(layers.machine_dir.clone()));
+        let said: Vec<&String> = warnings
+            .iter()
+            .filter(|warning| warning.starts_with("machine-level settings from "))
+            .collect();
+        assert_eq!(said.len(), 1, "{warnings:?}");
+        let said = said[0];
+        assert!(
+            said.contains(&layers.machine_file().display().to_string())
+                && said.contains(&layers.repo_file().display().to_string()),
+            "the note names both files: {said}"
+        );
+        assert!(
+            said.ends_with(": budgets.run_usd, engine.max_parallel, routing.strategy.mode"),
+            "the note lists exactly what the machine file decided: {said}"
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_settings_file_takes_the_machine_level_ones_whole() {
+        let layers = Layers::new(
+            "config-layers-zero-config",
+            Some("[engine]\nmax_parallel = 2\n\n[[gates]]\nname = \"test\"\ncmd = \"make test\"\n"),
+            None,
+        );
+        let mut warnings = Vec::new();
+        let cfg = layers
+            .load(&mut warnings)
+            .expect("the machine layer alone loads");
+        assert_eq!(cfg.max_parallel, 2);
+        assert_eq!(
+            cfg.gates.as_deref().map(|gates| gates
+                .iter()
+                .map(|gate| gate.name.as_str())
+                .collect::<Vec<_>>()),
+            Some(vec!["test"])
+        );
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.ends_with(": engine.max_parallel, gates")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_repository_that_writes_gates_runs_its_own_and_none_of_the_machines() {
+        let layers = Layers::new(
+            "config-layers-gates",
+            Some(
+                "[[gates]]\nname = \"lint\"\ncmd = \"make lint\"\n\n[[gates]]\nname = \"test\"\n\
+                 cmd = \"make test\"\n",
+            ),
+            Some("[[gates]]\nname = \"check\"\ncmd = \"cargo check\"\n"),
+        );
+        let mut warnings = Vec::new();
+        let cfg = layers.load(&mut warnings).expect("both layers load");
+        let names: Vec<&str> = cfg
+            .gates
+            .as_deref()
+            .expect("gates are configured")
+            .iter()
+            .map(|gate| gate.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["check"],
+            "an array is replaced whole, never appended to"
+        );
+        assert_eq!(
+            cfg.machine_settings, None,
+            "the machine file decided nothing here, so the run does not claim it did"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|warning| warning.starts_with("machine-level settings from ")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn with_no_machine_level_file_nothing_is_layered_and_nothing_is_said() {
+        let layers = Layers::new(
+            "config-layers-absent",
+            None,
+            Some("[engine]\nmax_parallel = 2\n"),
+        );
+        let mut warnings = Vec::new();
+        let cfg = layers
+            .load(&mut warnings)
+            .expect("the repository file loads");
+        assert_eq!(cfg.max_parallel, 2);
+        assert_eq!(cfg.machine_settings, None);
+        assert_eq!(cfg.machine_dir, Some(layers.machine_dir.clone()));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_refused_machine_level_file_is_refused_under_its_own_name() {
+        let layers = Layers::new(
+            "config-layers-machine-typo",
+            Some("[engin]\nmax_parallel = 3\n"),
+            Some("[engine]\nmax_parallel = 2\n"),
+        );
+        let mut warnings = Vec::new();
+        let error = layers
+            .load(&mut warnings)
+            .expect_err("a misspelled section is a typo in whichever file holds it");
+        let UpstrokeError::Config { path, message } = &error else {
+            panic!("a config error: {error}");
+        };
+        assert_eq!(path, &layers.machine_file());
+        assert!(message.contains("engin"), "{message}");
+        assert!(message.contains("machine-level settings file"), "{message}");
+    }
+
+    #[test]
+    fn a_machine_level_file_must_be_a_valid_configuration_on_its_own() {
+        let layers = Layers::new(
+            "config-layers-machine-alone",
+            Some("[runner]\nkind = \"container\"\n"),
+            Some("[runner]\nimage = \"upstroke-dev:1\"\n"),
+        );
+        let mut warnings = Vec::new();
+        let error = layers.load(&mut warnings).expect_err(
+            "the machine file is what a repository with no settings of its own would run under",
+        );
+        let UpstrokeError::Config { path, message } = &error else {
+            panic!("a config error: {error}");
+        };
+        assert_eq!(path, &layers.machine_file());
+        assert!(message.contains("without `image`"), "{message}");
+    }
+
+    #[test]
+    fn a_refusal_only_the_two_files_together_earn_names_both() {
+        let layers = Layers::new(
+            "config-layers-combination",
+            Some("[runner]\nkind = \"container\"\nimage = \"upstroke-dev:1\"\n"),
+            Some("[runner]\nkind = \"host\"\n"),
+        );
+        let mut warnings = Vec::new();
+        let error = layers
+            .load(&mut warnings)
+            .expect_err("a host runner with the machine file's image is neither file's intent");
+        let UpstrokeError::Config { path, message } = &error else {
+            panic!("a config error: {error}");
+        };
+        assert_eq!(path, &layers.repo_file());
+        assert!(
+            message.contains("the host runner has no image"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&layers.machine_file().display().to_string()),
+            "the refusal says a second file is involved: {message}"
+        );
+    }
+
+    #[test]
+    fn a_warning_about_a_machine_level_key_names_the_machine_file_once() {
+        let layers = Layers::new(
+            "config-layers-warning",
+            Some("[routing]\nfixx = { chain = [\"small\"] }\n"),
+            Some("[routing]\nimplment = { chain = [\"mid\"] }\n"),
+        );
+        let mut warnings = Vec::new();
+        layers.load(&mut warnings).expect("unknown kinds only warn");
+        let about = |kind: &str| -> Vec<&String> {
+            warnings
+                .iter()
+                .filter(|warning| warning.contains(&format!("unknown routing kind `{kind}`")))
+                .collect()
+        };
+        let machine = about("fixx");
+        assert_eq!(machine.len(), 1, "{warnings:?}");
+        assert!(
+            machine[0].contains(&layers.machine_file().display().to_string()),
+            "a key the machine file wrote is reported against the machine file: {warnings:?}"
+        );
+        let repo = about("implment");
+        assert_eq!(repo.len(), 1, "{warnings:?}");
+        assert!(
+            repo[0].contains(&layers.repo_file().display().to_string()),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_pools_file_in_the_repository_root_makes_one_layer_not_two() {
+        let tree = tree("config-layers-same-file");
+        let repo = tree.path().to_path_buf();
+        fs::write(repo.join("upstroke.toml"), "[engine]\nmax_parallel = 2\n").expect("settings");
+        fs::write(repo.join("pools.toml"), "# no pools\n").expect("pools");
+        let captured = CapturedConfig::capture(None, &repo, Some(&repo.join("pools.toml")));
+        assert_eq!(
+            captured.machine, None,
+            "the settings file beside this pools file is the repository's own"
+        );
+        let mut warnings = Vec::new();
+        let cfg = load_captured(&captured, EngineLimits::Topology, &mut warnings).expect("load");
+        assert_eq!(cfg.max_parallel, 2);
+        assert_eq!(cfg.machine_settings, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn capacity_scope_defaults_to_the_machine_and_either_file_may_set_it() {
+        let unset = Layers::new("config-scope-unset", None, None);
+        let mut warnings = Vec::new();
+        assert_eq!(
+            unset.load(&mut warnings).expect("load").capacity_scope,
+            capacity::Scope::Machine
+        );
+
+        let machine_only = Layers::new(
+            "config-scope-machine",
+            Some("[capacity]\nscope = \"repo\"\n"),
+            None,
+        );
+        assert_eq!(
+            machine_only
+                .load(&mut warnings)
+                .expect("load")
+                .capacity_scope,
+            capacity::Scope::Repo
+        );
+
+        let overridden = Layers::new(
+            "config-scope-overridden",
+            Some("[capacity]\nscope = \"repo\"\n"),
+            Some("[capacity]\nscope = \"machine\"\n"),
+        );
+        assert_eq!(
+            overridden.load(&mut warnings).expect("load").capacity_scope,
+            capacity::Scope::Machine
+        );
+    }
+
+    #[test]
+    fn a_capacity_section_refuses_an_unknown_scope_and_an_unknown_key() {
+        for (body, expected) in [
+            (
+                "[capacity]\nscope = \"global\"\n",
+                "`scope = \"global\"` is not recognized",
+            ),
+            (
+                "[capacity]\nscop = \"repo\"\n",
+                "unknown key `scop` in [capacity]",
+            ),
+            ("capacity = \"repo\"\n", "[capacity]:"),
+            ("[capacity]\nscope = 3\n", "[capacity]:"),
+        ] {
+            let captured = CapturedConfig {
+                repo: FileSnapshot {
+                    path: PathBuf::from("upstroke.toml"),
+                    required: true,
+                    content: Ok(Some(body.as_bytes().to_vec())),
+                },
+                machine: None,
+                pools: None,
+            };
+            let mut warnings = Vec::new();
+            let error = load_captured(&captured, EngineLimits::Fresh, &mut warnings)
+                .expect_err("a scope nobody can act on is refused, not defaulted");
+            assert!(
+                error.to_string().contains(expected),
+                "{body:?} should say {expected:?}: {error}"
+            );
+        }
+    }
+
+    fn pool_from(body: &str, warnings: &mut Vec<String>) -> Result<Pool, UpstrokeError> {
+        let tree = tree("config-usage-keys");
+        let pools = tree.path().join("pools.toml");
+        fs::write(&pools, body).expect("the pools file");
+        load(None, tree.path(), Some(&pools), warnings).map(|mut cfg| {
+            assert_eq!(cfg.pools.len(), 1, "one pool in the fixture");
+            cfg.pools.remove(0)
+        })
+    }
+
+    const API_POOL: &str = "[pools.api]\nkind = \"api-key\"\nagent = \"claude-code\"\n";
+
+    #[test]
+    fn a_pool_that_names_a_usage_provider_reads_it_and_its_sources_say_so() {
+        let mut warnings = Vec::new();
+        let pool = pool_from(
+            &format!(
+                "{API_POOL}sources = [\"signals\", \"self\"]\nusage_provider = \"anthropic-cost\"\n\
+                 usage_token_env = \"ANTHROPIC_ADMIN_KEY\"\n"
+            ),
+            &mut warnings,
+        )
+        .expect("the usage keys parse");
+        assert_eq!(
+            pool.usage,
+            Some(capacity::UsageSource {
+                provider: capacity::UsageProvider::AnthropicCost,
+                token_env: Some("ANTHROPIC_ADMIN_KEY".to_owned()),
+                account: None,
+            })
+        );
+        assert_eq!(
+            pool.sources,
+            vec![
+                Source::Signals,
+                Source::SelfMetered,
+                Source::ProviderEndpoint
+            ],
+            "naming a provider is what turns the source on; it is not listed twice"
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let listed = pool_from(
+            &format!(
+                "{API_POOL}sources = [\"provider-endpoint\", \"signals\"]\n\
+                 usage_provider = \"openai-cost\"\nusage_token_env = \"_K1\"\n"
+            ),
+            &mut warnings,
+        )
+        .expect("an operator may list the source as well");
+        assert_eq!(
+            listed.sources,
+            vec![Source::ProviderEndpoint, Source::Signals]
+        );
+        assert_eq!(
+            listed.usage.map(|usage| usage.provider),
+            Some(capacity::UsageProvider::OpenaiCost)
+        );
+    }
+
+    #[test]
+    fn a_pool_with_no_usage_provider_is_exactly_what_it_was() {
+        let mut warnings = Vec::new();
+        let pool = pool_from(API_POOL, &mut warnings).expect("a plain pool");
+        assert_eq!(pool.usage, None);
+        assert!(!pool.sources.contains(&Source::ProviderEndpoint));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_unknown_usage_provider_is_refused_naming_the_accepted_ones() {
+        for written in ["claude-subscription", "OpenAI-Cost", " openai-cost", ""] {
+            let mut warnings = Vec::new();
+            let error = pool_from(
+                &format!("{API_POOL}usage_provider = \"{written}\"\n"),
+                &mut warnings,
+            )
+            .expect_err("an endpoint this build does not know is not silently never asked");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!(
+                    "`usage_provider = \"{written}\"` is not recognized"
+                )),
+                "{message}"
+            );
+            for accepted in capacity::UsageProvider::ACCEPTED {
+                assert!(message.contains(accepted), "{accepted}: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_credential_written_where_its_variables_name_belongs_is_refused_and_not_repeated() {
+        for written in [
+            "sk-ant-admin01-NOT-A-REAL-KEY",
+            "Bearer abc",
+            "1TOKEN",
+            "",
+            "A B",
+            "TOKEN=abc",
+        ] {
+            let mut warnings = Vec::new();
+            let error = pool_from(
+                &format!(
+                    "{API_POOL}usage_provider = \"anthropic-cost\"\nusage_token_env = \"{written}\"\n"
+                ),
+                &mut warnings,
+            )
+            .expect_err("only a variable's name belongs in the pools file");
+            let message = error.to_string();
+            assert!(
+                message.contains("NAME of an environment variable"),
+                "{message}"
+            );
+            assert!(
+                written.is_empty() || !message.contains(written),
+                "the refusal must not repeat what may be the credential: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_usage_account_is_a_name_and_is_asked_for_only_where_the_provider_reads_one() {
+        let github = |account: &str| {
+            format!(
+                "[pools.copilot]\nkind = \"credits\"\nagent = \"copilot\"\n\
+                 usage_provider = \"github-ai-credits\"\nusage_token_env = \"GH_PLAN_TOKEN\"\n{account}"
+            )
+        };
+        let mut warnings = Vec::new();
+        let pool = pool_from(&github("usage_account = \"octo-cat_1.x\"\n"), &mut warnings)
+            .expect("a GitHub login is a name");
+        assert_eq!(
+            pool.usage.and_then(|usage| usage.account).as_deref(),
+            Some("octo-cat_1.x")
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        for bad in ["octo/cat", "octo cat", "../octo", "-octo", "octo?x=1", ""] {
+            let mut warnings = Vec::new();
+            let error = pool_from(
+                &github(&format!("usage_account = \"{bad}\"\n")),
+                &mut warnings,
+            )
+            .expect_err("an account goes into the request's address");
+            assert!(
+                error
+                    .to_string()
+                    .contains("`usage_account` must be an account name"),
+                "{bad:?}: {error}"
+            );
+        }
+
+        let mut warnings = Vec::new();
+        pool_from(&github(""), &mut warnings).expect("a missing account only warns");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("no `usage_account`") && warning.contains("skip")),
+            "{warnings:?}"
+        );
+
+        let mut warnings = Vec::new();
+        pool_from(
+            &format!(
+                "{API_POOL}usage_provider = \"openai-cost\"\nusage_token_env = \"K\"\n\
+                 usage_account = \"acme\"\n"
+            ),
+            &mut warnings,
+        )
+        .expect("an account a provider does not read only warns");
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("does not read (ignored)")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_usage_key_with_no_provider_is_refused_and_a_provider_with_no_credential_warns() {
+        let mut warnings = Vec::new();
+        let error = pool_from(
+            &format!("{API_POOL}usage_token_env = \"ANTHROPIC_ADMIN_KEY\"\n"),
+            &mut warnings,
+        )
+        .expect_err("a credential for no provider is a misspelled provider key");
+        let message = error.to_string();
+        assert!(
+            message.contains("`usage_token_env`") && message.contains("no `usage_provider`"),
+            "{message}"
+        );
+
+        let mut warnings = Vec::new();
+        let pool = pool_from(
+            &format!("{API_POOL}usage_provider = \"anthropic-cost\"\n"),
+            &mut warnings,
+        )
+        .expect("a provider with no credential is not a reason to refuse a run");
+        assert!(pool.usage.is_some());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("no `usage_token_env`")),
+            "{warnings:?}"
         );
     }
 }

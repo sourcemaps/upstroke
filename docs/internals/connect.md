@@ -195,7 +195,7 @@ clothes.
 that has not been built. An operator who wants it recorded can add it —
 the parser accepts it and the estimate says it is unread.
 
-## `#[derive(Debug, Default, PartialEq, serde::Deserialize)]`
+## `#[derive(Debug, Default, PartialEq)]`
 
 The keys only an operator can supply, carried across a `--force`.
 
@@ -208,13 +208,63 @@ particular is the entire point of §13's multi-account seam, and
 `monthly_allowance` is the only thing that makes a self-metered estimate
 possible at all (`Auto` yields `Unknown`).
 
-## `fn apply(self, pool: &mut Pool) -> Result<(), InvalidAllowance> {`
+Since 2026-11-23 there are six: `usage_provider`, `usage_token_env` and
+`usage_account` opt a pool into the capacity tracker (§13, §17), and they are
+an operator's for the same reason the first three are. Which billing endpoint
+answers for a pool, and which environment variable holds the key, are not
+things discovery can find, and `connect` writes none of them itself.
 
-Move the operator's valid keys into the new pool. An invalid allowance
-leaves the discovered Auto default and reports why to the caller, which
-adds the pool name to the visible warning.
+The struct is no longer deserialized. `read` fills it from one pool's table,
+key by key, because a typed read of the whole `[pools]` table is what let one
+mistyped key cost every pool its keys (see `operator_keys`).
 
-## `pool.monthly_allowance = allowance_of(&value)?;`
+## `mistyped: Vec<&'static str>,`
+
+The known keys this pool wrote with a value of the wrong type, in the order
+`read` takes them. Only the key's name is kept. `apply` names the key and the
+type it needed, and the value goes no further: it may be a credential pasted
+under the wrong key, or an array or table of any size.
+
+## `fn read(pool: &toml::Table) -> Self {`
+
+One pool's operator keys, read key by key. A known key whose value has the type
+the configuration reader takes for it is carried. That is a string for
+`profile`, `endpoint` and the three usage keys, and any value at all for
+`monthly_allowance`, whose own check in `apply` (`allowance_of`) already says
+what it needs. A key of any other type is left out and its name goes into
+`mistyped`, and the pool's other keys are read as if it were not there. Keys
+`connect` does not carry (`kind`, `agent`, `sources` and the rest) are never
+looked at, whatever their type.
+
+## `fn apply(self, pool: &mut Pool) -> Vec<String> {`
+
+Move the operator's valid keys into the new pool, and say what was not
+moved. Each returned line is one problem, worded without the pool's name,
+which the caller adds to make the visible warning.
+
+An invalid allowance leaves the discovered Auto default. The usage keys are
+carried as a set or not at all: `capacity::UsageSource::from_keys` is the
+reader's own validation, so a set it refuses is one the configuration reader
+would refuse too, and writing it would produce a pools file that no command
+loads. The refusal's text never repeats a `usage_token_env` that is not a
+name, since a key pasted there is the usual way to get one.
+
+A key `read` left out for its type comes first, as one problem per key. It
+names the key and the type it needed and never the value, so the warning reads
+``pool `copilot`: `usage_provider` must be a string; it was not carried``.
+The usage keys that did have their type then go through the set check as
+though the mistyped one had never been written. A mistyped `usage_provider`
+leaves any `usage_token_env` or `usage_account` beside it with no provider,
+which is the reader's own no-provider defect, so they are not carried either
+and a second line says so. When `usage_token_env` or `usage_account` is the
+mistyped key, the provider and whatever else remains are carried if they pass
+the check. Where the carried set then lacks what its provider needs (a
+credential, or an account for a provider that reports per account), the
+configuration reader warns about the gap and `upstroke capacity --refresh`
+skips the pool, so it never asks about a different account than the one
+written.
+
+## `Err(error) => problems.push(format!("{error}; using auto")),`
 
 The error identifies this setting; run_with supplies the pool
 context and decides how to report the rejected value.
@@ -228,9 +278,36 @@ the same capacity representation as config::read.
 
 Pull the operator-written keys out of an existing pools file, by pool name.
 
-Parsed leniently on purpose: a file this cannot read is one `--force` was
-always going to replace, and failing the whole command over it would be
-worse than losing keys that were unreadable anyway.
+Read pool by pool and key by key. The document is parsed as a plain TOML
+table, and `OperatorKeys::read` reads each table under `[pools]` on its own.
+A key with the wrong type is left out of its own pool's carried keys and
+nothing else: that pool keeps its other valid keys, every other pool is read as
+if the key were not there, and `apply` turns the key into one warning naming
+the pool, the key and the type it needed.
+
+The typed read this replaced is PR409-CONNECT-USAGE-TYPE-DROPS-SETTINGS. It
+deserialized the whole `[pools]` table in one go and turned any failure into an
+empty map. So `usage_provider = 42` in one pool sent `--force` on to rewrite
+every other pool without its `profile`, `monthly_allowance` and `endpoint`, and
+nothing said so. A mistyped `profile` or `endpoint` did the same before the
+usage keys existed. The configuration reader refuses a file holding such a key,
+because it reads each of these keys as a string, so every command that loads
+pools stops on it. `--force` is how an operator gets a loadable file back, so
+it is the command that must not cost the other pools their keys.
+
+Still lenient about the document as a whole, on purpose: a file that is not
+TOML at all is one `--force` was always going to replace, and failing the whole
+command over it would be worse than losing keys that were unreadable anyway. A
+`[pools]` that is not a table, or an entry under it that is not one, has no
+keys to carry and is skipped the same way. A pool enters the map if it has an
+operator key or a mistyped one, so a pool whose only operator key was mistyped
+still gets its warning.
+
+Only a pool `connect` writes has its keys applied, so only that pool's mistyped
+keys are reported. A pool whose agent was skipped, or one the operator renamed,
+is not written at all. The refusal already says that anything not in the
+proposed text is lost, and a warning that one of that pool's keys "was not
+carried" would suggest the rest were.
 
 ## `fn default_pool_name(agent: &str) -> &str {`
 
@@ -402,3 +479,44 @@ which is the shape every other binary-touching test here takes.
 
 Whatever it answers, it must be one of the three states and it must
 explain itself — including when the answer is "could not tell".
+
+## `fn both_agents_signed_in() -> Machine {`
+
+Two usable agents, so `connect` writes two pools. Only a pool it writes has its
+keys applied, so a mistyped key in one pool and the keys of another can only be
+watched together on a machine that writes both.
+
+## `fn mistyped_usage_key_must_not_delete_other_pools_profiles() {`
+
+The witness from PR409-CONNECT-USAGE-TYPE-DROPS-SETTINGS's review, ported.
+`usage_provider = 42` in `copilot` used to make the whole read fail, and
+`--force` then wrote `claude-code` without its `profile`, `monthly_allowance`
+and `endpoint`, with no warning. The test reads those three back through
+`config::load`, pins the one warning word for word, and finds it as a
+`warning:` line in what `render_report` prints, which is the text the operator
+sees.
+
+## `fn review409_bad_usage_type_preserves_other_pools_operator_keys() {`
+
+The patch's witness, widened to every usage key and to each kind of TOML value
+that is not a string: an integer, a float, a boolean, a date-time, an array and
+an inline table. Each value carries a marker that would show if a warning
+repeated it.
+The marker is checked against the warning and not the file, because `true` is
+also how the file spells `weekly`. A usage key alone in its pool, once left
+out, leaves no set to carry, so the file gains no `usage_` line.
+
+## `fn a_pool_whose_own_usage_account_is_mistyped_keeps_its_own_profile() {`
+
+The rule holds inside the bad pool too. Its `profile` is carried, and so are
+the usage keys that had their type: `usage_provider` and `usage_token_env`
+without the account pass the reader's set check. The configuration reader then
+reports the missing account as a gap, and `--refresh` skips the pool until the
+account is written as a string.
+
+## `fn operator_keys_are_read_pool_by_pool_and_key_by_key() {`
+
+The reader alone, on one document holding each case: a pool with three
+mistyped keys beside two good ones, a pool with only good ones, a pool with no
+operator key, and an entry under `[pools]` that is not a table. A `[pools]`
+that is not a table, and a file that is not TOML, still carry nothing.

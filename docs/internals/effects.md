@@ -1431,6 +1431,20 @@ the next edit to any of these files rather than at a merge anyone reads.
 The funnel entry point, both `ProcessSite` values, the no-degraded-mode
 memo, `windows_job` and `termination` stayed in `src/agent/proc.rs`.
 
+## `"src/tracker.rs",`
+
+The capacity tracker's entry file, enrolled on 2026-11-23 with the module.
+It is neither legacy nor one of the slice's shared primitives; it is on this
+roll-call for the reason the roll-call exists, which is the denial. The
+tracker is the one module that speaks HTTP, the engine never does
+(DESIGN.md §4 invariant 2), and what keeps a module that states no allowance
+from calling it is that `refresh` and `publish` are effectful rows of
+`effects/wrappers.toml` and therefore entries of `clippy.toml`. A module can
+only have such rows by being listed here. Its two children,
+`src/tracker/provider.rs` and `src/tracker/transport.rs`, forbid all three
+governed lints at file level and reach no denied primitive, so they are not
+enrolled: the request is a value, and the process is started by the Runner.
+
 ## `pub fn externally_reachable_fns(source: &str) -> Vec<String> {`
 
 Every `fn` of `source`'s production code that is reachable from outside its

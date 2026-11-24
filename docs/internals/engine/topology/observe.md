@@ -134,11 +134,13 @@ The events `accounting` folds: the committed log, borrowed, for a run that
 is finished or that another process holds; otherwise an owned copy of the
 committed log followed by one interrupted settlement for each item
 `closure::in_flight` names, built from `InFlight::interrupted` as above.
-`accounting` reads it, and so does `capacity::latest_run_observations`,
-which folds it through `observe_topology`. One builder serves both, so the
-spend `upstroke status` counts for an unresumed run is the spend `capacity`
-and `validate` count, and the two cannot drift apart. `events()` stays the
-committed log, which `describe`, `follow` and `export-decisions` read.
+`accounting` reads it, and so does the capacity gatherer:
+`capacity::machine::evidence_in` folds it, through the shared evidence fold
+(`capacity::evidence`), for every schema-4 run in scope. One builder serves
+both, so an unresumed run's in-flight attempts count in `capacity` and
+`validate` as they count in `upstroke status`, and the two cannot drift
+apart. `events()` stays the committed log, which `describe`, `follow` and
+`export-decisions` read.
 
 ## `impl Observed` › `pub fn describe(&self, event: &TopologyEvent) -> String {`
 

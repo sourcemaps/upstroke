@@ -216,6 +216,15 @@ An unknown key is a hard error too, by `Budgets`' own derive.
 numbers, or a ceiling fails [`check_budget`] — non-positive, or not finite,
 which TOML can write as `inf` and `nan`.
 
+## `pub(super) fn parse_capacity(`
+
+`[capacity]` (§17). One key today, `scope`, and the section follows the rule
+the others do: an unknown key is an error naming the accepted one, and an
+unknown value is an error naming the accepted two. A scope left to a warning
+and a default would be a capacity view that silently folds something other
+than what the operator asked for, which is the "would silently delete a
+control" side of §17's line.
+
 ## `const MAX_GATE_TIMEOUT_SECS: u64 = u64::MAX / 1000;`
 
 The largest `timeout_secs` the run record can carry back exactly.

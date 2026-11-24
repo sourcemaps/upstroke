@@ -1417,6 +1417,7 @@ pub const CLASSIFIED_MODULES: &[&str] = &[
     "src/validate.rs",
     "src/events/mod.rs",
     "src/events/log/premove.rs",
+    "src/tracker.rs",
 ];
 
 #[must_use]

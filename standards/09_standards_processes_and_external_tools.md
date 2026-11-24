@@ -20,6 +20,9 @@ in" and exits 0). Platform-specific process behaviour lives behind a shared sema
 native tests per implementation.
 
 The product invariants apply here: model interaction happens only inside official CLI subprocesses,
-and the engine never adds an HTTP or model-API path.
+and the engine never adds an HTTP or model-API path. The one HTTP path in the tree is the capacity
+tracker's `curl` subprocess (`DESIGN.md` §13): it is outside the engine, it is a subprocess
+integration under this section like any other, and `src/tracker/transport.rs` answers the six
+questions above for it.
 
 Enforced by: tests and platform CI; the effect denylist for raw spawns outside the funnel; review.

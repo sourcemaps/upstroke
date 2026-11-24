@@ -29,6 +29,7 @@ use upstroke::error::UpstrokeError;
 use upstroke::export::{self, Format as ExportFormat};
 use upstroke::interaction::{InteractionMode, RealSleeper};
 use upstroke::status;
+use upstroke::tracker;
 use upstroke::validate::{self, ValidateOptions};
 
 const EXIT_PARKED: u8 = 2;
@@ -65,6 +66,16 @@ enum Command {
         #[arg(help = "Pools file path (default: ~/.upstroke/pools.toml)")]
         #[arg(long)]
         pools: Option<PathBuf>,
+        #[arg(
+            help = "First ask each pool's usage_provider over HTTPS (through curl) and store what it reports. Only this flag reaches a network; run and resume never do"
+        )]
+        #[arg(long)]
+        refresh: bool,
+        #[arg(
+            help = "Which runs feed the estimates, overriding [capacity] scope: every run on this machine, or this repository's alone"
+        )]
+        #[arg(long, value_enum)]
+        scope: Option<Scope>,
     },
     #[command(about = "Parse a plan, resolve routing, and print the task table (no execution)")]
     Validate {
@@ -152,6 +163,21 @@ enum Interaction {
     Never,
     OnBlock,
     OnMilestone,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Scope {
+    Machine,
+    Repo,
+}
+
+impl Scope {
+    const fn chosen(self) -> capacity::Scope {
+        match self {
+            Self::Machine => capacity::Scope::Machine,
+            Self::Repo => capacity::Scope::Repo,
+        }
+    }
 }
 
 impl From<Interaction> for InteractionMode {
@@ -256,12 +282,34 @@ fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> 
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Capacity { config, pools } => {
+        Command::Capacity {
+            config,
+            pools,
+            refresh,
+            scope,
+        } => {
+            let repo_root = std::env::current_dir().context("resolving current directory")?;
+            if refresh {
+                let runner = upstroke::runner::host::HostRunner::new();
+                let refreshed = tracker::refresh(
+                    &tracker::RefreshOptions {
+                        config_path: config.clone(),
+                        pools_path: pools.clone(),
+                        repo_root: repo_root.clone(),
+                        now_unix: None,
+                    },
+                    &tracker::CurlTransport::new(&runner),
+                    &|variable| std::env::var(variable).ok(),
+                )?;
+                print!("{}", refreshed.render());
+            }
             let report = capacity::report(
                 &capacity::CapacityOptions {
                     config_path: config,
                     pools_path: pools,
-                    repo_root: std::env::current_dir().context("resolving current directory")?,
+                    repo_root,
+                    scope: scope.map(Scope::chosen),
+                    now_unix: None,
                 },
                 &engine::BuiltinAdapters,
             )?;
@@ -493,6 +541,8 @@ mod tests {
                 &[
                     "Repo config path (default: ./upstroke.toml, optional)",
                     "Pools file path (default: ~/.upstroke/pools.toml)",
+                    "First ask each pool's usage_provider over HTTPS (through curl) and store what it reports. Only this flag reaches a network; run and resume never do",
+                    "Which runs feed the estimates, overriding [capacity] scope: every run on this machine, or this repository's alone",
                 ],
             ),
             (
@@ -648,6 +698,68 @@ mod tests {
                 .count(),
             6
         );
+    }
+
+    #[test]
+    fn capacity_takes_a_refresh_and_a_scope_and_asks_no_provider_unless_told_to() {
+        let plain = Cli::try_parse_from(["upstroke", "capacity"])
+            .expect("parse")
+            .command;
+        assert!(
+            matches!(
+                plain,
+                Command::Capacity {
+                    refresh: false,
+                    scope: None,
+                    ..
+                }
+            ),
+            "with no flag the command reads what is on disk and reaches no network"
+        );
+
+        let asked = Cli::try_parse_from(["upstroke", "capacity", "--refresh", "--scope", "repo"])
+            .expect("parse")
+            .command;
+        let Command::Capacity {
+            refresh: true,
+            scope: Some(scope),
+            ..
+        } = asked
+        else {
+            panic!("`capacity --refresh --scope repo` did not parse as that");
+        };
+        assert_eq!(scope.chosen(), capacity::Scope::Repo);
+        assert_eq!(Scope::Machine.chosen(), capacity::Scope::Machine);
+
+        assert!(
+            Cli::try_parse_from(["upstroke", "capacity", "--scope", "global"]).is_err(),
+            "a scope nobody can act on is a usage error, not a default"
+        );
+        let refreshing = Cli::try_parse_from(["upstroke", "capacity", "--refresh"])
+            .expect("parse")
+            .command;
+        assert_eq!(
+            command_class(&refreshing),
+            CommandClass::ReadOnly,
+            "the tracker drives no run, so it joins no coordinator's ambient job"
+        );
+    }
+
+    #[test]
+    fn no_command_but_capacity_takes_a_refresh() {
+        for argv in [
+            vec!["upstroke", "run", "plan.md", "--refresh"],
+            vec!["upstroke", "resume", "01ABCDEF", "--refresh"],
+            vec!["upstroke", "validate", "plan.md", "--refresh"],
+            vec!["upstroke", "connect", "--refresh"],
+            vec!["upstroke", "status", "--refresh"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "{argv:?} parsed: the capacity tracker is `capacity --refresh` and nothing else \
+                 (DESIGN.md §4.2, §13)"
+            );
+        }
     }
 
     #[test]
