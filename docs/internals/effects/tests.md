@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 153 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 166 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2128,8 +2128,17 @@ when the loop came to keep each harness's code before it copies the
 harness's outputs: `MUT-TEST-WINDOWS-HOSTED-CODE-KEPT-AFTER-THE-COPIES` and
 `MUT-TEST-WINDOWS-HOSTED-OUTPUT-COPY-UNGUARDED`. One more came when the
 step read the build's errors in a `try`:
-`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`. The test asserts no
-count. It requires every row to change the document and to be refused under
+`MUT-TEST-WINDOWS-HOSTED-BUILD-ERRORS-READ-UNGUARDED`. That made 153, and
+eight came when the shard tables were re-packed from three timed runs, for
+filters and skips moved within the matrix rather than whole legs: five on
+the Windows legs, `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG`,
+`-SKIP-DROPPED`, `-FILTER-MOVED-BETWEEN-LEGS`, `-FILTER-WIDENED` and
+`-FILTERS-COMMA-JOINED`, and three on the macOS legs,
+`MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`, `-SKIP-DROPPED` and
+`-FILTER-MOVED-BETWEEN-LEGS` (each under its matrix check in the workflow
+notes). Those eight were counted from 153 to 161 before the five
+cross-target rows of #412 were merged in from `master`, which made 166.
+The test asserts no count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
 
@@ -2258,8 +2267,11 @@ and its line carries no time. libtest writes the time apart from the
 result, so a child a test starts on the harness's console can write between
 them and move the time to the next line; the `mklink` that `link_dir` in
 `src/rundir/tests.rs` starts was one, and `link_dir` now captures its
-output. The packing of tests into legs (`WINDOWS_SHARD_FILTERS`) is to be
-weighed by those times in a later change (`MAINTAINING.md` step 3).
+output. The tests were packed into legs (`WINDOWS_SHARD_FILTERS`) by those
+times on 2026-11-22 and re-packed from three timed runs on 2026-11-23, as
+`MAINTAINING.md` step 3 records, then rebalanced by the median of each
+test's times over five runs, as the notes on `WINDOWS_SHARD_FILTERS` in
+`docs/internals/effects/tests/ci_model.md` record.
 `--report-time` is unstable: libtest takes it only after
 `-Z unstable-options`, and on a stable compiler takes that only where
 `RUSTC_BOOTSTRAP` is set in the harness's own environment, which line 7 of
@@ -2477,7 +2489,7 @@ variable is set, compiles it again with it, and turns the feature on where
 that compiles. Each also has Cargo run it again whenever the variable
 changes. Under the variable the three, and every harness built over them,
 are built otherwise than the `test` job's legs and a user's machine build
-them, from a tree nobody changed, on these ten legs alone. That is read
+them, from a tree nobody changed, on these fourteen legs alone. That is read
 from the three build scripts at the versions `Cargo.lock` held on
 2026-11-21; no build here was made with the variable set.
 
@@ -2532,7 +2544,7 @@ selection is, is the exact line's to hold
 
 The times are the one thing this step does that nothing downstream judges.
 Without them every leg runs its shard, clears its floor and is green; what
-is lost is the record a later change is to pack the legs from, on all ten
+is lost is the record a later change is to pack the legs from, on all fourteen
 at once, and no check would fail to say so. Measured by one edit in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
 two arguments removed; in the workflow alone,
@@ -2974,63 +2986,68 @@ the macOS one and its two Linux legs to the Linux one.
 
 Five claims.
 
-1. The Windows table's ten selections, as [`shard_selections`] derives
-   them, are the ten strings written out here. Literals, not a second
-   derivation: the rule is then stated twice in two forms, and a reader sees
-   the arguments a shard is handed.
-2. The macOS table's five and the Linux table's two are likewise written
-   out, and a table with no filter gives one empty string -- one shard, no
-   arguments, the whole suite. No runner's table is empty since the Linux
-   suite was divided; the empty one stays as the rule's base case.
+1. The tables yield fourteen Windows selections, five macOS ones and two
+   Linux ones, as [`shard_selections`] derives them. Each table's first
+   selection is its first filter list joined by spaces, with no skip, and
+   the last Windows selection is exactly a `--skip` for each of the table's
+   69 filters, in table order: the two ends of the rule, stated a second
+   way.
+2. The Linux table's two are written out as literals, and a table with no
+   list gives one empty string -- one shard, no arguments, the whole suite.
+   No runner's table is empty since the Linux suite was divided; the empty
+   one stays as the rule's base case.
 3. Each of fourteen names is run by exactly one selection of each table
    under [`libtest_runs`], and by the one named beside it, in a column for
    each of the three tables; under the empty table's one selection every
    name runs. The names are the boundaries of the rule, with the Windows
-   shard of each beside it:
-   - a coordinator test named `a_p...` (shard 1), one named `a_r...` (2),
-     and one named `a_...` that is neither (3);
-   - a coordinator test not named `a_...` (4), and one named `a_...` in a
-     child module of the coordinator's tests (4), which the first three
-     filters do not reach because each is a substring that runs through
-     `tests::a_`;
-   - a recovery test (5);
-   - a topology test outside the coordinator and recovery (10). No filter
-     names `engine::topology::` since the re-split of 2026-11-20, so the
-     last shard runs it;
-   - `engine::tests::host_acceptance_record` (9), a test of the engine's
-     own `tests` module whose name does not begin with `a`, and one there
-     whose name does (6). The sixth filter, `engine::tests::a`, contains the
-     ninth, `engine::tests::`, and comes first;
-   - a runner test (7);
-   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (8),
-     a name outside the engine that contains `engine::`. The Windows table
-     has no `engine::` filter now, and the name contains neither
-     `engine::tests::a` nor `engine::tests::`, so the workspace manager's
-     shard runs it. The macOS and Linux tables do have that filter.
-     libtest's filter is a substring, so there the `engine::` shard runs the
-     name and every later shard skips it: once, as for any other name;
-   - a workspace manager test that contains no other filter (8);
-   - a library test that contains no filter (10), and a name with no module
+   shard of each and the filter that puts it there:
+   - coordinator tests named `a_p...` (shard 4, `...tests::a_p`) and
+     `a_r...` (10, `...tests::a_r`), and two that no coordinator filter
+     names, `a_b...` and `halt...` (14);
+   - a test named `a_...` in the coordinator's `interleaving` module (12,
+     `...interleaving::a`), which the coordinator's `...tests::a_` filters
+     do not reach because each is a substring that runs through `tests::a_`;
+   - a recovery test (1, `...recover::tests::k`) and an attempt test (13,
+     `engine::topology::attempt::`);
+   - `engine::tests::host_acceptance_record` (14), which no
+     `engine::tests::` filter names, and `engine::tests::a_kept_pin...` (10,
+     `engine::tests::a_k`);
+   - a runner test (3, `runner::container::`);
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (7,
+     `workspace_manager::tests::e`), a name outside the engine that contains
+     `engine::`. The Windows table has no `engine::` filter, and the name
+     contains no `engine::tests::` one, so the workspace manager's filter
+     decides. The Linux table does have that filter. libtest's filter is a
+     substring, so there the `engine::` shard runs the name and every later
+     shard skips it: once, as for any other name;
+   - a workspace manager test named `a_...` (3, `workspace_manager::tests::a`);
+   - a library test that contains no filter (14), and a name with no module
      before `tests::`, which is how a harness lists a test at its crate's
-     root, the bin harness's among them (10).
+     root, the bin harness's among them (14).
 
-   On macOS the same fourteen fall in shards 1, 1, 1, 2, 2, 2, 2, 3, 3, 4,
-   3, 5, 5 and 5: the first filter there is the coordinator's tests named
-   `a_...`, so the other two coordinator names fall in the second shard
-   with the rest of `engine::topology::`. In the Linux column every name
-   that contains `engine::` falls in shard 1, the first nine and the
-   eleventh, and the runner's test and the last three in shard 2.
-4. In all three lists no filter is empty, contains whitespace or starts
-   with `-`, and none repeats. Each filter is one word of a command line: an
-   empty one is no word, so its own shard has no filter and a later shard's
+   On macOS the same fourteen fall in shards 1, 3, 5, 5, 2, 3, 4, 5, 1, 4,
+   2, 3, 2 and 5: there the first list takes the coordinator's `a_p...`
+   tests and the engine's own `a_k...`; the second takes the `interleaving`
+   module, the workspace manager's `e...` tests and `effects::tests::`; the
+   third takes the coordinator's `a_r...` tests, the recovery tests named
+   `a_...` or `k...` and the workspace manager's named `a...`; the fourth
+   takes `runner::container::` and the attempt tests; and no macOS filter
+   names the coordinator's `a_b...` or `halt...`. In the Linux column
+   every name that contains `engine::` falls in shard 1, the first nine and
+   the eleventh, and the runner's test and the last three in shard 2.
+4. In all three tables no list is empty, no filter is empty, contains
+   whitespace or starts with `-`, and no filter appears twice anywhere in
+   the table. An empty list is a shard with no filter, which runs every test
+   no earlier shard ran. Each filter is one word of a command line: an empty
+   one is no word, so its own shard loses a filter and a later shard's
    `--skip` takes the next word as its string; one with whitespace is two
-   words; one that starts with `-` is an option. A repeated filter gives a
-   second shard that skips its own filter and selects nothing.
+   words; one that starts with `-` is an option. A repeated filter is
+   skipped by its own later shard, or named twice by one.
 5. `WINDOWS_SHARD_FLOORS` has one entry for each Windows shard, each above
    zero, and they sum to [`WINDOWS_TEST_FLOOR`], 1700: the floor the whole
-   suite was held to as one job. The ten legs together must not accept
+   suite was held to as one job. The fourteen legs together must not accept
    fewer passing tests than that job did. No script reads the 1700 now; it
-   is the sum the ten floors are held to.
+   is the sum the fourteen floors are held to.
 
 Fourteen names are examples, not a census of the suite, and the test does
 not ask whether a test of each name exists. That the rule divides every set
@@ -3045,7 +3062,7 @@ eight, by making [`libtest_runs`] read a skip string as a prefix of the
 name rather than a substring, and restoring it: this test failed on
 `workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
 Windows shards 4 and 5 of that table. It was not measured again for the
-ten, of 2026-11-19 or of the re-split.
+ten, of 2026-11-19 or of the re-split, or for the fourteen of 2026-11-22.
 
 ## `mod merge_gate_answers {`
 

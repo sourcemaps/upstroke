@@ -159,33 +159,152 @@ pub(super) const TEST_WINDOWS_HOSTED_NAME: &str = "test (windows-latest, ${{ mat
 pub(super) const TEST_WINDOWS_HOSTED_TIMEOUT_MINUTES: i64 = 40;
 pub(super) const CACHE_ACTION: &str = "Swatinem/rust-cache@";
 
-pub(super) const WINDOWS_SHARD_FILTERS: [&str; 9] = [
-    "engine::topology::coordinator::tests::a_p",
-    "engine::topology::coordinator::tests::a_r",
-    "engine::topology::coordinator::tests::a_",
-    "engine::topology::coordinator::",
-    "engine::topology::recover::",
-    "engine::tests::a",
-    "runner::",
-    "workspace_manager::",
-    "engine::tests::",
+pub(super) const WINDOWS_SHARD_FILTERS: [&[&str]; 13] = [
+    &[
+        "engine::topology::coordinator::tests::a_h",
+        "engine::topology::coordinator::tests::t",
+        "engine::topology::recover::tests::k",
+        "workspace_manager::tests::c",
+        "engine::tests::a_t",
+    ],
+    &[
+        "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner",
+        "engine::topology::recover::tests::a_k",
+        "engine::topology::recover::tests::an",
+        "engine::tests::a_p",
+        "runner::contract::",
+        "engine::topology::coordinator::tests::o",
+    ],
+    &[
+        "engine::topology::coordinator::tests::interleaving::s",
+        "engine::topology::dispatch::",
+        "workspace_manager::tests::a",
+        "runner::container::",
+        "engine::tests::a_d",
+        "engine::tests::a_s",
+    ],
+    &[
+        "engine::topology::coordinator::tests::a_p",
+        "engine::topology::recover::tests::a_f",
+        "engine::topology::candidate::",
+        "workspace_manager::tests::r",
+    ],
+    &[
+        "engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed",
+        "effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree",
+        "engine::topology::coordinator::tests::a_d",
+        "engine::topology::coordinator::tests::a_g",
+        "engine::tests::t",
+        "engine::topology::coordinator::tests::a_v",
+    ],
+    &[
+        "engine::topology::coordinator::tests::interleaving::r",
+        "engine::topology::coordinator::tests::a_c",
+        "engine::tests::a_b",
+        "engine::tests::e",
+        "engine::tests::r",
+        "engine::tests::s",
+        "engine::topology::recover::tests::s",
+    ],
+    &[
+        "engine::topology::coordinator::tests::a_f",
+        "engine::topology::coordinator::tests::d",
+        "workspace_manager::tests::e",
+        "workspace_manager::tests::t",
+        "engine::tests::a_l",
+    ],
+    &[
+        "engine::topology::coordinator::tests::a_k",
+        "engine::topology::coordinator::tests::a_s",
+        "engine::topology::coordinator::tests::r",
+        "engine::topology::coordinator::tests::s",
+        "engine::topology::integrate::",
+        "engine::tests::l",
+        "engine::topology::coordinator::tests::c",
+    ],
+    &[
+        "engine::topology::coordinator::tests::an",
+        "engine::topology::recover::tests::a_r",
+        "engine::topology::coverage::",
+        "engine::tests::a_r",
+    ],
+    &[
+        "engine::topology::coordinator::tests::a_r",
+        "engine::topology::finalize::",
+        "engine::topology::ledger::",
+        "engine::tests::a_k",
+    ],
+    &[
+        "engine::topology::coordinator::tests::interleaving::i",
+        "engine::topology::coordinator::tests::ap",
+        "engine::topology::run::",
+        "topology::census::",
+        "engine::tests::an",
+        "engine::topology::recover::tests::t",
+    ],
+    &[
+        "engine::topology::coordinator::tests::interleaving::a",
+        "engine::topology::recover::tests::r",
+        "workspace_manager::tests::n",
+        "workspace::",
+    ],
+    &[
+        "engine::topology::attempt::",
+        "workspace_manager::tests::s",
+        "engine::tests::a_c",
+        "engine::tests::a_f",
+        "engine::tests::f",
+    ],
 ];
 
-pub(super) const WINDOWS_SHARD_FLOORS: [u32; 10] = [24, 13, 47, 36, 113, 93, 200, 152, 57, 965];
+pub(super) const WINDOWS_SHARD_FLOORS: [u32; 14] =
+    [22, 44, 224, 43, 27, 33, 36, 35, 54, 26, 83, 45, 43, 985];
 
-pub(super) const MACOS_SHARD_FILTERS: [&str; 4] = [
-    "engine::topology::coordinator::tests::a_",
-    "engine::topology::",
-    "engine::",
-    "runner::",
+pub(super) const MACOS_SHARD_FILTERS: [&[&str]; 4] = [
+    &[
+        "engine::topology::coordinator::tests::a_p",
+        "workspace_manager::tests::t",
+        "engine::tests::a_k",
+        "engine::tests::a_r",
+        "engine::tests::a_s",
+        "runner::host::",
+        "workspace::tests::",
+    ],
+    &[
+        "engine::topology::coordinator::tests::interleaving::",
+        "engine::topology::coordinator::tests::a_s",
+        "workspace_manager::tests::e",
+        "workspace_manager::tests::n",
+        "topology::census::",
+        "effects::tests::",
+    ],
+    &[
+        "engine::topology::coordinator::tests::a_r",
+        "engine::topology::recover::tests::a_",
+        "engine::topology::recover::tests::k",
+        "workspace_manager::tests::s",
+        "engine::tests::a_b",
+        "engine::tests::t",
+        "engine::topology::recover::",
+        "workspace_manager::tests::a",
+        "events::log::",
+    ],
+    &[
+        "engine::topology::coordinator::tests::a_g",
+        "engine::topology::coordinator::tests::an",
+        "runner::container::",
+        "runner::contract::",
+        "engine::tests::an",
+        "engine::topology::attempt::",
+    ],
 ];
 
-pub(super) const LINUX_SHARD_FILTERS: [&str; 1] = ["engine::"];
+pub(super) const LINUX_SHARD_FILTERS: [&[&str]; 1] = [&["engine::"]];
 
 pub(super) const TEST_JOB_NAME: &str = "test (${{ matrix.leg }})";
 pub(super) const TEST_TIMEOUT_MINUTES: i64 = 30;
 
-pub(super) const TEST_LEGS: [(&str, &[&str]); 2] = [
+pub(super) const TEST_LEGS: [(&str, &[&[&str]]); 2] = [
     ("ubuntu-latest", &LINUX_SHARD_FILTERS),
     ("macos-latest", &MACOS_SHARD_FILTERS),
 ];

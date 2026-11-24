@@ -74,12 +74,26 @@ jobs:
     # test's sequential Linux duration scaled so that the leg it ran in sums
     # to that leg's measured harness, blended half and half with a uniform
     # per-test model, and the filters chosen by a search for the slowest
-    # leg. The first leg, the 15.8 minutes, now runs only the coordinator's
+    # leg. The first leg, the 15.8 minutes, then ran only the coordinator's
     # tests whose names begin with `a_`, and the rest of the coordinator's
-    # run with the rest of `engine::topology::`. The slowest macOS leg is
-    # predicted at about 11.8 minutes, and the re-split was not timed before
-    # it landed: the CI run of the pull request that landed it is its first
-    # measurement. 30 is about two and a half times the slowest shard
+    # ran with the rest of `engine::topology::`. The slowest macOS leg was
+    # predicted at about 11.8 minutes.
+    #
+    # The macOS suite was divided again on 2026-11-22, into five legs still,
+    # each with a list of filters, and re-packed from three timed runs. The
+    # weights were the mean of each test's measured Windows times over CI runs
+    # 45045067738, 45161322179 and 45233912312, scaled by a ratio of macOS to
+    # Windows time fitted for each group of tests on the macOS legs measured
+    # with the lists before 2026-11-22 and with the first packed lists. Tests
+    # are packed into legs whole module by whole module, and a module is
+    # split by name prefix only where it alone exceeds a leg's budget.
+    #
+    # The filters were then rebalanced from each test's median time over CI
+    # runs 45259861458, 45265008874, 45269007219, 45273775506 and
+    # 45337940696, moving whole filters between legs so that each leg's
+    # median job time is about ten minutes or less. The rebalance was not
+    # timed before it landed: the CI run of the pull request that landed it
+    # is its first measurement. 30 is about three times the slowest leg
     # expected, and the limit the Linux leg already had.
     timeout-minutes: 30
     strategy:
@@ -89,21 +103,20 @@ jobs:
         # an afterthought: the subprocess supervisor, the cmd /C quoting and the
         # PATHEXT resolution all behave differently per platform and are covered
         # by tests. It is absent from this matrix because it runs below, in
-        # `test-windows-hosted`, in ten shards of its own.
+        # `test-windows-hosted`, in fourteen shards of its own.
         #
         # Seven legs: the Linux suite as two shards -- `engine::`, and
-        # everything else -- and the macOS suite as five -- the coordinator's
-        # tests whose names begin with `a_`, the rest of `engine::topology::`,
-        # the rest of `engine::`, `runner::`, and everything else. The shard
-        # rule is the one `test-windows-hosted` states below, applied to each
-        # runner's legs on their own: a leg runs the tests whose names
-        # contain its filter and none of the filters of the legs before it,
-        # each of those a `--skip`; the last leg has no filter and runs the
-        # tests that contain none of them. So every test runs in exactly one
-        # Linux leg and in exactly one macOS leg. These legs carry no floor on
-        # the count of passing tests and the shards add none: a filter that
-        # matches no test only moves tests to a later leg of its runner, and
-        # none stops running. The workflow oracle
+        # everything else -- and the macOS suite as five, the first four each
+        # named by a list of filters and the fifth by everything else. The
+        # shard rule is the one `test-windows-hosted` states below, applied to
+        # each runner's legs on their own: a leg runs the tests whose names
+        # contain any of its filters and none of the filters of the legs
+        # before it, each of those a `--skip`; the last leg has no filter and
+        # runs the tests that contain none of them. So every test runs in
+        # exactly one Linux leg and in exactly one macOS leg. These legs carry
+        # no floor on the count of passing tests and the shards add none: a
+        # filter that matches no test only moves tests to a later leg of its
+        # runner, and none stops running. The workflow oracle
         # derives this list from its table of runners and filters and holds
         # the matrix to it entry for entry, in order. Every `leg:` and
         # `tests:` value is double-quoted, as in that job's table.
@@ -116,19 +129,19 @@ jobs:
             tests: "--skip engine::"
           - os: macos-latest
             leg: "macos-latest, 1 of 5"
-            tests: "engine::topology::coordinator::tests::a_"
+            tests: "engine::topology::coordinator::tests::a_p workspace_manager::tests::t engine::tests::a_k engine::tests::a_r engine::tests::a_s runner::host:: workspace::tests::"
           - os: macos-latest
             leg: "macos-latest, 2 of 5"
-            tests: "engine::topology:: --skip engine::topology::coordinator::tests::a_"
+            tests: "engine::topology::coordinator::tests::interleaving:: engine::topology::coordinator::tests::a_s workspace_manager::tests::e workspace_manager::tests::n topology::census:: effects::tests:: --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests::"
           - os: macos-latest
             leg: "macos-latest, 3 of 5"
-            tests: "engine:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology::"
+            tests: "engine::topology::coordinator::tests::a_r engine::topology::recover::tests::a_ engine::topology::recover::tests::k workspace_manager::tests::s engine::tests::a_b engine::tests::t engine::topology::recover:: workspace_manager::tests::a events::log:: --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests::"
           - os: macos-latest
             leg: "macos-latest, 4 of 5"
-            tests: "runner:: --skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine::"
+            tests: "engine::topology::coordinator::tests::a_g engine::topology::coordinator::tests::an runner::container:: runner::contract:: engine::tests::an engine::topology::attempt:: --skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests:: --skip engine::topology::coordinator::tests::a_r --skip engine::topology::recover::tests::a_ --skip engine::topology::recover::tests::k --skip workspace_manager::tests::s --skip engine::tests::a_b --skip engine::tests::t --skip engine::topology::recover:: --skip workspace_manager::tests::a --skip events::log::"
           - os: macos-latest
             leg: "macos-latest, 5 of 5"
-            tests: "--skip engine::topology::coordinator::tests::a_ --skip engine::topology:: --skip engine:: --skip runner::"
+            tests: "--skip engine::topology::coordinator::tests::a_p --skip workspace_manager::tests::t --skip engine::tests::a_k --skip engine::tests::a_r --skip engine::tests::a_s --skip runner::host:: --skip workspace::tests:: --skip engine::topology::coordinator::tests::interleaving:: --skip engine::topology::coordinator::tests::a_s --skip workspace_manager::tests::e --skip workspace_manager::tests::n --skip topology::census:: --skip effects::tests:: --skip engine::topology::coordinator::tests::a_r --skip engine::topology::recover::tests::a_ --skip engine::topology::recover::tests::k --skip workspace_manager::tests::s --skip engine::tests::a_b --skip engine::tests::t --skip engine::topology::recover:: --skip workspace_manager::tests::a --skip events::log:: --skip engine::topology::coordinator::tests::a_g --skip engine::topology::coordinator::tests::an --skip runner::container:: --skip runner::contract:: --skip engine::tests::an --skip engine::topology::attempt::"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -168,7 +181,7 @@ jobs:
       # this one step-level `env:` as a whole map (`TEST_STEP_ENV`), the way
       # it pins the aggregate's: any other key here is refused. The cargo
       # line hands libtest the leg's `matrix.tests`, on a Linux leg as on a
-      # macOS one: the shard's filter, where it has one, and its skips.
+      # macOS one: the shard's filters, where it has any, and its skips.
       - run: cargo test --all-targets --all-features -- ${{ matrix.tests }}
         env:
           UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
@@ -243,7 +256,7 @@ jobs:
             }' "$log" || { echo "the container capability record is missing or its framing is incomplete" >&2; exit 1; }
 
   # The Windows suite, on every lane: a pull request, a push to master and a
-  # merge-queue entry alike run it here, one suite in ten shards, each a leg
+  # merge-queue entry alike run it here, one suite in fourteen shards, each a leg
   # of this job's matrix on a windows-latest runner of its own. It is no
   # longer a twin for the runs a picker sent off a self-hosted guest; the
   # guest's history is below.
@@ -298,7 +311,7 @@ jobs:
   # 22m 53s. The 1,669 s shard, the rest of `engine::topology::`, was
   # divided in two, which made five.
   #
-  # Ten now, divided by measured time, because a run's slowest leg sets its
+  # Then ten, divided by measured time, because a run's slowest leg sets its
   # wall clock. In run 44614925593 on 2026-11-19 the five legs' libtest
   # harnesses took 1201, 508, 976, 564 and 860 s, and the slowest job took
   # 24.3 minutes, against about 3.6 minutes fixed per leg: setup, the
@@ -318,40 +331,49 @@ jobs:
   # 3.8 minutes of each job fixed. The slowest, at 18.6 minutes, was the
   # seventh, the rest of `engine::`.
   #
-  # The nine filters below are the re-split of 2026-11-20, made from that
-  # run: each test's sequential Linux duration scaled so that the leg it
-  # ran in sums to that leg's measured harness, blended half and half with
-  # a uniform per-test model, and the filters chosen by a search for the
-  # slowest leg. The first three divide the coordinator's tests as before,
-  # but for the third, which is now the rest of `a_` and leaves the other
-  # names that begin with `a` to the fourth. The sixth and the ninth divide
-  # `engine::tests::` by the opening of a test's name, `a` and the rest.
-  # The other four are module paths. No filter names the rest of
-  # `engine::topology::` or the rest of `engine::` now, and those tests
-  # run in the last leg. The slowest leg is predicted at about 14.4
-  # minutes, and the re-split was not timed before it landed: the CI run of
-  # the pull request that landed it is its first measurement.
+  # The ten were re-split on 2026-11-20 from that run: each test's
+  # sequential Linux duration scaled so that the leg it ran in sums to that
+  # leg's measured harness, blended half and half with a uniform per-test
+  # model, and nine filters chosen by a search for the slowest leg. The
+  # slowest leg was predicted at about 14.4 minutes.
   #
-  # Single tests set the floor under that prediction: a leg takes no less
-  # than its longest test and the fixed minutes. Two tests are each
-  # estimated at about 9 minutes of their leg's harness, and the re-split
-  # changes neither:
-  # `engine::topology::recover::tests::a_kill_at_every_cell_of_a_complete_finalization_converges_on_the_next_resume`
-  # and
-  # `workspace_manager::tests::r_o2_a_cross_kind_scrub_stopped_at_any_phase_converges_with_no_instance_registered`.
+  # Fourteen now, each of the first thirteen named by a list of filters and
+  # the last by everything else. The fourteen were first packed on
+  # 2026-11-22 from run 45045067738 alone, and run 45233912312 measured
+  # them. They were re-packed from the mean of each test's measured times
+  # over CI runs 45045067738, 45161322179 and 45233912312. Tests are packed
+  # into legs whole module by whole module, and a module is split by the
+  # opening of its tests' names only where it alone exceeds a leg's budget.
   #
-  # The shard rule: a leg runs the tests whose names contain its filter and
-  # none of the filters of the legs before it, each of those a `--skip`; the
-  # last leg has no filter and runs the tests that contain none of them. So
-  # every test runs in exactly one leg. The workflow oracle derives the table
-  # below from its filter list and its floors, and holds this matrix to it
-  # entry for entry; the ten floors sum to 1700, the floor the whole suite
+  # The filters were then rebalanced from each test's median time over CI
+  # runs 45259861458, 45265008874, 45269007219, 45273775506 and
+  # 45337940696, moving whole filters between legs so that each leg's
+  # median job time is about ten minutes or less. The rebalance was not
+  # timed before it landed: the CI run of the pull request that landed it
+  # is its first measurement.
+  #
+  # Single tests set a floor under every leg: a leg takes no less than its
+  # longest test plus the job's fixed minutes. In run 45045067738 the longest
+  # single tests were
+  # `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_after_the_effect`,
+  # 249.8 s, and
+  # `engine::topology::recover::tests::kill_after_report_before_each_cleanup_step_before_the_effect`,
+  # 244.5 s. Under the re-pack from the three runs every leg's prediction,
+  # about 9 minutes a job, was above that floor.
+  #
+  # The shard rule: a leg runs the tests whose names contain any of its
+  # filters and none of the filters of the legs before it, each of those a
+  # `--skip`; the last leg has no filter and runs the tests that contain
+  # none of them. So every test runs in exactly one leg. The workflow oracle
+  # derives the table below from its filter lists and its floors, and holds
+  # this matrix to it entry for entry; the fourteen floors sum to 1700, the
+  # floor the whole suite
   # was held to as one job on the guest. Every `shard:` and `tests:` value
   # is double-quoted: a `tests:` value contains `:: `, a colon and a space,
   # which YAML reads as a mapping in a plain scalar.
   #
   # `fail-fast: false`, so one leg's failure does not cancel the others
-  # before they report. The aggregate reads the ten legs through one
+  # before they report. The aggregate reads the fourteen legs through one
   # result, `needs.test-windows-hosted.result`, as it reads the `test` and
   # `msrv` matrices through one result each, and it accepts `success` alone
   # from it, as from every gate. What GitHub gives a matrix whose leg did
@@ -389,36 +411,48 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - shard: "1 of 10"
-            tests: "engine::topology::coordinator::tests::a_p"
-            floor: 24
-          - shard: "2 of 10"
-            tests: "engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_p"
-            floor: 13
-          - shard: "3 of 10"
-            tests: "engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r"
-            floor: 47
-          - shard: "4 of 10"
-            tests: "engine::topology::coordinator:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_"
+          - shard: "1 of 14"
+            tests: "engine::topology::coordinator::tests::a_h engine::topology::coordinator::tests::t engine::topology::recover::tests::k workspace_manager::tests::c engine::tests::a_t"
+            floor: 22
+          - shard: "2 of 14"
+            tests: "effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner engine::topology::recover::tests::a_k engine::topology::recover::tests::an engine::tests::a_p runner::contract:: engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t"
+            floor: 44
+          - shard: "3 of 14"
+            tests: "engine::topology::coordinator::tests::interleaving::s engine::topology::dispatch:: workspace_manager::tests::a runner::container:: engine::tests::a_d engine::tests::a_s --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o"
+            floor: 224
+          - shard: "4 of 14"
+            tests: "engine::topology::coordinator::tests::a_p engine::topology::recover::tests::a_f engine::topology::candidate:: workspace_manager::tests::r --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s"
+            floor: 43
+          - shard: "5 of 14"
+            tests: "engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree engine::topology::coordinator::tests::a_d engine::topology::coordinator::tests::a_g engine::tests::t engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r"
+            floor: 27
+          - shard: "6 of 14"
+            tests: "engine::topology::coordinator::tests::interleaving::r engine::topology::coordinator::tests::a_c engine::tests::a_b engine::tests::e engine::tests::r engine::tests::s engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v"
+            floor: 33
+          - shard: "7 of 14"
+            tests: "engine::topology::coordinator::tests::a_f engine::topology::coordinator::tests::d workspace_manager::tests::e workspace_manager::tests::t engine::tests::a_l --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s"
             floor: 36
-          - shard: "5 of 10"
-            tests: "engine::topology::recover:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator::"
-            floor: 113
-          - shard: "6 of 10"
-            tests: "engine::tests::a --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover::"
-            floor: 93
-          - shard: "7 of 10"
-            tests: "runner:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a"
-            floor: 200
-          - shard: "8 of 10"
-            tests: "workspace_manager:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner::"
-            floor: 152
-          - shard: "9 of 10"
-            tests: "engine::tests:: --skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager::"
-            floor: 57
-          - shard: "10 of 10"
-            tests: "--skip engine::topology::coordinator::tests::a_p --skip engine::topology::coordinator::tests::a_r --skip engine::topology::coordinator::tests::a_ --skip engine::topology::coordinator:: --skip engine::topology::recover:: --skip engine::tests::a --skip runner:: --skip workspace_manager:: --skip engine::tests::"
-            floor: 965
+          - shard: "8 of 14"
+            tests: "engine::topology::coordinator::tests::a_k engine::topology::coordinator::tests::a_s engine::topology::coordinator::tests::r engine::topology::coordinator::tests::s engine::topology::integrate:: engine::tests::l engine::topology::coordinator::tests::c --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l"
+            floor: 35
+          - shard: "9 of 14"
+            tests: "engine::topology::coordinator::tests::an engine::topology::recover::tests::a_r engine::topology::coverage:: engine::tests::a_r --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l --skip engine::topology::coordinator::tests::a_k --skip engine::topology::coordinator::tests::a_s --skip engine::topology::coordinator::tests::r --skip engine::topology::coordinator::tests::s --skip engine::topology::integrate:: --skip engine::tests::l --skip engine::topology::coordinator::tests::c"
+            floor: 54
+          - shard: "10 of 14"
+            tests: "engine::topology::coordinator::tests::a_r engine::topology::finalize:: engine::topology::ledger:: engine::tests::a_k --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l --skip engine::topology::coordinator::tests::a_k --skip engine::topology::coordinator::tests::a_s --skip engine::topology::coordinator::tests::r --skip engine::topology::coordinator::tests::s --skip engine::topology::integrate:: --skip engine::tests::l --skip engine::topology::coordinator::tests::c --skip engine::topology::coordinator::tests::an --skip engine::topology::recover::tests::a_r --skip engine::topology::coverage:: --skip engine::tests::a_r"
+            floor: 26
+          - shard: "11 of 14"
+            tests: "engine::topology::coordinator::tests::interleaving::i engine::topology::coordinator::tests::ap engine::topology::run:: topology::census:: engine::tests::an engine::topology::recover::tests::t --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l --skip engine::topology::coordinator::tests::a_k --skip engine::topology::coordinator::tests::a_s --skip engine::topology::coordinator::tests::r --skip engine::topology::coordinator::tests::s --skip engine::topology::integrate:: --skip engine::tests::l --skip engine::topology::coordinator::tests::c --skip engine::topology::coordinator::tests::an --skip engine::topology::recover::tests::a_r --skip engine::topology::coverage:: --skip engine::tests::a_r --skip engine::topology::coordinator::tests::a_r --skip engine::topology::finalize:: --skip engine::topology::ledger:: --skip engine::tests::a_k"
+            floor: 83
+          - shard: "12 of 14"
+            tests: "engine::topology::coordinator::tests::interleaving::a engine::topology::recover::tests::r workspace_manager::tests::n workspace:: --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l --skip engine::topology::coordinator::tests::a_k --skip engine::topology::coordinator::tests::a_s --skip engine::topology::coordinator::tests::r --skip engine::topology::coordinator::tests::s --skip engine::topology::integrate:: --skip engine::tests::l --skip engine::topology::coordinator::tests::c --skip engine::topology::coordinator::tests::an --skip engine::topology::recover::tests::a_r --skip engine::topology::coverage:: --skip engine::tests::a_r --skip engine::topology::coordinator::tests::a_r --skip engine::topology::finalize:: --skip engine::topology::ledger:: --skip engine::tests::a_k --skip engine::topology::coordinator::tests::interleaving::i --skip engine::topology::coordinator::tests::ap --skip engine::topology::run:: --skip topology::census:: --skip engine::tests::an --skip engine::topology::recover::tests::t"
+            floor: 45
+          - shard: "13 of 14"
+            tests: "engine::topology::attempt:: workspace_manager::tests::s engine::tests::a_c engine::tests::a_f engine::tests::f --skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l --skip engine::topology::coordinator::tests::a_k --skip engine::topology::coordinator::tests::a_s --skip engine::topology::coordinator::tests::r --skip engine::topology::coordinator::tests::s --skip engine::topology::integrate:: --skip engine::tests::l --skip engine::topology::coordinator::tests::c --skip engine::topology::coordinator::tests::an --skip engine::topology::recover::tests::a_r --skip engine::topology::coverage:: --skip engine::tests::a_r --skip engine::topology::coordinator::tests::a_r --skip engine::topology::finalize:: --skip engine::topology::ledger:: --skip engine::tests::a_k --skip engine::topology::coordinator::tests::interleaving::i --skip engine::topology::coordinator::tests::ap --skip engine::topology::run:: --skip topology::census:: --skip engine::tests::an --skip engine::topology::recover::tests::t --skip engine::topology::coordinator::tests::interleaving::a --skip engine::topology::recover::tests::r --skip workspace_manager::tests::n --skip workspace::"
+            floor: 43
+          - shard: "14 of 14"
+            tests: "--skip engine::topology::coordinator::tests::a_h --skip engine::topology::coordinator::tests::t --skip engine::topology::recover::tests::k --skip workspace_manager::tests::c --skip engine::tests::a_t --skip effects::tests::every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner --skip engine::topology::recover::tests::a_k --skip engine::topology::recover::tests::an --skip engine::tests::a_p --skip runner::contract:: --skip engine::topology::coordinator::tests::o --skip engine::topology::coordinator::tests::interleaving::s --skip engine::topology::dispatch:: --skip workspace_manager::tests::a --skip runner::container:: --skip engine::tests::a_d --skip engine::tests::a_s --skip engine::topology::coordinator::tests::a_p --skip engine::topology::recover::tests::a_f --skip engine::topology::candidate:: --skip workspace_manager::tests::r --skip engine::topology::coordinator::tests::independent_tasks_dispatch_together_and_keep_per_key_projections_under_every_seed --skip effects::tests::every_test_the_container_fault_row_names_is_a_test_in_this_tree --skip engine::topology::coordinator::tests::a_d --skip engine::topology::coordinator::tests::a_g --skip engine::tests::t --skip engine::topology::coordinator::tests::a_v --skip engine::topology::coordinator::tests::interleaving::r --skip engine::topology::coordinator::tests::a_c --skip engine::tests::a_b --skip engine::tests::e --skip engine::tests::r --skip engine::tests::s --skip engine::topology::recover::tests::s --skip engine::topology::coordinator::tests::a_f --skip engine::topology::coordinator::tests::d --skip workspace_manager::tests::e --skip workspace_manager::tests::t --skip engine::tests::a_l --skip engine::topology::coordinator::tests::a_k --skip engine::topology::coordinator::tests::a_s --skip engine::topology::coordinator::tests::r --skip engine::topology::coordinator::tests::s --skip engine::topology::integrate:: --skip engine::tests::l --skip engine::topology::coordinator::tests::c --skip engine::topology::coordinator::tests::an --skip engine::topology::recover::tests::a_r --skip engine::topology::coverage:: --skip engine::tests::a_r --skip engine::topology::coordinator::tests::a_r --skip engine::topology::finalize:: --skip engine::topology::ledger:: --skip engine::tests::a_k --skip engine::topology::coordinator::tests::interleaving::i --skip engine::topology::coordinator::tests::ap --skip engine::topology::run:: --skip topology::census:: --skip engine::tests::an --skip engine::topology::recover::tests::t --skip engine::topology::coordinator::tests::interleaving::a --skip engine::topology::recover::tests::r --skip workspace_manager::tests::n --skip workspace:: --skip engine::topology::attempt:: --skip workspace_manager::tests::s --skip engine::tests::a_c --skip engine::tests::a_f --skip engine::tests::f"
+            floor: 985
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
