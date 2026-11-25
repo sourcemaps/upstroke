@@ -87,6 +87,40 @@ source, documentation, workflows, release machinery and this file.
 
    A Windows-only failure that does not follow the change is a test whose outcome depends on
    the runner, which is repaired in the test, not dismissed as the machine's.
+
+   **Re-running CI past a red the change did not cause.** The operator may start a fresh CI run on
+   the same branch tree (an empty commit, or the same head re-enqueued after a merge-queue ejection)
+   without a ruling when all of these hold:
+
+   1. One test failed, in one job, and any other job that did not pass was cancelled by GitHub
+      without a runner; or no test failed and every job that did not pass was cancelled by GitHub.
+   2. A job with a failed test ended inside its time limit and, where its leg has a passing-test
+      floor, met it.
+   3. The diff (`git diff origin/master...HEAD`) changes no line other than comments in the failing
+      test's module (for `a::b::tests::name`, `src/a/b.rs` and everything under `src/a/b/`) or in
+      any fixture file the test file's `use` lines name, and does not change the failing job's entry
+      in `.github/workflows/ci.yml`. The pull request is not the repair of that test.
+   4. That test has not failed on this pull request before, unless the diff changes no Rust source
+      or test input (`src/`, `tests/`, `effects/`, `build.rs`, `Cargo.toml`, `Cargo.lock`,
+      `.cargo/`, `rust-toolchain*`, `.github/workflows/`) and the red matches the test and assertion
+      of an open finding.
+   5. This is at most the third re-run of this branch tree, counting every reason above.
+
+   For every red re-run this way, the operator saves the job's log with ANSI escapes stripped and
+   its SHA-256, names the red in the body's `BASELINE`, and records it in the next findings pull
+   request: as a sighting of the open finding with the same test and assertion, or else as a new P3
+   finding. A red on a run that gates nothing (a push to `master`, or a pull-request run after the
+   head was enqueued) is recorded the same way. The branch tree is the tree of the pull request's
+   head commit. What a run checks out also holds the `master` of the moment, so a later pass is
+   recorded as the same tree's only on `findings/PROCESS.md` §10's terms.
+
+   Anything else (two failures, a job at its limit or short of its floor, a red the diff can reach,
+   a repeat that item 4 does not allow, or a red after the third re-run) keeps the pull request a
+   draft and goes to a ruling, and the owner is told.
+
+   **Repaired, not dismissed.** When one test has failed twice within 50 finished CI runs, its
+   repair is queued as the next fix pull request and the owner is told. Re-runs past it continue
+   meanwhile. A repair keeps the failing assertion; it does not retry, skip or weaken it.
 4. **One frontier review pass on the green head.** Give the exact diff and head SHA to an
    independent frontier-class reviewer at `max` effort — today `gpt-5.6-sol` through `codex exec`,
    run by the owner's review driver against the pull request's own base. Allow at least 90 minutes per
@@ -135,6 +169,27 @@ source, documentation, workflows, release machinery and this file.
    an open finding; record both SHAs, and for the merge-in both base SHAs and the diff hash
    before and after. Anything wider is a new change and is reviewed again. A panel-reviewed
    checkpoint candidate is the exception: any head movement re-runs every seat.
+
+   **A fix confined to the pull request's own text needs no further pass.** After a pass that found
+   no serious P1, a P3 — or, on a `findings/` branch, a P2 — whose failure ends in a false or stale
+   statement in the pull request's own text (a sentence of its body, a ledger row, or a file it adds
+   or changes under `findings/`) may be fixed in that text and recorded `fixed`, on these terms. The
+   fix corrects, narrows or deletes what the finding names, and every other sentence of the body or
+   of this pull request's finding files that states the same thing; it adds no claim of its own.
+   Every corrected fact a command can produce — a count, a SHA, a run, job or test name, a path, a
+   number read from a log or a test — is produced again on the head being merged, and the command
+   and its result are recorded in the body; a witnessed finding's witness is run again the same way.
+   The head moves, if at all, only by commits confined to `findings/`, and the owner, or the agent
+   the merge is delegated to under step 7, reads `git diff --word-diff <reviewed> <head>`, confirms
+   it holds those corrections and nothing else, and says so in the body. The body's commit count,
+   delta commits and reviewed head are taken from `git` on the head being merged, after its last
+   push. A fix that needs anything else — code, a test, a workflow, a note or a rule document, or a
+   claim no command or cited source settles — is a repair under the paragraph above, or is filed; a
+   sentence a pass of this pull request has already found wrong once is corrected only from a source
+   the body cites by file and line, or deleted. Until `scripts/pr-ready-audit.sh` reads such a row,
+   it reports `fixed-but-head-unmoved:<id>` for it, or `witnessed:<id>` for a witnessed one; the
+   enqueue may pass exactly those lines, for exactly the ids the body names as fixed in its text,
+   and no other blocker.
 6. **Record the pass as written.** A `CHANGES_REQUIRED` whose findings all landed as repairs or
    ledger rows is recorded as that verdict with each disposition, never as a pass. When the merged
    head differs from the reviewed head, list the delta commits and what verified each. Re-run
@@ -525,7 +580,9 @@ and at the front of a `bulk-fix-P3/` slug, so `bulk-fix-P3/docs-contract-sweep` 
 batch. It ends at a word boundary, so `docs-contractual-review` begins with `docs` and not with a
 category. A name that carries none — or that is not passed at all — is reviewed at max. Fail
 expensive, never cheap. The review of a `findings/` branch asks one question: whether any finding it files
-duplicates one already filed. **A branch outside the vocabulary has no lane**: `lane_for` refuses it
+duplicates one already filed. The exception is a `findings/` pull request that records a red: each
+pass also checks every fact the record gives against the logs and the source (`findings/PROCESS.md`
+§10). **A branch outside the vocabulary has no lane**: `lane_for` refuses it
 and prints the table, and the pull request carrying it is reported `branch-prefix-unknown` rather
 than given a default.
 

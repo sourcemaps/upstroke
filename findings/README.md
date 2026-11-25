@@ -62,6 +62,9 @@ Input or state, then the step that goes wrong, then the wrong result. Concrete, 
 The fields are the columns of a body's ledger row, so a row and a file carry the same facts and
 neither is transcribed from the other by hand.
 
+A finding that records a red takes the shape `PROCESS.md` §10 sets: its last section says only
+what the change that takes it up must keep and must make observable.
+
 **One `id:` line per file.** A file whose frontmatter names two ids is two findings in one file:
 `scripts/pr-ready-audit.sh` counts it as the file for neither, and blocks each id it names as
 `multi-id-file`, whether the finding is deferred or accepted.
