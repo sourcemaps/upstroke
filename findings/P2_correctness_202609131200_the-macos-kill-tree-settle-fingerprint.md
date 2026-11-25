@@ -81,6 +81,37 @@ is the job's only failure.
 - **Established:** the same assertion failed twice more on hosted macOS runners, on changes that do
   not reach `kill_tree`, and the test passed in the next run each time.
 
+## One more sighting, 2026-11-24
+
+| run | job | date | branch | head |
+|---|---|---|---|---|
+| `45491842626` | `138791929214` | 2026-11-24T21:30:48Z | `findings/three-ci-flakes-sighted-2026-11-22-to-24` | `fd7c7324` (checkout `631a052`) |
+
+- **Run `45491842626`** (`pull_request`, #415 at `fd7c7324`), job `138791929214`,
+  `test (macos-latest, 5 of 5)`, on a GitHub-hosted `macos-latest` runner. It was started by an edit
+  of #415's body after #415 entered the merge queue (21:13:44Z). #415 merged from the queue at
+  21:33:21Z, so this run gated nothing, and its red was not seen until 2026-11-25.
+- **The log.** `evidence/job-45491842626-138791929214.log`, ANSI-stripped SHA-256
+  `a7946e756c2f88eb98a75e522e5437b3409c27e2cdcf6c0da74671914d34f479`. Line 107:
+  `HEAD is now at 631a052 Merge fd7c7324936aefb16a35cc943608b04e98c67853 into 81bb1ab2fcb49350fc39939ecd0d72971cf892ac`,
+  GitHub's merge of `fd7c7324` into `master` `81bb1ab2`. Line 671:
+  `test agent::proc::tests::kill_tree_settles_the_whole_unix_group_before_it_returns ... FAILED`.
+  Lines 3013-3014: the panic at `src/agent/proc/tests.rs:1263:5`, *"kill_tree returned while a
+  member of the child's process group was still running and still holding its pipes: only the
+  direct child was killed"*. Line 3020: `test result: FAILED. 2425 passed; 1 failed; 115 ignored`.
+  Apart from the aggregate `upstroke-ci`, this was the run's only failed job, and this test was the
+  job's only failure.
+- **What #415 changed:** only files under `findings/`, five of them.
+- **Same tree's pass.** Run `45486440086` (20:59:19Z, `pull_request`, the same head `fd7c7324`),
+  job `138772988997`, checked out the same merge commit `631a052` (line 107 of
+  `evidence/job-45486440086-138772988997.log`, SHA-256
+  `1dd4b47b8b837d945ef965df3cab30c7742dfbe6e4b146afcf71e6e755284f12`), and the test passed
+  (line 653). The merge-queue run `45488991284`, job `138781911396`, also passed it (line 653 of
+  `evidence/job-45488991284-138781911396.log`, SHA-256
+  `28308b01e6885327b2c96f4536642c109949498f2572216751adfe7cc8533312`).
+- **Established:** the same assertion failed once more on hosted macOS, on a change confined to
+  `findings/`, and passed on the same merge commit 31 minutes earlier.
+
 ## What the change that takes this up should do
 
 Read the settle predicate at `src/agent/proc/tests.rs:879` against what `kill_tree` actually
