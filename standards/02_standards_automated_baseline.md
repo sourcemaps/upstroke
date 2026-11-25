@@ -15,9 +15,9 @@ bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
 ```
 
-CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test` runs
-the suite on Linux in two shards, `test (ubuntu-latest, k of 2)`, and on macOS in five,
-`test (macos-latest, k of 5)`, each leg
+CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test-linux` runs
+the suite on Linux in two shards, `test (ubuntu-latest, k of 2)`, and `test-macos` on macOS in
+five, `test (macos-latest, k of 5)`, each leg
 under 30 minutes, and `test-windows-hosted` runs it on Windows, on `windows-latest` in fourteen
 shards, `test (windows-latest, k of 14)`, by the same rule as the Linux and macOS shards, a
 test running in exactly one shard, for a pull request, a push and a merge-queue entry alike
