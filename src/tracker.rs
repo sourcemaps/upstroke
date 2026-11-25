@@ -109,8 +109,12 @@ pub fn refresh(
     // The configuration's warnings are not this command's to print: the CLI
     // asks `capacity::report` next, which loads the same files and reports
     // every one of them.
+    // It takes the report's reading (`config::load_for_report`) although it
+    // uses only the pools file, because the report follows it in the same
+    // command: a file the report would refuse stops the command here, before
+    // any provider is asked or anything is stored.
     let mut unreported = Vec::new();
-    let config = crate::config::load(
+    let config = crate::config::load_for_report(
         opts.config_path.as_deref(),
         &opts.repo_root,
         opts.pools_path.as_deref(),
@@ -129,13 +133,14 @@ pub fn refresh(
     Ok(RefreshReport {
         pools: config
             .pools
-            .iter()
+            .into_iter()
             .filter_map(|pool| {
-                let source = pool.usage.as_ref()?;
+                let provider = pool.usage.as_ref()?.provider;
+                let outcome = refresh_pool(&pool, &store, transport, credential, now_unix);
                 Some(PoolRefresh {
-                    pool: pool.name.clone(),
-                    provider: source.provider,
-                    outcome: refresh_pool(pool, &store, transport, credential, now_unix),
+                    pool: pool.name,
+                    provider,
+                    outcome,
                 })
             })
             .collect(),
@@ -1304,6 +1309,88 @@ agent = \"claude-code\"
             rendered.contains("no pool names a `usage_provider`"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn a_refresh_reads_past_settings_it_never_uses() {
+        let machine = Machine::new(
+            "tracker-refresh-past-engine",
+            "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \"claude-code\"\n",
+        );
+        std::fs::write(
+            machine.tree.path().join("upstroke.toml"),
+            "[engine]\nmax_paralel = 2\n",
+        )
+        .expect("the machine-level settings");
+
+        let rendered = match refresh(&machine.options(), &Table::new(&[]), &environment) {
+            Ok(report) => report.render(),
+            Err(error) => panic!("the refresh refused the machine-level settings: {error}"),
+        };
+        assert!(
+            rendered.contains("no pool names a `usage_provider`"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_refresh_refuses_what_its_report_would_before_any_provider_is_asked() {
+        struct NoAdapters;
+        impl crate::agent::AdapterSource for NoAdapters {
+            fn get(&self, _id: &str) -> Option<&dyn crate::agent::AgentAdapter> {
+                None
+            }
+        }
+
+        let machine = Machine::new("tracker-refresh-refuses-as-its-report", POOLS);
+        let table = Table::new(&[
+            ("api.anthropic.com", Ok((200, ANTHROPIC_BODY))),
+            ("api.openai.com", Ok((200, OPENAI_BODY))),
+            ("api.github.com", Ok((200, GITHUB_BODY))),
+        ]);
+        std::fs::write(
+            machine.tree.path().join("upstroke.toml"),
+            "[capacity]\nscope = \"galaxy\"\n",
+        )
+        .expect("the machine-level settings");
+
+        let refused = match refresh(&machine.options(), &table, &environment) {
+            Ok(report) => panic!("the refresh read a scope its report refuses: {report:?}"),
+            Err(refusal) => refusal.to_string(),
+        };
+        assert!(refused.contains("galaxy"), "{refused}");
+
+        let options = machine.options();
+        let reported = match crate::capacity::report(
+            &crate::capacity::CapacityOptions {
+                config_path: None,
+                pools_path: options.pools_path,
+                repo_root: options.repo_root,
+                scope: None,
+                now_unix: options.now_unix,
+            },
+            &NoAdapters,
+        ) {
+            Ok(_) => panic!("the report read a scope it refuses"),
+            Err(refusal) => refusal.to_string(),
+        };
+        assert_eq!(
+            refused, reported,
+            "the refresh refuses with the report's own refusal"
+        );
+
+        assert!(
+            table.asked.borrow().is_empty(),
+            "a provider was asked before the refusal: {:?}",
+            table.asked.borrow()
+        );
+        for pool in ["anthropic-api", "openai-api", "copilot"] {
+            assert_eq!(
+                machine.stored(pool),
+                None,
+                "`{pool}` had a report stored before the refusal"
+            );
+        }
     }
 
     /// The prefixes a provider's token starts with that the pools reader

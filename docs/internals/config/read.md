@@ -69,7 +69,7 @@ file-absence branches above. What the wire refuses includes a misspelled top-lev
 name — `[budgts]`, `[interation]`, `[runer]` — which `RawRepoConfig` used to
 deserialize into nothing with no warning (`SWEEP-CONFIG-PARSE-007`, guarded to
 whichever of this file or `src/config.rs` swept first): the struct now denies
-unknown fields, the refusal names the typo and the accepted seven sections, and
+unknown fields, the refusal names the typo and the accepted eight sections, and
 the regression through `load_captured`, on a capture built in memory, lives in
 the parent's suite beside the struct.
 
