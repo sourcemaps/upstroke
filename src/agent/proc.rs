@@ -837,6 +837,8 @@ pub(crate) use self::termination::BACKSTOP_GATE;
 pub(crate) use self::termination::armed_container_reaper_selects;
 #[cfg(unix)]
 pub use self::termination::{BackstopHold, ContainerReaper, arm_container_reaper};
+#[cfg(all(windows, test))]
+pub(crate) use self::windows_job::ChildInJob;
 
 #[cfg(windows)]
 mod windows_job {
@@ -1099,6 +1101,48 @@ mod windows_job {
             } else {
                 ProcessFate::Unresolved
             },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) struct ChildInJob {
+        child: Child,
+        job: Job,
+    }
+
+    #[cfg(test)]
+    impl ChildInJob {
+        pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {
+            let (child, job) = spawn_suspended_in_job(command, &mut super::NoHooks)
+                .map_err(|failure| io::Error::new(failure.error.kind(), failure.to_string()))?;
+            Ok(Self { child, job })
+        }
+
+        pub(crate) fn terminate(&self) -> io::Result<()> {
+            if real_terminate_job(self.job.handle) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+
+        pub(crate) fn active_processes(&self) -> io::Result<u32> {
+            self.job.active_processes_with(real_query_accounting)
+        }
+    }
+
+    #[cfg(test)]
+    impl std::ops::Deref for ChildInJob {
+        type Target = Child;
+
+        fn deref(&self) -> &Self::Target {
+            &self.child
+        }
+    }
+
+    #[cfg(test)]
+    impl std::ops::DerefMut for ChildInJob {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.child
         }
     }
 

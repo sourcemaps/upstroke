@@ -668,6 +668,38 @@ The primary thread is still suspended, so candidate code cannot
 create an escaping child between process creation and assignment to
 the job.
 
+## `mod windows_job` › `pub(crate) struct ChildInJob {`
+
+A child in a private job of its own, for a test outside this module whose
+kill has to reach every process the child starts: the census kill
+sampler's `SampledChild` in `workspace_manager::tests`, on Windows.
+
+Test-only, and made of this module's own functions and nothing else.
+[`ChildInJob::spawn`] is [`spawn_suspended_in_job`] with no hooks: the job
+is created with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and the child is
+assigned to it while still suspended, before its first instruction runs,
+so every process it starts is in the job; the job is closed when this
+drops. [`ChildInJob::terminate`] is [`real_terminate_job`], and
+[`ChildInJob::active_processes`] is [`Job::active_processes_with`] over
+[`real_query_accounting`]. It derefs to the [`Child`], whose `wait` is the
+reap.
+
+## `impl ChildInJob` › `pub(crate) fn spawn(command: &mut Command) -> io::Result<Self> {`
+
+Spawn `command` suspended, assign it to a new private job and resume it.
+A refusal keeps the OS error's kind and carries what became of the child
+in its message.
+
+## `impl ChildInJob` › `pub(crate) fn terminate(&self) -> io::Result<()> {`
+
+End every process in the job, with exit code 1 (`TerminateJobObject`),
+without waiting for any of them.
+
+## `impl ChildInJob` › `pub(crate) fn active_processes(&self) -> io::Result<u32> {`
+
+How many processes of the job are active at this moment, from the job's
+accounting. A failed query is an error, never zero.
+
 ## `mod windows_job` › `static AMBIENT: OnceLock<Result<AmbientJob, String>> = OnceLock::new();`
 
 The coordinator's ambient kill-on-close Job Object.

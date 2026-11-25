@@ -13227,9 +13227,12 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             run.refusals.is_empty(),
             "{site}: the classifier refused {} of {SAMPLING_N} samples, which is not the \
                  same thing as a residue in no class — it is an inspection that failed, and \
-                 the assertions below would have called it unclassified: {:?}",
+                 the assertions below would have called it unclassified:\n{}",
             run.refusals.len(),
-            run.refusals
+            // Displayed, not `{:?}`: each refusal carries its sample's report,
+            // whose reflog bytes are already escaped, and debug formatting
+            // would escape them a second time.
+            run.refusals.join("\n")
         );
 
         // The independent tally. Not `tally()` again — a second call to the
@@ -13273,7 +13276,9 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
         );
         assert!(
             record.recovered,
-            "every sample recovered by its classified action"
+            "every sample recovered by its classified action; at {site} these did not, \
+                 each with its report taken before the recovery ran:\n{}",
+            run.unrecovered.join("\n")
         );
         records.push((site, record, run.budget, run.replayed));
     }
@@ -13514,13 +13519,29 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             .iter()
             .filter(|launch| launch.end == LaunchEnd::Killed)
             .count();
+        // The floor is over every launch, so when it fails no shape killed
+        // anything and each launch is one of a failing shape: each is
+        // printed, its argv's first word naming its shape.
         assert!(
             killed > 0,
             "not one of the {} sampled Git children died by the kill — this harness \
                  sampled the residue its commands left when they FINISHED, and every \
-                 other assertion in this test accepts that residue. Ends: {:?}",
+                 other assertion in this test accepts that residue. Ends: {:?}\n\
+                 Launches:\n{}",
             log.len(),
-            log.iter().map(|launch| launch.end).collect::<Vec<_>>()
+            log.iter().map(|launch| launch.end).collect::<Vec<_>>(),
+            log.iter()
+                .map(|launch| format!(
+                    "  {}: after {:?}, fired {:?}, kill_error {:?}, end {:?}, group_ended {:?}",
+                    launch.argv[0],
+                    launch.after,
+                    launch.fired,
+                    launch.kill_error,
+                    launch.end,
+                    launch.group_ended
+                ))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
@@ -13743,6 +13764,67 @@ fn sampled_git_child_runs_the_resolved_real_git_on_windows() {
     }
 }
 
+/// A sampled git's own children die with its kill, on every platform: git
+/// runs an alias whose shell writes `started`, then waits on its stdin, then
+/// writes `late`; once `started` exists the child is killed, its stdin is
+/// then closed, and after the wait `late` does not exist. On Unix the
+/// process-group kill passes it and a kill of the direct child alone
+/// (`Child::kill`) fails it, because the surviving shell reads end-of-file
+/// and writes `late` before the group empties, and the wait awaits that; on
+/// Windows it is what shows the job's kill reaches what git started.
+///
+/// The alias holds no quote of its own: bare words, `;` and `>` mean the
+/// same to Git for Windows' `sh` and to a Unix `sh`, and an argument with no
+/// quote in it passes through Windows' command line back to git unchanged.
+#[test]
+fn a_sampled_childs_own_children_die_with_its_kill() {
+    let tree = scratch("sampled-git-own-children");
+    let repository = tree.path();
+    git(repository, &["init", "-q"]);
+    let started = repository.join("started");
+    let late = repository.join("late");
+    let mut command = SampledChild::command(
+        SampledChild::program(),
+        repository,
+        &[
+            "-c".to_owned(),
+            "alias.hold=!echo started > started; read hold; echo late > late".to_owned(),
+            "hold".to_owned(),
+        ],
+    );
+    command.stdin(Stdio::piped());
+    let mut child = SampledChild::spawn_command(command);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut seen = started.exists();
+    while !seen && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        seen = started.exists();
+    }
+    // Killed and reaped whether or not the shell got going, so a failure
+    // below leaves nothing running. Its stdin is closed between the two: a
+    // shell the kill missed reads end-of-file there and writes `late`, and
+    // the wait does not end until every process git started is gone.
+    let killed = child.kill();
+    drop(child.child.stdin.take());
+    let status = child.wait().expect("reap the sampled git child");
+    assert!(
+        seen,
+        "the alias's shell never wrote {} within 60 s; git ended {status:?}",
+        started.display()
+    );
+    assert!(
+        !late.exists(),
+        "{} exists: a process the sampled git started outlived its kill (the kill answered \
+         {killed:?})",
+        late.display()
+    );
+    assert_eq!(
+        launch_end(&status),
+        LaunchEnd::Killed,
+        "the sampled git ended {status:?}, not by the kill (the kill answered {killed:?})"
+    );
+}
+
 /// One site's sampling run: the packet's record, and the per-sample
 /// observations it was tallied from.
 ///
@@ -13770,8 +13852,13 @@ struct SamplingRun {
     /// A refusal and an unclassifiable residue both arrive in `observed` as
     /// `None`, and the assertion they fail is worded for the second of them.
     /// The words that tell the two apart are here, so a red run says which it
-    /// met instead of naming only the one it probably did not.
+    /// met instead of naming only the one it probably did not. Each is
+    /// followed by that sample's [`report_sample`].
     refusals: Vec<String>,
+    /// The [`report_sample`] of each sample whose recovery ran and left its
+    /// slot or registration behind (`record.recovered` false), taken before
+    /// the recovery ran, one entry each.
+    unrecovered: Vec<String>,
 }
 
 /// Tally per-sample observations into the packet's histogram.
@@ -14107,6 +14194,7 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
     );
     let mut observed: Vec<Option<ObjectResidue>> = Vec::new();
     let mut refusals: Vec<String> = Vec::new();
+    let mut unrecovered: Vec<String> = Vec::new();
     let mut recovered = true;
 
     for run in 0..SAMPLING_N {
@@ -14126,7 +14214,7 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
 
         let (args, cwd) = sampled_command(site, &fixture, &slot);
         let delay = budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1));
-        kill_git_child(&cwd, &args, delay);
+        let kill = kill_git_child(&cwd, &args, delay);
 
         let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
         // `.ok()` is what the tally needs, and it is not what a reader of a
@@ -14136,12 +14224,26 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
         // a discard be best-effort with defined observability, so the error's
         // own words are kept and go into that assertion's message.
         let classified = classify_object_residue(site, &target);
-        if let Err(error) = &classified {
-            refusals.push(format!("run {run}: {error}"));
+        let refusal = classified.as_ref().err().map(ToString::to_string);
+        // Taken here, while the slot still exists: the recovery below
+        // deletes it. Printed only by a refusal or a failed recovery.
+        let report = report_sample(&fixture, &path, &kill, refusal.as_deref());
+        if let Some(error) = &refusal {
+            refusals.push(format!("run {run}: {error}\n{report}"));
         }
         observed.push(classified.ok());
-        if !recover_sample(&fixture, &slot) {
-            recovered = false;
+        match recover_sample(&fixture, &slot) {
+            Ok(true) => {}
+            Ok(false) => {
+                recovered = false;
+                unrecovered.push(format!("run {run}: {report}"));
+            }
+            Err(RecoveryRefused::Forced(error)) => {
+                panic!("forced removal converges: {error:?}\n{site} run {run}: {report}")
+            }
+            Err(RecoveryRefused::Intent(error)) => {
+                panic!("intent removal converges: {error:?}\n{site} run {run}: {report}")
+            }
         }
     }
 
@@ -14157,6 +14259,7 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
         },
         observed,
         refusals,
+        unrecovered,
     }
 }
 
@@ -14486,6 +14589,11 @@ fn launch_end(status: &std::process::ExitStatus) -> LaunchEnd {
 /// deleted. `fired` is the clock, read inside [`SampledChild::kill`]: it
 /// exists only if a kill ran at this child, and it moves when the wait
 /// before the kill does.
+///
+/// `Clone` because [`kill_git_child`] hands the sample that launched the
+/// child the same record it logs ([`SampleKill`]): the report of a failed
+/// sample reads that, not the shared log by position.
+#[derive(Clone)]
 struct SampledLaunch {
     argv: Vec<String>,
     after: std::time::Duration,
@@ -14505,9 +14613,10 @@ struct SampledLaunch {
     /// asserted on — see the note at that printing.
     kill_error: Option<String>,
     end: LaunchEnd,
-    /// How long after the leader's reap its whole process group was gone
-    /// (`fixture::await_group_end`): zero off Unix, where the child is no
-    /// group.
+    /// How long after the child's reap every process it started was gone
+    /// ([`SampledChild::wait`]): on Unix its whole process group
+    /// (`fixture::await_group_end`), on Windows its job, once the job's
+    /// active process count read 0.
     group_ended: std::time::Duration,
 }
 
@@ -14564,9 +14673,27 @@ static SAMPLED_LAUNCHES: std::sync::Mutex<Vec<SampledLaunch>> = std::sync::Mutex
 /// records ([`Self::spawned_program`]) is not that: it is the same `git` for
 /// all four commands, so it tells none of them from another.
 ///
+/// **Its kill reaches every process git starts, on each platform.** On Unix
+/// the child leads a process group of its own, which the kill ends whole
+/// (`fixture::kill_process_group`) and the wait awaits empty
+/// (`fixture::await_group_end`). On Windows it runs in a private job of its
+/// own (`agent::proc::ChildInJob`): created suspended and assigned to the job
+/// before its first instruction runs, so every process it starts is in the
+/// job; the kill terminates the job and the wait awaits it empty. There the
+/// kill was `Child::kill` until this, which ends the direct child alone,
+/// while `git worktree add`'s `reset --hard` and the children of the other
+/// commands ran on. The job is closed, with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, when this drops.
+///
 /// [`Child::kill`]: std::process::Child::kill
 struct SampledChild {
+    /// The child. On Unix the leader of a process group of its own
+    /// ([`Self::command`]); on Windows in a private job of its own, which
+    /// derefs to the [`std::process::Child`] ([`Self::spawn_command`]).
+    #[cfg(not(windows))]
     child: std::process::Child,
+    #[cfg(windows)]
+    child: crate::agent::proc::ChildInJob,
     /// Started once [`Command::spawn`] has returned, so what [`Self::kill`]
     /// reads off it is time the child was left *running* rather than the
     /// cost of starting it — and so an unwaited kill reads as the ~0 it is.
@@ -14578,8 +14705,9 @@ struct SampledChild {
     /// What the clock said when a kill fired at this child, or `None` if
     /// none ever did. Written only by [`Self::kill`].
     fired: Option<std::time::Duration>,
-    /// How long after the leader's reap its whole process group was gone
-    /// (`fixture::await_group_end`), or `None` until [`Self::wait`] has run.
+    /// How long after the child's reap every process it started was gone —
+    /// its process group on Unix, its job on Windows — or `None` until
+    /// [`Self::wait`] has run.
     group_ended: Option<std::time::Duration>,
 }
 
@@ -14616,8 +14744,9 @@ impl SampledChild {
 
     /// The command [`Self::spawn`] starts: `program -C cwd -c
     /// core.fsmonitor=false <args>`, its streams discarded, in a process
-    /// group of its own on Unix. Taking `program` as an argument lets a test
-    /// show that what runs is the program given, on every platform.
+    /// group of its own on Unix (on Windows the job is
+    /// [`Self::spawn_command`]'s). Taking `program` as an argument lets a
+    /// test show that what runs is the program given, on every platform.
     fn command(program: &Path, cwd: &Path, args: &[String]) -> Command {
         let mut command = Command::new(program);
         command
@@ -14636,19 +14765,34 @@ impl SampledChild {
         command
     }
 
-    /// Spawn the child in a process group of its own on Unix, so that
-    /// [`Self::kill`] reaches the children git starts — `git worktree add`'s
-    /// `reset --hard` — and not the leader alone. Until PR10's round 5 this
-    /// sampler killed the leader alone (round 2's group kill reached
+    /// Spawn the child in a process group of its own on Unix and in a
+    /// private job of its own on Windows, so that [`Self::kill`] reaches the
+    /// children git starts — `git worktree add`'s `reset --hard` — and not
+    /// the leader alone. Until PR10's round 5 this sampler killed the leader
+    /// alone on Unix (round 2's group kill reached
     /// `fixture::KillableGitChild`, the other samplers' child), and CI's
     /// macOS leg at `869e336a` met that child still populating the checkout
-    /// — `PR136`'s first fingerprint — at the forced removal.
+    /// — `PR136`'s first fingerprint — at the forced removal. On Windows it
+    /// killed the leader alone until the job.
     fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let mut command = Self::command(Self::program(), cwd, args);
+        Self::spawn_command(Self::command(Self::program(), cwd, args))
+    }
+
+    /// Spawn `command` as the sampled child: as it is on Unix, where
+    /// [`Self::command`] gave it a process group of its own; on Windows
+    /// suspended, assigned to a new private job before its first instruction
+    /// runs and only then resumed (`agent::proc::ChildInJob::spawn`), so that
+    /// every process it starts is in the job. Apart from [`Self::spawn`] so
+    /// that a test can hand it a command whose streams it changed.
+    fn spawn_command(mut command: Command) -> Self {
         // Read off the `Command` that spawns the child, before the spawn, so
         // the clock read below stays the first thing after it.
         let spawned_program = PathBuf::from(command.get_program());
+        #[cfg(not(windows))]
         let child = command.spawn().expect("spawn the sampled git child");
+        #[cfg(windows)]
+        let child = crate::agent::proc::ChildInJob::spawn(&mut command)
+            .expect("spawn the sampled git child in a private job");
         Self {
             child,
             spawned: std::time::Instant::now(),
@@ -14658,13 +14802,18 @@ impl SampledChild {
         }
     }
 
-    /// Kill the child, recording when the kill fired.
+    /// Kill the child and every process it started, recording when the kill
+    /// fired. On Unix that is `SIGKILL` to its process group
+    /// (`fixture::kill_process_group`). On Windows it is `TerminateJobObject`
+    /// on its job, with exit code 1 for every process in it, the code
+    /// `Child::kill` gives too and the one `fixture::died_by_kill` reads as a
+    /// kill there. Neither waits: [`Self::wait`] does.
     ///
     /// The clock is read at the instant of the kill and stored *after* the
     /// kill has returned. Read at that instant, the value is the kill's
     /// actual timing rather than the timing it was asked for; stored after
     /// the call, the record cannot outlive the call's removal, because
-    /// deleting `self.child.kill()` leaves `outcome` unbound and the module
+    /// deleting the call that kills leaves `outcome` unbound and the module
     /// stops compiling. The kill's own answer is returned and recorded by the
     /// caller; nothing here decides what it means.
     ///
@@ -14674,79 +14823,644 @@ impl SampledChild {
     /// but a real kill produces.
     fn kill(&mut self) -> std::io::Result<()> {
         let fired = self.spawned.elapsed();
+        #[cfg(not(windows))]
         let outcome = super::fixture::kill_process_group(&mut self.child);
+        #[cfg(windows)]
+        let outcome = self.child.terminate();
         self.fired = Some(fired);
         outcome
     }
 
-    /// Reap the leader, then wait until its whole process group is gone
-    /// (`fixture::await_group_end`, bounded): the proof `recover_sample`
-    /// runs under is that no writer the child started is alive, and the
-    /// leader's reap alone is not that proof.
+    /// Reap the child, then wait until every process it started is gone,
+    /// bounded by `fixture::GROUP_END_BOUND`, and record how long that took
+    /// in [`Self::group_ended`]: the proof `recover_sample` runs under is
+    /// that no writer the child started is alive, and the child's reap alone
+    /// is not that proof. On Unix that is its whole process group
+    /// (`fixture::await_group_end`); on Windows its job, polled until the
+    /// job's active process count is 0 (`Self::await_job_end`). Past the
+    /// bound it panics, in the same words on both.
     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait()?;
-        let pgid = i32::try_from(self.child.id()).expect("a pid fits in i32");
-        self.group_ended = Some(
-            super::fixture::await_group_end(pgid).unwrap_or_else(|outlived| {
-                panic!("the sampled git child's group outlived its leader: {outlived}")
-            }),
-        );
+        #[cfg(not(windows))]
+        let ended = super::fixture::await_group_end(self.pgid());
+        #[cfg(windows)]
+        let ended = self.await_job_end();
+        self.group_ended = Some(ended.unwrap_or_else(|outlived| {
+            panic!("the sampled git child's group outlived its leader: {outlived}")
+        }));
         Ok(status)
+    }
+
+    /// How long after the child's reap its job had no active process, polled
+    /// once a millisecond as `fixture::await_group_end` polls a group, or
+    /// what the job still held when `fixture::GROUP_END_BOUND` ran out. An
+    /// accounting query that fails is answered at once, and never as an
+    /// empty job.
+    #[cfg(windows)]
+    fn await_job_end(&self) -> Result<std::time::Duration, String> {
+        let started = std::time::Instant::now();
+        let pid = self.child.id();
+        loop {
+            let active = self.child.active_processes().map_err(|error| {
+                format!(
+                    "the job of pid {pid} could not be counted {:?} after its leader was \
+                     reaped: {error}",
+                    started.elapsed()
+                )
+            })?;
+            if active == 0 {
+                return Ok(started.elapsed());
+            }
+            let waited = started.elapsed();
+            if waited >= super::fixture::GROUP_END_BOUND {
+                return Err(format!(
+                    "the job of pid {pid} still had {active} active processes {waited:?} after \
+                     its leader was reaped (the bound is {:?})",
+                    super::fixture::GROUP_END_BOUND
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The child's pid, which on Unix is also its process group's id:
+    /// [`Self::command`] makes it the leader of a group of its own. On
+    /// Windows it is the pid alone, which the report names beside the job.
+    fn pgid(&self) -> i32 {
+        i32::try_from(self.child.id()).expect("a pid fits in i32")
     }
 }
 
-fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) {
+/// What [`kill_git_child`] recorded for the one child it launched, handed
+/// back to the sample that launched it: the very record it pushed to
+/// [`SAMPLED_LAUNCHES`], and the child itself, reaped.
+struct SampleKill {
+    launch: SampledLaunch,
+    /// The reaped child, kept so that [`report_sample`] can ask whether a
+    /// process of the sample is alive ([`sample_alive`]): its process group
+    /// on Unix, its job on Windows. The job stays open, and so can be
+    /// counted, until this drops.
+    child: SampledChild,
+}
+
+fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> SampleKill {
     let mut child = SampledChild::spawn(cwd, args);
     std::thread::sleep(after);
-    // Kept, not discarded. A kill of a child that has already reached its own
-    // exit legitimately fails on Windows -- `TerminateProcess` answers
-    // `ERROR_ACCESS_DENIED` for an exited process -- so this is not an
-    // `expect`; what it is is evidence, and the per-shape assertion pairs it
-    // with how the child ended.
+    // Kept, not discarded. A kill can answer an error without anything being
+    // wrong -- while the Windows kill was `Child::kill`, `TerminateProcess`
+    // answered `ERROR_ACCESS_DENIED` for a child that had already exited --
+    // so this is not an `expect`; what it is is evidence, and the per-shape
+    // assertion pairs it with how the child ended.
     let kill_error = child.kill().err().map(|error| error.to_string());
     // Reaped rather than discarded: this status is the whole observation.
     let status = child.wait().expect("reap the sampled git child");
+    let launch = SampledLaunch {
+        argv: args.to_vec(),
+        after,
+        fired: child.fired,
+        kill_error,
+        end: launch_end(&status),
+        group_ended: child.group_ended.unwrap_or_default(),
+    };
     SAMPLED_LAUNCHES
         .lock()
         .expect("the launch log")
-        .push(SampledLaunch {
-            argv: args.to_vec(),
-            after,
-            fired: child.fired,
-            kill_error,
-            end: launch_end(&status),
-            group_ended: child.group_ended.unwrap_or_default(),
-        });
+        .push(launch.clone());
+    SampleKill { launch, child }
+}
+
+/// Which of [`recover_sample`]'s two removals refused, with its error.
+///
+/// Returned rather than panicked on inside the recovery, so that the panic
+/// `sample_site` raises can carry the report it took before the recovery
+/// deleted the slot.
+#[derive(Debug)]
+enum RecoveryRefused {
+    Forced(UpstrokeError),
+    Intent(UpstrokeError),
 }
 
 /// The tabled recovery for whatever the sample left: forced removal of the
 /// worktree and its intent, which is the before-phase action every
 /// `Internal` residue routes to and is idempotent for the other two.
-fn recover_sample(fixture: &Fixture, slot: &Slot) -> bool {
-    // The sampled child's whole process group is gone before this runs —
-    // the leader reaped and every member it started, `git worktree add`'s
-    // own `reset --hard` among them, dead and reaped
-    // (`fixture::await_group_end`; until PR10's round 5 the leader alone was
-    // killed and reaped here, and CI's macOS leg at `869e336a` met the
-    // member still writing: `PR136`'s first fingerprint) — so no writer of
-    // the execution root is alive: the proof under which a registration the
-    // kill left naming nothing is passed over rather than refused.
+///
+/// It runs under [`WriterProof::NoWriterAlive`], which [`SampledChild::wait`]
+/// established on each platform before it: on Unix the child's process group
+/// awaited empty, on Windows its job, until no process in it was active.
+///
+/// `Ok` says whether the slot and its registration are gone; `Err` is a
+/// removal that refused.
+fn recover_sample(fixture: &Fixture, slot: &Slot) -> Result<bool, RecoveryRefused> {
+    // Every process the sampled child started is gone before this runs —
+    // the child reaped and everything it started, `git worktree add`'s own
+    // `reset --hard` among them, dead. On Unix that is its whole process
+    // group, every member dead and reaped (`fixture::await_group_end`; until
+    // PR10's round 5 the leader alone was killed and reaped here, and CI's
+    // macOS leg at `869e336a` met the member still writing: `PR136`'s first
+    // fingerprint). On Windows it is its job, terminated whole and polled
+    // until its active process count was 0 (`SampledChild::wait`); until the
+    // job the direct child alone was killed there, and a writer it started
+    // could outlive the reap. So no writer of the execution root is alive:
+    // the proof under which a registration the kill left naming nothing is
+    // passed over rather than refused.
     fixture
         .manager
         .remove_worktree_proving(&mut NoHooks, slot, WriterProof::NoWriterAlive)
-        .expect("forced removal converges");
+        .map_err(RecoveryRefused::Forced)?;
     fixture
         .manager
         .remove_intent(&mut NoHooks, slot)
-        .expect("intent removal converges");
+        .map_err(RecoveryRefused::Intent)?;
     let path = fixture.manager.slot_path(slot);
-    !path.exists()
+    Ok(!path.exists()
         && !fixture
             .manager
             .worktree_records()
             .expect("records")
             .iter()
-            .any(|record| canonical_prefix(record.path()).ok() == canonical_prefix(&path).ok())
+            .any(|record| canonical_prefix(record.path()).ok() == canonical_prefix(&path).ok()))
+}
+
+/// The most of a sample's `HEAD` reflog [`report_sample`] prints: all of a
+/// reflog this long or shorter, and the last this many bytes of a longer one.
+const REPORTED_REFLOG_BYTES: usize = 4096;
+
+/// What one sample left, in words a red run can be read by
+/// (`CI-FLAKE-WINDOWS-SAMPLER-FSCK-TORN-REFLOG`, whose guard asks for it).
+///
+/// That finding holds three readings of a classifier refusal the logs could
+/// not tell apart — the kill reached Git mid-append; it reached only part of
+/// Git's tree, which ran on; the kill never landed — because each sample's
+/// kill error and [`LaunchEnd`] sat in [`SAMPLED_LAUNCHES`], read only after
+/// every site passed, and nothing recorded the reflog or whether a process of
+/// the sample was alive. So the report holds:
+///
+/// 1. what [`kill_git_child`] recorded for this sample's own child: when the
+///    kill fired against the rung it was aimed at, its error or none, its
+///    [`LaunchEnd`] and how long its group outlived the leader's reap;
+/// 2. whether a process of the sample is alive now ([`sample_alive`]);
+/// 3. the bytes of the slot's `HEAD` reflog ([`head_reflog`]);
+/// 4. for each object id `refusal` names after `invalid reflog entry `,
+///    whether the fixture's base repository has it ([`object_presence`]).
+///
+/// `sample_site` takes it once per sample, after the classifier and before
+/// the recovery, which deletes the slot; it prints it only when the
+/// classifier refused or the recovery failed, so a green run prints what it
+/// printed before. It reads and never writes: `git rev-parse`, a file read,
+/// `kill(-pgid, 0)` on Unix or the job's accounting on Windows, and
+/// `git cat-file -e`.
+fn report_sample(
+    fixture: &Fixture,
+    slot: &Path,
+    kill: &SampleKill,
+    refusal: Option<&str>,
+) -> String {
+    // First, so "now" is as near the classifier's run as the report gets.
+    let alive = sample_alive(&kill.child);
+    let launch = &kill.launch;
+    let fired = match launch.fired {
+        Some(fired) if fired >= launch.after => format!(
+            "fired {fired:?}, {:?} past the {:?} rung it was aimed at",
+            fired - launch.after,
+            launch.after
+        ),
+        Some(fired) => format!(
+            "fired {fired:?}, {:?} BEFORE the {:?} rung it was aimed at",
+            launch.after - fired,
+            launch.after
+        ),
+        None => format!("never fired (aimed at {:?})", launch.after),
+    };
+    let mut lines = vec![
+        format!("report of the sample at {}:", slot.display()),
+        format!(
+            "  kill: {fired}; kill error: {}; end: {:?}; group gone {:?} after the leader's reap",
+            launch.kill_error.as_deref().unwrap_or("none"),
+            launch.end,
+            launch.group_ended
+        ),
+        format!("  alive: {alive}"),
+        format!("  HEAD reflog: {}", head_reflog(slot)),
+    ];
+    for id in refusal.map(reflog_entry_ids).unwrap_or_default() {
+        lines.push(format!(
+            "  object {id}: {}",
+            object_presence(&fixture.base, &id)
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Whether a process of the sample whose child is `child` is alive at this
+/// moment, in [`report_sample`]'s words.
+///
+/// On Unix the child led a group of its own, and every process Git started
+/// is in it, so the question is [`super::fixture::group_has_a_member`]'s.
+/// On Windows the child ran in a job of its own, and every process Git
+/// started is in that, so the answer is the job's active process count; a
+/// count that cannot be read is said as that, never as no.
+fn sample_alive(child: &SampledChild) -> String {
+    let pgid = child.pgid();
+    #[cfg(unix)]
+    {
+        if super::fixture::group_has_a_member(pgid) {
+            format!("yes: process group {pgid} still has a member")
+        } else {
+            format!("no: process group {pgid} has no member")
+        }
+    }
+    #[cfg(windows)]
+    {
+        match child.child.active_processes() {
+            Ok(0) => format!("no: the job of pid {pgid} has an active process count of 0"),
+            Ok(active) => {
+                format!("yes: the job of pid {pgid} has an active process count of {active}")
+            }
+            Err(error) => {
+                format!("not answered: the job of pid {pgid} could not be counted: {error}")
+            }
+        }
+    }
+}
+
+/// The bytes of the `HEAD` reflog of the worktree at `slot`, located with
+/// `git rev-parse --git-path logs/HEAD` run there, printed with
+/// `escape_ascii` so a torn line shows exactly as it is: all of it up to
+/// [`REPORTED_REFLOG_BYTES`], else its last that many. "absent" when the slot
+/// or the file does not exist; any other failure is said as itself.
+///
+/// A slot with no `.git` of its own — a killed `worktree add` can leave one —
+/// is "absent" too, before Git is asked: Git would search the directories
+/// above it and could answer with another repository's reflog.
+fn head_reflog(slot: &Path) -> String {
+    match slot.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return format!("absent: there is no slot at {}", slot.display()),
+        Err(error) => return format!("not read: the slot could not be inspected: {error}"),
+    }
+    match fs::symlink_metadata(slot.join(".git")) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return format!("absent: the slot at {} has no .git", slot.display());
+        }
+        Err(error) => return format!("not read: the slot's .git could not be inspected: {error}"),
+    }
+    let output = git_out(slot, &["rev-parse", "--git-path", "logs/HEAD"]);
+    if !output.status.success() {
+        return format!(
+            "not located: `git rev-parse --git-path logs/HEAD` ended {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    // Git's answer stays bytes, less the run of `\r` and `\n` that ends it: a
+    // path is never assumed to be UTF-8 (§8), and on Unix any bytes are one.
+    let mut located = output.stdout.as_slice();
+    while let [rest @ .., b'\r' | b'\n'] = located {
+        located = rest;
+    }
+    let Ok(located) = super::parsers::decode_path(located) else {
+        return "not located: `git rev-parse --git-path logs/HEAD` printed a path that is not \
+                UTF-8"
+            .to_owned();
+    };
+    // Relative to the directory it ran in when it is not absolute, and
+    // `join` keeps an absolute one as it is.
+    let file = slot.join(located);
+    match fs::read(&file) {
+        Ok(bytes) => {
+            let shown = &bytes[bytes.len().saturating_sub(REPORTED_REFLOG_BYTES)..];
+            let extent = if shown.len() == bytes.len() {
+                format!("all {} bytes", bytes.len())
+            } else {
+                format!("the last {} of {} bytes", shown.len(), bytes.len())
+            };
+            format!(
+                "{extent} of {}: \"{}\"",
+                file.display(),
+                shown.escape_ascii()
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            format!("absent: there is no file at {}", file.display())
+        }
+        Err(error) => format!("not read: {}: {error}", file.display()),
+    }
+}
+
+/// Every object id `refusal` names after `invalid reflog entry ` — fsck's
+/// words for a reflog entry naming an object it did not find — once each, in
+/// order: the hex digits that follow, when there are 40 (SHA-1) or 64
+/// (SHA-256) of them.
+fn reflog_entry_ids(refusal: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    for rest in refusal.split("invalid reflog entry ").skip(1) {
+        let digits = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        // Hex digits are ASCII, so `digits` is a character boundary.
+        let id = &rest[..digits];
+        if matches!(digits, 40 | 64) && !ids.iter().any(|seen| seen == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    ids
+}
+
+/// Whether `git cat-file -e <id>` finds the object in the repository at
+/// `base`: "present" for its success, "missing" for its exit 1 with nothing
+/// on stderr, which is how it answers a well-formed id it does not have, and
+/// any other end said as itself.
+fn object_presence(base: &Path, id: &str) -> String {
+    let output = git_out(base, &["cat-file", "-e", id]);
+    if output.status.success() {
+        return "present".to_owned();
+    }
+    if output.status.code() == Some(1) && output.stderr.is_empty() {
+        return "missing".to_owned();
+    }
+    format!(
+        "not answered: `git cat-file -e` ended {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+/// [`report_sample`] names what a failed sample left, each field of it: a
+/// slot built as `sample_site` builds one for `Object.ProposalCherryPick`,
+/// whose `HEAD` reflog ends in a torn line naming an object no repository
+/// holds, reported with a kill record and a refusal handed to it.
+///
+/// The reflog is written where the store binds the worktree's registration
+/// (`registration_of`), not where the report looks for it, so a report that
+/// read another reflog misses these bytes. The alive answer is asked twice,
+/// of a child spawned as a sampled child is that waits on its stdin, and
+/// then of the same child once it has ended, so neither a constant answer
+/// nor a dropped one passes: on Unix it is the child's process group that
+/// is asked, on Windows its job's active process count.
+#[test]
+fn the_census_sample_report_names_what_a_failed_sample_left() {
+    let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
+    let fixture = Fixture::created("sample-report");
+    let slot = sample_slot(site, &fixture, 0);
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &slot)
+        .expect("intent");
+    let path = fixture.manager.slot_path(&slot);
+    fixture
+        .manager
+        .add_worktree(&mut NoHooks, &slot, &fixture.head)
+        .expect("worktree");
+    populate_for_sampling(site, &path);
+    let reflog_file = super::fixture::registration_of(&fixture.manager, &path)
+        .join("logs")
+        .join("HEAD");
+
+    let zero = "0".repeat(40);
+    let missing = "0123456789abcdef0123456789abcdef01234567";
+    let head = &fixture.head;
+    // The last line is torn mid-entry, without its newline.
+    let reflog = format!(
+        "{zero} {head} upstroke tests <tests@upstroke.local> 1700000000 +0000\treset: moving to \
+         {head}\n{head} {missing} upstroke tests <tests@upstr"
+    );
+    write_file(&reflog_file, reflog.as_bytes());
+
+    // A child that lives until its stdin closes, spawned as a sampled child
+    // is: in a process group of its own on Unix, in a job of its own on
+    // Windows.
+    let mut waiting = SampledChild::command(
+        SampledChild::program(),
+        &path,
+        &["cat-file".to_owned(), "--batch".to_owned()],
+    );
+    waiting.stdin(Stdio::piped());
+    let live = SampledChild::spawn_command(waiting);
+    let pgid = live.pgid();
+    let mut kill = SampleKill {
+        launch: SampledLaunch {
+            argv: sampled_command(site, &fixture, &slot).0,
+            after: std::time::Duration::from_millis(3),
+            fired: Some(std::time::Duration::from_millis(5)),
+            kill_error: Some("a kill error handed to the report".to_owned()),
+            end: LaunchEnd::Failed(Some(7)),
+            group_ended: std::time::Duration::from_micros(250),
+        },
+        child: live,
+    };
+    // fsck's words, naming the missing object twice, a present one once, and
+    // a run of hex digits too short to be an id.
+    let refusal = format!(
+        "`git fsck --unreachable` failed (exit code 2): error: worktrees/s0/HEAD: invalid \
+         reflog entry {missing}\nerror: worktrees/s0/HEAD: invalid reflog entry {head}\n\
+         error: worktrees/s0/HEAD: invalid reflog entry {missing}\nerror: invalid reflog \
+         entry abc123"
+    );
+
+    // The file is not compared by name: Git may spell the path it prints
+    // otherwise than the store binds it (a resolved `/private/var` on macOS,
+    // `/` for `\` on Windows). These bytes are this reflog's alone, and the
+    // closing quote right after them is the torn line's end.
+    let report = report_sample(&fixture, &path, &kill, Some(&refusal));
+    assert!(
+        report.contains(&format!("all {} bytes of ", reflog.len()))
+            && report.contains(&format!(": \"{}\"", reflog.as_bytes().escape_ascii())),
+        "the report holds the reflog's bytes, its torn last line exactly as it is: {report}"
+    );
+    assert!(
+        report.contains(&format!("object {missing}: missing")),
+        "the report says the id the refusal names is missing: {report}"
+    );
+    assert!(
+        report.contains(&format!("object {head}: present")),
+        "the report says an id the refusal names that the repository holds is present: {report}"
+    );
+    assert_eq!(
+        (
+            report.matches(&format!("object {missing}")).count(),
+            report.matches("object ").count()
+        ),
+        (1, 2),
+        "each 40-digit id the refusal names is reported once, and nothing shorter is: {report}"
+    );
+    assert!(
+        report.contains("kill error: a kill error handed to the report;"),
+        "the report holds the kill error it was handed: {report}"
+    );
+    assert!(
+        report.contains(&format!("end: {:?};", LaunchEnd::Failed(Some(7)))),
+        "the report holds the LaunchEnd it was handed: {report}"
+    );
+    assert!(
+        report.contains(&format!(
+            "fired {:?}, {:?} past the {:?} rung it was aimed at",
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_millis(2),
+            std::time::Duration::from_millis(3)
+        )),
+        "the report holds when the kill fired against its rung: {report}"
+    );
+    // On Windows the count is git's to make, so only that it is a "yes" with
+    // a count is asserted while the child lives.
+    let alive_while_live = if cfg!(unix) {
+        format!("alive: yes: process group {pgid} still has a member")
+    } else {
+        format!("alive: yes: the job of pid {pgid} has an active process count of ")
+    };
+    assert!(
+        report.contains(&alive_while_live),
+        "the report answers whether a process of the sample is alive: {report}"
+    );
+
+    drop(kill.child.child.stdin.take());
+    // The sampler's own wait: the reap, then the group (Unix) or the job
+    // (Windows) awaited empty within `fixture::GROUP_END_BOUND`.
+    let status = kill.child.wait().expect("reap the waiting git child");
+    assert!(status.success(), "the waiting child ended {status:?}");
+    let ended = report_sample(&fixture, &path, &kill, None);
+    let alive_once_ended = if cfg!(unix) {
+        format!("alive: no: process group {pgid} has no member")
+    } else {
+        format!("alive: no: the job of pid {pgid} has an active process count of 0")
+    };
+    assert!(
+        ended.contains(&alive_once_ended),
+        "the alive answer is asked when the report is made: {ended}"
+    );
+    assert!(
+        !ended.contains("object "),
+        "without a refusal no object is named: {ended}"
+    );
+
+    // A reflog longer than the bound: its last bytes only.
+    let long = [
+        b"FIRST-BYTES".as_slice(),
+        [b'x'; REPORTED_REFLOG_BYTES].as_slice(),
+    ]
+    .concat();
+    write_file(&reflog_file, &long);
+    let report = report_sample(&fixture, &path, &kill, None);
+    assert!(
+        report.contains(&format!(
+            "the last {REPORTED_REFLOG_BYTES} of {} bytes of ",
+            long.len()
+        )) && report.contains(&format!(
+            ": \"{}\"",
+            long[long.len() - REPORTED_REFLOG_BYTES..].escape_ascii()
+        )) && !report.contains("FIRST-BYTES"),
+        "a longer reflog is reported by its last {REPORTED_REFLOG_BYTES} bytes: {report}"
+    );
+
+    let recovered = recover_sample(&fixture, &slot);
+    assert!(
+        matches!(recovered, Ok(true)),
+        "the slot recovers: {recovered:?}"
+    );
+    let gone = report_sample(&fixture, &path, &kill, None);
+    assert!(
+        gone.contains(&format!(
+            "HEAD reflog: absent: there is no slot at {}",
+            path.display()
+        )),
+        "a slot the recovery removed is reported absent: {gone}"
+    );
+}
+
+/// [`head_reflog`] reads a reflog whose path holds a byte no UTF-8 spells:
+/// it keeps `git rev-parse --git-path logs/HEAD`'s answer as bytes and
+/// decodes it with `parsers::decode_path`, so the report holds the reflog's
+/// bytes where reading the answer as UTF-8 said "not UTF-8" and lost them
+/// (§8: a path is never assumed to be UTF-8).
+///
+/// The worktree asked is a linked one at an ASCII path, not the byte-named
+/// repository's main worktree: there Git answers the relative
+/// `.git/logs/HEAD`, which reaches the file with no byte of the name in it,
+/// while a linked worktree's answer is the absolute path of its reflog inside
+/// the byte-named repository's `.git/worktrees/<name>/`. Unix, where such a
+/// path exists at all, and skipped where the filesystem refuses the name
+/// with `EILSEQ`, as
+/// `an_absent_add_target_in_a_byte_named_repository_still_classifies` is.
+#[cfg(unix)]
+#[test]
+fn the_report_reads_a_reflog_whose_path_is_not_utf8() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let tree = scratch("byte-named-reflog");
+    let root = tree.path();
+    let repo = root.join(std::ffi::OsString::from_vec(b"repo-\xff".to_vec()));
+    match fs::create_dir_all(&repo) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => {
+            eprintln!(
+                "skipped: this filesystem refuses a directory name that is not UTF-8 — {error} \
+                 (errno {:?}, EILSEQ) — so the byte-named repository whose reflog is read cannot \
+                 exist here, and neither can the path this test reads it by",
+                error.raw_os_error()
+            );
+            return;
+        }
+        Err(error) => panic!("a repository directory Git can name and UTF-8 cannot: {error}"),
+    }
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "tests@upstroke.local"],
+        &["config", "user.name", "upstroke tests"],
+    ] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(repo.join("a.txt"), "one\n").expect("seed file");
+    for args in [&["add", "-A"][..], &["commit", "-q", "-m", "seed"]] {
+        let output = git_out(&repo, args);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let worktree = root.join("linked");
+    git_os(
+        &repo,
+        &[
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-q"),
+            worktree.as_os_str(),
+            OsStr::new("-b"),
+            OsStr::new("linked"),
+        ],
+    );
+
+    // The worktree's administrative directory, the one entry Git made under
+    // the repository's `.git/worktrees/`.
+    let admins = fs::read_dir(repo.join(".git").join("worktrees"))
+        .expect("the repository's .git/worktrees")
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("the entries of .git/worktrees");
+    let [admin] = admins.as_slice() else {
+        panic!("one linked worktree is registered: {admins:?}");
+    };
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    let zero = "0".repeat(40);
+    // The last line is torn mid-entry, without its newline.
+    let bytes = format!(
+        "{zero} {head} upstroke tests <tests@upstroke.local> 1700000000 +0000\tbranch: Created \
+         from HEAD\n{head} {zero} upstroke tests <tests@upstr"
+    )
+    .into_bytes();
+    // `write_file` makes `logs/` when it is absent.
+    write_file(&admin.join("logs").join("HEAD"), &bytes);
+
+    let answered = head_reflog(&worktree);
+    assert!(
+        answered.contains(&format!("all {} bytes of ", bytes.len()))
+            && answered.contains(&format!(": \"{}\"", bytes.escape_ascii())),
+        "the reflog of a worktree whose repository's path is not UTF-8 is read, its torn last \
+         line exactly as it is: {answered}"
+    );
 }
 
 // -----------------------------------------------------------------------
