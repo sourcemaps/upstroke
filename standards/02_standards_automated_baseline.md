@@ -16,13 +16,14 @@ bash .github/scripts/test-pr-ready-audit.sh
 ```
 
 CI splits the ten across jobs: `lint` runs rustfmt, Clippy and the six Bash gates; `test-linux` runs
-the suite on Linux in two shards, `test (ubuntu-latest, k of 2)`, and `test-macos` on macOS in
-five, `test (macos-latest, k of 5)`, each leg
-under 30 minutes, and `test-windows-hosted` runs it on Windows, on `windows-latest` in fourteen
-shards, `test (windows-latest, k of 14)`, by the same rule as the Linux and macOS shards, a
-test running in exactly one shard, for a pull request, a push and a merge-queue entry alike
-(`MAINTAINING.md` step 3); `msrv` runs the locked check for each of the three targets, the
-macOS one cross-compiled on Linux; `lint (windows)` runs Clippy natively and builds every
+the suite on Linux in five legs, `test (ubuntu-latest, k of 5)`, and `test-macos` on macOS in
+twelve, `test (macos-latest, k of 12)`, each leg
+under 30 minutes, and `test-windows-hosted` runs it on Windows, on `windows-latest` in twenty-two
+shards, `test (windows-latest, k of 22)`, each shard under 40 minutes, by the same rule as the
+Linux and macOS shards, a test running in exactly one shard, for a pull request, a push and a
+merge-queue entry alike
+(`MAINTAINING.md` step 3); `msrv` runs the locked check for each of the three targets, each
+checked natively on its own platform; `lint (windows)` runs Clippy natively and builds every
 target as the hosted Windows compile witness; `lint (macos)` runs Clippy on Linux for
 `aarch64-apple-darwin`; `upstroke-ci` aggregates every leg and is the required context. The
 `--locked` MSRV check is what proves the floor against the dependency set a release ships.
