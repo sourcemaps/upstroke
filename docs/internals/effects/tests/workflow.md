@@ -189,13 +189,23 @@ Measured: an earlier version of this assertion accepted exactly that.
 ## `fn aggregate_complaints(doc: &Yaml, jobs: &Yaml, job_names: &BTreeSet<String>) -> Vec<String> {` › `let expected_stems: BTreeSet<String> = wired.iter().map(|job| gate_stem(job)).collect();`
 
 Re-derived from `needs`, so the pin above is checked against the job graph
-rather than trusted as a copy. `for gate in LINT LINT_WINDOWS MSRV TEST; do
-: LINT_MACOS` is the enumerated escape: it satisfies a search for the
-omitted name while the loop never reads it.
+rather than trusted as a copy. `for gate in LINT LINT_WINDOWS MSRV
+TEST_LINUX TEST_MACOS TEST_WINDOWS_HOSTED; do : LINT_MACOS` is the
+enumerated escape: it satisfies a search for the omitted name while the loop
+never reads it. The Linux and macOS test jobs are two gates since
+2026-11-24, `test-linux` and `test-macos`, read as `TEST_LINUX_RESULT` and
+`TEST_MACOS_RESULT` where the one `test` job was `TEST_RESULT`; nothing here
+names them, since `needs`, the bindings and the loop are all derived from
+the job graph. Measured, `MUT-AGGREGATE-DROPS-TEST-MACOS`, under
+`aggregate-needs`.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {`
 
-Every way the job that executes this file's fixtures fails its contract.
+Every way the jobs that execute this file's fixtures on Linux and macOS fail
+their contract. Each row of [`TEST_JOBS`] is checked against its own job,
+with the same checks, and every complaint names the job it is about. Until
+2026-11-24 one `test` job ran both platforms' legs; the codes are the ones
+that job's checks used, where what they refuse is unchanged.
 
 The predecessor read the job's text with comments stripped and asked whether
 the word `clippy` appeared on a `components:` line and whether the file
@@ -205,6 +215,21 @@ strip existed only because the job's nine-line comment spelled the needle --
 command runs this?". A parsed document has no comments in it at all, so that
 class is gone by construction rather than by a strip whose bite had to be
 asserted.
+
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if field(jobs, RETIRED_TEST_JOB).is_some() {`
+
+A job named `test` ([`RETIRED_TEST_JOB`]) left in the workflow, code
+`test-job-split`. The split is the contract: beside the two jobs such a job
+runs legs no row holds to anything, and in their place it runs both
+platforms' legs under one `runs-on:` this function no longer reads. No row
+of the ledger measures it; the rows that measured the one job's mistakes
+were re-aimed at the two.
+
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let Some(job) = field(jobs, id) else {`
+
+A row whose job is missing is one complaint naming the job's id, code
+`test-job-missing`, and the other row is still checked: a missing
+`test-macos` does not hide what is wrong with `test-linux`.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_SHARD_COMMAND);`
 
@@ -228,8 +253,9 @@ and not under `test-job-command`. Quoted, the step's script is the cargo
 line with `engine::` in the selection's place and nothing else.
 
 The step that runs the suite, and the host acceptance capture step after it
-([`HOST_ACCEPTANCE_CAPTURE`]), are the two steps in this job that may carry
-an `env:`, and only the map [`TEST_STEP_ENV`] pins. That map is the
+([`HOST_ACCEPTANCE_CAPTURE`]), are the two steps in each job that may carry
+an `env:`, and only the map the job's row pins (`step_env`): `1` on
+`test-macos`, the empty string on `test-linux`. That map is the
 declaration that the leg's temporary directory folds case, under which
 `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
 requires its native branch. The capture repeats it so the record is made
@@ -249,7 +275,13 @@ The suite step's three rows anchor on its `run:` line together with the
 its job. Each row's mutation, target and code are what they were before the
 capture existed. The `run:` line gained ` -- ${{ matrix.tests }}` when the
 macOS suite was divided, and the three rows were re-spelled with it; nothing
-else in them moved.
+else in them moved. At the split each `env:` line became its job's literal
+and the rows were re-spelled with it: the dropped declaration and the
+retargeting key on `test-macos`, and the wrong-leg row on `test-linux`,
+whose `""` it makes `"1"`, the declaration made on the platform that does
+not fold case. Under one job that row moved the declaration from the macOS
+legs to the ubuntu ones in one expression; one mutation touches one job,
+and the nearer of its two halves is the loud one.
 
 The container capability observation after the capture
 ([`CAPABILITY_OBSERVATION`]) is the third step that may carry an `env:`, and
@@ -268,49 +300,65 @@ line, or its own script lines. Each of those occurs once in each job.
 
 Its script spells `set -eo pipefail` rather than the capture's bare
 `set -o pipefail` line, because that line is the anchor
-`MUT-TEST-CAPTURE-EXIT-SWALLOWED` requires exactly once in this job. Every
+`MUT-TEST-CAPTURE-EXIT-SWALLOWED` requires exactly once in its job. Every
 earlier row's anchor, mutation and code are unchanged.
+
+At the split the rows that named the one `test` job were aimed at one of the
+two: the observation's and the capture's at `test-macos`, whose `env:` they
+spell with `"1"`, except `MUT-TEST-CAPTURE-STEP-DELETED`, which spells
+`test-linux`'s `""`; the suite step's, the checkout's, the toolchain's and
+the job fields' mostly at `test-linux`. The two jobs have the same steps, so
+each such row measures the one check both jobs run.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
-This job is a matrix, so each `run:` step resolves a shell once per
-hosted runner. Each must be the platform default: a workflow-level
+Each `run:` step resolves its shell under the row's runner, the one machine
+its job runs on, and must be that platform's default: a workflow-level
 default swaps every one of them at once, which is the mutation the
-step-only reading could not see.
+step-only reading could not see. While one job ran both platforms' legs
+each step was resolved once per runner that hosts tests; each job now has
+one runner, and a runner this contract does not model is refused once, as
+`step-shell`, before the steps are read.
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(test_leg_matrix_complaints(job));`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `out.extend(test_leg_matrix_complaints(job, row));`
 
 The matrix is the platform half of the same claim: a fixture that runs on
-one platform proves nothing about the other. It is held to the legs
-[`TEST_LEGS`] derives, and the table's runners to the same derived runner set
-the Clippy legs are compared against, less the one platform whose suite runs
-in its own job ([`test_leg_matrix_complaints`]).
+one platform proves nothing about the other. Each job's matrix is held to
+the legs its row derives ([`test_leg_matrix_complaints`]), and the table's
+runners, once for both jobs, to the same derived runner set the Clippy legs
+are compared against, less the one platform whose suite runs in its own job
+([`test_jobs_table_complaints`]).
 
-## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "runs-on") != Some("${{ matrix.os }}") {`
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "runs-on") != Some(row.runner) {`
 
-A leg's `os:` is its runner only because `runs-on:` reads it. Under a
-literal every leg runs on one machine, the macOS shards among them, with the
-matrix still equal to its table. Code `test-job-matrix`, as before the legs
-were an `include:` list.
+The job's `runs-on:` is the row's runner as a literal. On another runner the
+job runs that platform's shards elsewhere: every leg keeps its name and its
+filters and is green, and no test of it ran on the platform it is named
+for. An expression or a label set is a runner this contract cannot read.
+Code `test-job-matrix`, the code the one job's `runs-on:` check had when it
+required `${{ matrix.os }}`. Measured, `MUT-TEST-MACOS-ON-LINUX`, and
+`MUT-CI-CARGO-TEST-STEP-SKIPPED` anchors on `test-linux`'s line.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(job, "name") != Some(TEST_JOB_NAME) {`
 
 The job's `name:`, as the workflow writes it ([`TEST_JOB_NAME`]). Nothing
 reads a leg's name but a person and the API's listing, and that is the
-reason to hold it: the name is how a run tells its legs apart, and under
-`matrix.os`, which it read until the macOS suite was divided, the shards of
-one runner publish one name. Code `test-job-name`. Measured,
-`MUT-TEST-LEGS-NAMED-BY-RUNNER`.
+reason to hold it: the name is how a run tells its legs apart, and under a
+name that does not read `matrix.leg` -- the runner, as the one job's name
+read `matrix.os` until the macOS suite was divided -- a job's shards publish
+one name. Code `test-job-name`. Measured, `MUT-TEST-LEGS-NAMED-BY-RUNNER`,
+which names `test-macos` `test (macos-latest)`.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let minutes = field(job, "timeout-minutes").and_then(Yaml::as_i64);`
 
 The job's limit, exactly [`TEST_TIMEOUT_MINUTES`] and an integer: one number
-for every leg. The expression the job carried while the macOS suite ran
-whole, 45 minutes on macOS and 30 on ubuntu, reads as a string here and is
-refused as no number at all. Code `test-job-timeout`. Measured,
-`MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and `MUT-TEST-TIMEOUT-RAISED`: the
-expression, and the plain integer 45, which reads as a number and is refused
-by the equality alone.
+for every leg of both jobs. An expression, such as the one the one job
+carried while the macOS suite ran whole, 45 minutes on macOS and 30 on
+ubuntu, reads as a string here and is refused as no number at all. Code
+`test-job-timeout`. Measured, `MUT-TEST-TIMEOUT-RAISED-FOR-MACOS` and
+`MUT-TEST-TIMEOUT-RAISED`: 45 on `test-macos` and 45 on `test-linux`, each
+a plain integer, which reads as a number and is refused by the equality
+alone. With a job per platform the macOS raise needs no expression.
 
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let toolchains: Vec<&Yaml> = steps_of(job)`
 
@@ -322,24 +370,38 @@ by the equality alone.
 
 ## `fn hosts_tests(target: &CiTarget) -> bool {`
 
-Whether a [`CI_TARGETS`] runner hosts its platform's tests in the `test`
-matrix -- every platform but the one whose suite runs in its own job.
+Whether a [`CI_TARGETS`] runner hosts its platform's tests in a job of
+[`TEST_JOBS`] -- every platform but the one whose suite runs in its own
+shards' job.
+
+## `fn test_jobs_table_complaints() -> Vec<String> {`
+
+The runners of [`TEST_JOBS`] are, in order and one job each, the
+[`CI_TARGETS`] runners that host tests ([`hosts_tests`]). Code
+`test-job-matrix`, checked once for both jobs, and it reads no workflow.
+Each job's matrix is held to its row, so a platform dropped from the table
+and from `ci.yml` together would satisfy every check of the jobs that are
+left; the table is therefore held to the platform list the Clippy legs and
+the MSRV leg are derived from, and a platform cannot leave the test jobs
+that way. Until the split this was the first of
+[`test_leg_matrix_complaints`]' five checks, over `TEST_LEGS`, the one
+job's table of runners and filters.
 
 ## `struct TestLeg {`
 
-One leg of the `test` job's matrix as the oracle compares it: the runner,
-the leg's label, and the libtest arguments. The expected legs and the legs
-read from `ci.yml` are both made of it, as the Windows shards' are of
-[`ShardLeg`], so the comparison is one equality and a refusal prints both
-sides field by field.
+One leg of a test job's matrix as the oracle compares it: the leg's label
+and the libtest arguments. The expected legs and the legs read from
+`ci.yml` are both made of it, as the Windows shards' are of [`ShardLeg`], so
+the comparison is one equality and a refusal prints both sides field by
+field. Until the split it also carried the leg's `os:`, its runner; the
+runner is now the job's.
 
-## `fn test_legs() -> Vec<TestLeg> {`
+## `fn test_legs(row: &TestJob) -> Vec<TestLeg> {`
 
-The table the `test` job's matrix must equal, derived and never written
-out: for each runner of [`TEST_LEGS`], in order, one leg for each string
-[`shard_selections`] makes of that runner's filters, in order.
+The table a test job's matrix must equal, derived and never written out:
+one leg for each string [`shard_selections`] makes of the row's filters, in
+order.
 
-- `os` is the runner.
 - `tests` is the string. A runner with no filter has one, the empty string:
   no arguments, the whole suite.
 - `leg` is the runner alone where it has that one leg, and otherwise the
@@ -347,10 +409,11 @@ out: for each runner of [`TEST_LEGS`], in order, one leg for each string
   of strings, so a filter added to a runner's list renames that runner's
   legs and no label is written down.
 
-Today that is seven legs: `ubuntu-latest, 1 of 2` and
-`ubuntu-latest, 2 of 2`, and `macos-latest, 1 of 5` to
+Today that is two legs for `test-linux`, `ubuntu-latest, 1 of 2` and
+`ubuntu-latest, 2 of 2`, and five for `test-macos`, `macos-latest, 1 of 5` to
 `macos-latest, 5 of 5`. The label is what GitHub puts in the leg's job name
-in place of `${{ matrix.leg }}` ([`TEST_JOB_NAME`]). No runner has an empty
+in place of `${{ matrix.leg }}` ([`TEST_JOB_NAME`]), so each check name is
+the one the leg had in the one job. No runner has an empty
 filter list today, so no leg is labelled by its runner alone: the Linux leg
 was, as `test (ubuntu-latest)`, the name it had while the matrix was an
 `os:` axis, until its suite was divided in two.
@@ -358,44 +421,44 @@ was, as `test (ubuntu-latest)`, the name it had while the matrix was an
 ## `fn test_leg(entry: &Yaml) -> Option<TestLeg> {`
 
 One `include:` entry of `ci.yml` read as a leg, or nothing: a mapping with
-exactly the keys `os`, `leg` and `tests`, each a string. A fourth key is
-refused rather than ignored, for [`shard_leg`]'s reason: an `include:` entry
-may set anything a step or the job reads from `matrix`, and a key this
-contract does not model is one whose reader it has not looked for. A
+exactly the keys `leg` and `tests`, each a string. A third key, an `os:`
+among them, is refused rather than ignored, for [`shard_leg`]'s reason: an
+`include:` entry may set anything a step or the job reads from `matrix`,
+and a key this contract does not model is one whose reader it has not
+looked for. A
 `tests: ""`, which the Linux leg carried while it ran the suite whole, is a
 string, the empty one, and reads as a leg; a bare `tests:` is YAML's null,
 which is no string, and does not.
 
-## `fn test_leg_matrix_complaints(job: &Yaml) -> Vec<String> {`
+## `fn test_leg_matrix_complaints(job: &Yaml, row: &TestJob) -> Vec<String> {`
 
-The `test` job's `strategy:`, whole, under the one code `test-job-matrix`.
-Five things, each its own complaint:
+A test job's `strategy:`, whole, under the one code `test-job-matrix`, each
+complaint naming the job. Four things, each its own complaint:
 
-1. The runners of [`TEST_LEGS`] are, in order and once each, the
-   [`CI_TARGETS`] runners that host tests ([`hosts_tests`]). This one reads
-   no workflow. The matrix is held to the table, so a platform dropped from
-   the table and from `ci.yml` together would satisfy the fifth check; the
-   table is therefore held to the platform list the Clippy legs and the MSRV
-   leg are derived from, and a platform cannot leave this job that way.
-2. `strategy:` declares exactly `fail-fast` and `matrix`. `max-parallel` is
+1. `strategy:` declares exactly `fail-fast` and `matrix`. `max-parallel` is
    the rest of what a strategy may say today; an equality over the field set
    refuses it and whatever GitHub adds next.
-3. `fail-fast` is `false`. Otherwise the first leg to fail cancels the legs
-   still running, and a run reports one platform's or one shard's failures
-   and none of the others'.
-4. `matrix:` declares exactly `include`. An axis beside the list changes
+2. `fail-fast` is `false`. Otherwise the first leg to fail cancels the legs
+   still running, and a run reports one shard's failures and none of the
+   others'.
+3. `matrix:` declares exactly `include`. An axis beside the list changes
    what the list means, by the rule [`windows_shard_matrix_complaints`]
    records for the Windows shards, and `exclude:` removes combinations of an
    axis. The legs are the list and nothing else.
-5. `include:` is, in order, exactly [`test_legs`]' entries, each read by
-   [`test_leg`].
+4. `include:` is, in order, exactly [`test_legs`]' entries for the row,
+   each read by [`test_leg`].
+
+The table's runners are held to the platforms once, for both jobs, by
+[`test_jobs_table_complaints`]; until the split that was this function's
+first check, and the fourth check here was its fifth.
 
 Until the macOS suite was divided the matrix was one `os:` axis, compared as
 a set with the runners that host tests, and `include:` was refused with
-`exclude:` as a key that could add a platform nobody declared. The legs are
-now the `include:` list because an axis cannot say them: the seven share two
-runners and differ in what they are handed. The platform claim the
-set equality made is the first and fifth checks together.
+`exclude:` as a key that could add a platform nobody declared. The legs
+became the `include:` list because an axis cannot say them: the seven
+shared two runners and differed in what they are handed. The platform
+claim the set equality made is [`test_jobs_table_complaints`] and each
+job's fourth check together.
 
 In order, though GitHub does not run the legs in order: within a runner the
 order is the shard table's, each leg skipping the filters of the legs before
@@ -403,9 +466,9 @@ it, and an equality over an ordered list is the plain way to hold every leg
 to its own row.
 
 These legs hold no count of passing tests to a floor, where each Windows
-shard does, and the fifth check is what stands in for one here. A shard's
-floor refuses a leg whose filters matched almost nothing; in this job such a
-leg is green, and the tests its filters no longer match are run by a later
+shard does, and the fourth check is what stands in for one here. A shard's
+floor refuses a leg whose filters matched almost nothing; in these jobs such
+a leg is green, and the tests its filters no longer match are run by a later
 leg, since every later leg only skips those filters. That holds while every
 leg's arguments are its runner's table's, which is this equality.
 
@@ -418,13 +481,21 @@ Windows entry added. Of an `include:` list GitHub documents that its entries
 are processed after `exclude:`, so by that rule the first removes no leg
 today, and the row says so; it is refused as a key the contract does not
 read. The second deleted the one Linux leg while that leg ran the suite
-whole. The Linux suite is two legs now and the row deletes both, their six
-lines, so that it still removes a platform and not a shard of one. Its
+whole. The Linux suite is two legs now and the row deletes both, so that it
+still removes a platform and not a shard of one. Its
 anchor therefore spells the two Linux legs' arguments, `engine::` and
 `--skip engine::`, which the oracle otherwise writes out in one test; the
 macOS five's are written out in that test and nowhere else.
 
-The last three change what a leg is handed, and the fifth check refuses
+At the split the rows were aimed at the job that holds what they mutate,
+and the entries lost their `os:` lines: the exclusion names the first macOS
+leg in `test-macos`; the narrowing deletes `test-linux`'s two entries, four
+lines; and the Windows entry is a third entry of `test-linux` labelled
+`windows-latest`, which would run the suite whole on `ubuntu-latest` under a
+Windows name. Every anchor that spelled a `- os:` line now spells the
+`- leg:` line that opens the entry.
+
+The last three change what a leg is handed, and the fourth check refuses
 each. `MUT-TEST-MACOS-SHARD-NARROWED` puts a `--skip effects::` first in the
 last macOS leg's arguments and `MUT-TEST-MACOS-LAST-SHARD-SKIPS-MORE` puts
 it last, after every word the table derives. The appended skip's anchor is
@@ -440,7 +511,7 @@ Linux legs run the one subset, and the tests that run on Linux alone run
 nowhere.
 
 Three more rows make three of the Windows shards' mutations on the macOS
-legs, and the fifth check refuses each. `MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`
+legs, and the fourth check refuses each. `MUT-TEST-MACOS-FILTER-DROPPED-FROM-ITS-LEG`
 deletes the second leg's first filter,
 `engine::topology::coordinator::tests::interleaving::`, from that leg's own
 `tests:` alone; every later leg still skips it, so the coordinator's
@@ -455,18 +526,19 @@ every leg is green. The moved filter's anchor spells the third leg's skips
 whole and the opening of the fourth leg's value, so a change to the table
 re-spells it; the other two spell a leg's opening words.
 
-A deleted macOS leg and the first check were measured by hand instead, on
-2026-11-17, while the macOS legs were three, each in the tree and then
-restored. With the third macOS entry's three lines removed from `ci.yml`,
-three tests of `super` failed, each with the fifth complaint and both tables
-printed --
+A deleted macOS leg and the table check were measured by hand instead, on
+2026-11-17, while the macOS legs were three and one `test` job ran them, each
+in the tree and then restored. With the third macOS entry's three lines
+removed from `ci.yml`, three tests of `super` failed, each with the
+`include:` complaint and both tables printed --
 `the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` at its
 clean-workflow check,
 `the_workflow_that_runs_these_tests_installs_the_compiler_they_need` and
 `every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires`.
-With `macos-latest` removed from [`TEST_LEGS`] and its three entries from
-`ci.yml` together, the same three failed with the first complaint and no
-other.
+With `macos-latest` removed from `TEST_LEGS`, the one job's table, and its
+three entries from `ci.yml` together, the same three failed with the table
+complaint, now [`test_jobs_table_complaints`]', and no other. Neither was
+measured again at the split.
 
 ## `fn installs_a_toolchain(step: &Yaml) -> bool {`
 
@@ -480,7 +552,7 @@ the one job that could carry no such step at all.
 Every way the job that runs the Windows suite fails its contract. It is the
 shape of [`ci_test_job_complaints`], on one runner and under PowerShell:
 
-- the field set, [`TEST_WINDOWS_HOSTED_JOB_FIELDS`]: the `test` job's five,
+- the field set, [`TEST_WINDOWS_HOSTED_JOB_FIELDS`]: the five of `test-linux` and `test-macos`,
   with no `needs:` and no `if:`;
 - the name, the runner and the timeout;
 - the shard matrix, whole ([`windows_shard_matrix_complaints`]);
@@ -555,7 +627,7 @@ is recognised by that text everywhere this function asks for it: for the
 step's field set and case-fold map here, for the count of suite steps, and
 for the capture's place after it.
 
-The suite step carries the same allowance as the `test` job's, pinned to
+The suite step carries the same allowance as the Linux and macOS test jobs', pinned to
 [`TEST_WINDOWS_STEP_ENV`] under `test-windows-hosted-step-env`: the hosted
 runner's NTFS folds case, so the declaration is `1` outright. The capture
 step after it ([`HOST_ACCEPTANCE_WINDOWS_CAPTURE`]) carries the same map
@@ -574,7 +646,7 @@ the field set [`CAPABILITY_STEP_FIELDS`], and the bound
 `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-CASEFOLD-DROPPED` and
 `MUT-TEST-WINDOWS-HOSTED-CAPABILITY-TIMEOUT-DROPPED`. Those two anchor on
 the step's `timeout-minutes: 4` line, which occurs once in the job. A key
-put beside the declaration is measured on the `test` job's observation; the
+put beside the declaration is measured on `test-macos`' observation; the
 row that put one on a Windows observation mutated the guest's job and went
 with it on 2026-11-20.
 
@@ -754,8 +826,8 @@ names the cause. Measured, `MUT-TEST-WINDOWS-HOSTED-CACHE-RESTORED`.
 
 ## `pub(super) fn ci_test_windows_hosted_job_complaints(doc: &Yaml) -> Vec<String> {` › `let components: BTreeSet<&str> = steps_of(job)`
 
-The `clippy` component, read from the install step the way the `test` job's
-check reads it: the suite's effect-denial fixtures run `clippy-driver`, and
+The `clippy` component, read from the install step the way the Linux and
+macOS test jobs' check reads it: the suite's effect-denial fixtures run `clippy-driver`, and
 `dtolnay/rust-toolchain` installs the minimal profile. Measured,
 `MUT-TEST-WINDOWS-HOSTED-WITHOUT-CLIPPY`.
 
@@ -839,7 +911,7 @@ Measured, for the third, `MUT-TEST-WINDOWS-HOSTED-MATRIX-AXIS-ADDED` and
 `exclude:` beside it. Of a list with no axis GitHub documents that its
 entries are processed after `exclude:`, so by that rule the second removes
 no leg today, and the row says so; it is refused as a key the contract does
-not read, as `MUT-TEST-MATRIX-EXCLUDED` is in the `test` job.
+not read, as `MUT-TEST-MATRIX-EXCLUDED` is in `test-macos`.
 
 Measured, for the fourth:
 
@@ -888,7 +960,7 @@ became the coordinator's tests named `a_r...`, the last leg's last skip
 leg's anchor and the `exclude:` stand as they were, and moved the last
 leg: its last skip is now `engine::tests::` and its floor is 965, and the
 appended skip's row and the two floor rows are re-spelled with them. No row
-of the `test` job's was re-spelled for the macOS table then: none spells a
+of the then single `test` job's was re-spelled for the macOS table then: none spells a
 macOS leg's whole arguments, and the last macOS leg's last skip was still
 `runner::`. `MUT-TEST-WINDOWS-HOSTED-FILTER-HARDCODED` kept its anchor and
 had its count restated
@@ -971,7 +1043,8 @@ change what the capture runs while every pin still matches. A cache restore
 can replace the harness the suite built and ran; a checkout can replace the
 tree.
 
-Measured, in the `test` job:
+Measured, in the Linux and macOS test jobs, the first row in `test-linux`
+and the rest in `test-macos`:
 
 - `MUT-TEST-CAPTURE-STEP-DELETED`
 - `MUT-TEST-CAPTURE-IGNORED-NOT-RUN`
@@ -998,7 +1071,7 @@ also stands in the capability step, so the second row's anchor is the line
 together with the capture's `cargo test` line before it, and its
 replacement keeps the `cargo test` line. The other edits, a moved filter,
 `--ignored` dropped, the zero-test refusal or the frame check removed, are
-measured on the `test` job's capture alone.
+measured on `test-macos`' capture alone.
 
 The last two measure the position guard: a pinned cache step, and a second
 input-free checkout, between the witness and the capture. The checkout is
@@ -1008,7 +1081,7 @@ that function's code.
 A field on the capture beyond the admitted set — `if:` or
 `continue-on-error:` — is refused as `unexpected-step-field`
 (`MUT-TEST-CAPTURE-STEP-DISABLED` and `MUT-TEST-CAPTURE-STEP-ABSOLVED`, in
-the `test` job).
+`test-macos`).
 
 Three controls each disabled one of the new checks; each check is
 load-bearing:
@@ -1042,7 +1115,7 @@ replace the harness or the tree. The contract places the observation
 success-only after the HOST capture. And a step above the capture would run
 before the record that step makes.
 
-Measured, in the `test` job:
+Measured, in `test-macos`:
 
 - `MUT-TEST-CAPABILITY-STEP-DELETED`
 - `MUT-TEST-CAPABILITY-IGNORED-NOT-RUN`
@@ -1072,7 +1145,7 @@ A conditional or failure-swallowing field on the observation, `if:` (a
 `unexpected-step-field`. The rows are
 `MUT-TEST-CAPABILITY-STEP-DISABLED`,
 `MUT-TEST-CAPABILITY-STEP-RUN-WHEN-NOT-CANCELLED` and
-`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, in the `test` job.
+`MUT-TEST-CAPABILITY-STEP-ABSOLVED`, in `test-macos`.
 
 No earlier check was removed or loosened. [`TEST_STEP_FIELDS`] and
 [`STEP_FIELDS`] are unchanged; the observation step alone may carry
@@ -1334,7 +1407,7 @@ other than exactly `os` and `target` or a value that is not a string.
 The platform half. The job checks the floor for three targets, one
 `include:` entry apiece, and the entries are compared against the pairs
 `(check_runner, triple)` derived from [`CI_TARGETS`], each once -- the same
-table the Clippy gates and the `test` job's legs are derived from. The macOS
+table the Clippy gates and the test jobs' rows are derived from. The macOS
 entry runs on `ubuntu-latest` and names its tuple, for the reason
 `lint (macos)` does: GitHub runs at most five macOS jobs at once for the
 account, each run asked for seven, and run 45175187088 showed each macOS job
@@ -1382,7 +1455,7 @@ sets. On today's document it is defence in depth -- `GATE_JOB_FIELDS`,
 `TEST_JOB_FIELDS`, `MSRV_JOB_FIELDS`, `AGGREGATE_JOB_FIELDS` and
 `STEP_FIELDS` already refuse an `env:` almost everywhere it could go. But the
 `msrv` leg had no field set at all until this change, the aggregate's step
-and the two suite-running steps are *allowed* an `env:`, and a job added
+and the three suite-running steps are *allowed* an `env:`, and a job added
 tomorrow has no field set until someone writes one. A rebinding anywhere is
 refused by this scan on its own, which is what
 `the_workflow_scope_rustflags_pin_refuses_weakening_and_every_override`
@@ -1569,7 +1642,7 @@ one, and the two Linux strings to written-out literals.
 One function, so that the tables and anything derived from them cannot
 disagree about the rule. The Windows shards' matrix is the first thing derived
 from one: [`windows_shard_legs`] takes each leg's arguments from here, and
-`ci.yml` is held to them. The `test` job's matrix is the second:
+`ci.yml` is held to them. The `test-linux` and `test-macos` matrices are the second:
 [`test_legs`] takes the five macOS legs' arguments and the two Linux legs'
 from here. Until the Linux suite was divided its one leg's came from the
 empty list, whose one string is the whole suite.

@@ -3792,7 +3792,7 @@ With these rules each kind of damage is detectable:
 ## `fn host_acceptance_record() {`
 
 G7's native HOST acceptance record (root direction `087fea89`), the host half of R21's per-platform
-run ids. CI selects it by its exact name, after the suite, in the `test` job (Linux and macOS,
+run ids. CI selects it by its exact name, after the suite, in `test-linux` and `test-macos` (Linux and macOS,
 where each of Linux's two shards and macOS's five runs the capture after its own share of the
 suite) and in `test-windows-hosted`, once in each of its fourteen shards on `windows-latest`, after
 that shard's own share of the suite:

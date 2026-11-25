@@ -5380,9 +5380,9 @@ mod workflow;
 
 use ci_model::{
     CI_TARGETS, CI_WORKFLOW, GOLDEN_IMAGE_TOOLCHAIN, LINUX_SHARD_FILTERS, MACOS_SHARD_FILTERS,
-    MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES, RUSTFLAGS_KEY, TEST_COMMAND, TEST_SHARD_COMMAND,
-    TEST_WINDOWS_HOSTED_JOB, WINDOWS_SHARD_FILTERS, WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS,
-    WINDOWS_TEST_FLOOR,
+    MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES, RUSTFLAGS_KEY, TEMP_FOLDS_CASE_KEY,
+    TEST_COMMAND, TEST_JOBS, TEST_SHARD_COMMAND, TEST_WINDOWS_HOSTED_JOB, WINDOWS_SHARD_FILTERS,
+    WINDOWS_SHARD_FLOORS, WINDOWS_SHARD_WITNESS, WINDOWS_TEST_FLOOR,
 };
 use workflow::{
     WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
@@ -5478,16 +5478,40 @@ fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {
     let complaints = ci_test_job_complaints(&doc);
     assert!(
         complaints.is_empty(),
-        "the `test` job does not run these fixtures the way they need:\n{}",
+        "the test jobs do not run these fixtures the way they need:\n{}",
         complaints.join("\n")
     );
     assert_eq!(
         TEST_SHARD_COMMAND,
         format!("{TEST_COMMAND} -- ${{{{ matrix.tests }}}}"),
-        "the `test` job's suite step is not `{TEST_COMMAND}` with the leg's `matrix.tests` \
+        "the test jobs' suite step is not `{TEST_COMMAND}` with the leg's `matrix.tests` \
          handed to libtest and nothing else, so what a leg runs over its selection is not the \
          command the Windows shards run"
     );
+    let jobs: Vec<(&str, &str)> = TEST_JOBS.iter().map(|row| (row.id, row.runner)).collect();
+    assert_eq!(
+        jobs,
+        [
+            ("test-linux", "ubuntu-latest"),
+            ("test-macos", "macos-latest")
+        ],
+        "the test jobs are not one job per platform that hosts tests, Linux first"
+    );
+    for row in &TEST_JOBS {
+        let folds = if row.runner == "macos-latest" {
+            "1"
+        } else {
+            ""
+        };
+        assert_eq!(
+            row.step_env,
+            [(TEMP_FOLDS_CASE_KEY, folds)],
+            "`{}`'s pinned step map is not the case-fold declaration its platform's legs received \
+             before the split: `1` where the runner's temporary directory folds case, on \
+             `macos-latest`, and the empty string where it does not, on `ubuntu-latest`",
+            row.id
+        );
+    }
 }
 
 #[test]

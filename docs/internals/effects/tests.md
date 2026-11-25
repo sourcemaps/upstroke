@@ -2044,7 +2044,7 @@ fifth round every fixture made one.
 evidence is a fixture nothing executes is `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`,
 and the rule adopted from it is to name the command that runs the fixture and
 check that the command is one CI runs. `.github/workflows/ci.yml` installs
-the clippy component in both the `test` and the `lint` job, and
+the clippy component in the `test-linux`, `test-macos` and `lint` jobs, and
 [`the_workflow_that_runs_these_tests_installs_the_compiler_they_need`]
 asserts it.
 
@@ -2108,7 +2108,7 @@ on conforming input is one nobody has seen refuse anything -- the rule this
 file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
 exists.
 
-The ledger is 166 rows. It was 195 until 2026-11-20, when the guest's
+The ledger is 168 rows. It was 195 until 2026-11-20, when the guest's
 Windows job and the job that picked the suite's home were removed from the
 workflow. The rows written for either, and for the rule that ran exactly
 one of two Windows suite jobs, went with them, and ten were written for what
@@ -2138,6 +2138,12 @@ the Windows legs, `MUT-TEST-WINDOWS-HOSTED-FILTER-DROPPED-FROM-ITS-LEG`,
 `-FILTER-MOVED-BETWEEN-LEGS` (each under its matrix check in the workflow
 notes). Those eight were counted from 153 to 161 before the five
 cross-target rows of #412 were merged in from `master`, which made 166.
+On 2026-11-24 the `test` job was split into `test-linux` and `test-macos`.
+Every row that named `test` was re-aimed at one of the two. Rows that only
+made sense with both platforms in one job were re-aimed at the nearest
+mistake in the split jobs. Two were written for mistakes the split made
+possible, `MUT-TEST-MACOS-ON-LINUX` and `MUT-AGGREGATE-DROPS-TEST-MACOS`,
+which made 168.
 The test asserts no count. It requires every row to change the document and to be refused under
 the code the row names, and no two rows to share a name; a row taken out of
 the ledger is a claim nothing measures, and that is the diff's to show.
@@ -2158,10 +2164,19 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
-Every platform, and now every leg: the job's matrix is seven legs, the Linux
-suite as two shards and the macOS suite as five, and the oracle holds the
-matrix to the legs it derives from `TEST_LEGS`
-(`test_leg_matrix_complaints` in the workflow notes).
+Every platform, and now every leg: the Linux suite runs as two shards in
+`test-linux` and the macOS suite as five in `test-macos`, and the oracle
+holds each job's matrix to the legs it derives from that job's row of
+`TEST_JOBS` (`test_leg_matrix_complaints` in the workflow notes).
+
+The test also asserts the table itself: one job per platform that hosts
+tests, `test-linux` on `ubuntu-latest` and then `test-macos` on
+`macos-latest`, and each row's pinned step map the case-fold declaration
+its platform's legs received from the one job's expression before the
+split -- `1` on `macos-latest`, whose temporary directory folds case, and
+the empty string on `ubuntu-latest`. The oracle compares each job's steps
+to its row's map; this assertion is what holds the two maps to the
+platforms.
 
 One relation the oracle's pins do not state, each being against its own
 constant: `TEST_SHARD_COMMAND`, the suite step every leg runs, is
@@ -2488,7 +2503,7 @@ first and, where that fails, as it does on a stable compiler, and the
 variable is set, compiles it again with it, and turns the feature on where
 that compiles. Each also has Cargo run it again whenever the variable
 changes. Under the variable the three, and every harness built over them,
-are built otherwise than the `test` job's legs and a user's machine build
+are built otherwise than the legs of `test-linux` and `test-macos` and a user's machine build
 them, from a tree nobody changed, on these fourteen legs alone. That is read
 from the three build scripts at the versions `Cargo.lock` held on
 2026-11-21; no build here was made with the variable set.
@@ -2978,11 +2993,11 @@ measured again since the test became these two assertions.
 The three shard tables of the CI model, `WINDOWS_SHARD_FILTERS`,
 `MACOS_SHARD_FILTERS` and `LINUX_SHARD_FILTERS`, each divide the suite:
 every test runs in exactly one shard. The test reads no workflow. It was the
-proof that came before any line of `ci.yml` was derived from a table. Both
-matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
+proof that came before any line of `ci.yml` was derived from a table. All
+three matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
 what holds the Windows shards' to the Windows table, and
-`test_leg_matrix_complaints` what holds the `test` job's five macOS legs to
-the macOS one and its two Linux legs to the Linux one.
+`test_leg_matrix_complaints` what holds `test-macos`'s five legs to the
+macOS table and `test-linux`'s two legs to the Linux table.
 
 Five claims.
 

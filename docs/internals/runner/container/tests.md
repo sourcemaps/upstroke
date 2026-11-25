@@ -3247,7 +3247,7 @@ A printed frame alone is never acceptance.
 
 The one ignored, cfg-free observation test. CI's observation step selects it
 by its exact name immediately after the native host acceptance capture, in
-`test` (once in each of ubuntu-latest's two shards and of macos-latest's five)
+`test-linux` and `test-macos` (once in each of ubuntu-latest's two shards and of macos-latest's five)
 and in `test-windows-hosted`, once in each of its fourteen shards on
 `windows-latest`. It does not call `docker_gate` and is not in
 `DOCKER_GATED_TESTS`. Its body has no platform cfg and no early return.

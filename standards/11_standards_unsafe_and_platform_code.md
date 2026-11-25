@@ -19,8 +19,9 @@ in shared code. Platform code is verified by running it natively, not by compili
 that evaluates it:
 
 - A Clippy lint or `#[expect]` is evidenced only by a Clippy leg for that target. CI runs one for
-  each of the three — `lint`, `lint (windows)`, `lint (macos)` — beside `test` and `msrv` matrices
-  that compile all three, the `test` legs natively and `msrv` by target triple. `lint (macos)`
+  each of the three — `lint`, `lint (windows)`, `lint (macos)` — beside `test-linux`, `test-macos`,
+  `test-windows-hosted` and `msrv` matrices that compile all three, the test legs natively and
+  `msrv` by target triple. `lint (macos)`
   compiles the macOS target from Linux, since `cfg` follows the target, not the host; a build
   script or proc-macro would compile for the Linux host, so the package has none, and a test
   refuses one.
@@ -35,5 +36,5 @@ that evaluates it:
 
 A change that adds platform-gated code, tests or annotations names the leg that evaluates them.
 
-Enforced by: `unsafe_op_in_unsafe_fn` in `[lints]`; the three Clippy legs and the `test` and
-`msrv` matrices; the `cfg` census; review for safety proofs.
+Enforced by: `unsafe_op_in_unsafe_fn` in `[lints]`; the three Clippy legs and the `test-linux`,
+`test-macos`, `test-windows-hosted` and `msrv` matrices; the `cfg` census; review for safety proofs.
