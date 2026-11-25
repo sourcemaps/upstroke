@@ -2,199 +2,65 @@
 
 ## Unreleased
 
-- Capacity is now tracked for the machine rather than for a repository. `upstroke capacity` and the
-  `validate` and `--dry-run` preview fold the rate-limit signals and the self-metered draw of
-  every run on the machine, found through each schema-4 run's private half under
-  `~/.upstroke/runs/`, where they folded the latest run of the repository they were started in;
-  the draw counts the current calendar month (UTC), which is what `monthly_allowance` is measured
-  against. `[capacity] scope = "repo"`, or `upstroke capacity --scope repo`, folds this
-  repository's runs alone. A run that cannot be read still shows nothing and is named in a
-  warning, and the scope line now counts such runs. Nothing routes on any of this yet.
-  Only an attempt that passed, in a run of any schema, clears another run's rate limit on its
-  pool, and only when its worker finished after that limit was met, dated by the attempt's start
-  and measured duration; a failed attempt, whatever it failed on and whether or not it reached the
-  provider, an attempt settled late from earlier work, and one with no recorded start no longer
-  read the pool as serving again. Each still clears its own run's limits.
-- `upstroke capacity --refresh` is new: the capacity tracker. For each pool that names a
-  `usage_provider` in `pools.toml` it asks that provider's documented usage endpoint what the
-  account has drawn this month, through a `curl` subprocess, and stores the answer under
-  `~/.upstroke/capacity/usage/`, where the capacity views read it as a ceiling that can lower an
-  estimate and never raise one. The providers are `anthropic-cost`, `openai-cost`,
-  `github-ai-credits` and `github-premium-requests`; the credential is read from the environment
-  variable named by `usage_token_env`, and `usage_account` names the account where a provider
-  reports per account. `upstroke connect` carries the three keys across a rewrite and writes none
-  itself. This is the only command that reaches a network, and `run` and `resume` never call it:
-  the engine still speaks no HTTP, and the binary links no HTTP client.
-- Settings now have a machine level. An `upstroke.toml` beside the pools file
-  (`~/.upstroke/upstroke.toml`) is read beneath every repository's own: tables merge key by key,
-  a scalar or an array (`[[gates]]`, `[[pins]]`) from the repository replaces the machine's whole,
-  and a run that takes a setting from the machine-level file says which. The machine-level file
-  must be a valid configuration on its own. A repository with no such file beside its pools file
-  is read exactly as before.
+- Capacity is now tracked for the machine rather than for a repository; `[capacity] scope = "repo"`
+  or `upstroke capacity --scope repo` folds only this repository. Nothing routes on any of this yet.
+  Only an attempt that passed, in a run of any schema, clears another run's rate limit on its pool,
+  and only when its worker finished after that limit was met.
+- `upstroke capacity --refresh` is new: the capacity tracker, asking each pool's `usage_provider`
+  for this month's draw (`usage_token_env`, `usage_account`); no other command reaches a network.
+- Settings now have a machine level: `~/.upstroke/upstroke.toml`, beside the pools file, is read
+  beneath every repository's own; with no such file, a repository is read exactly as before.
 - `upstroke capacity` and `validate` now show the usage-limit signals and spend of a schema-4 run
-  when it is the repository's latest. They used to warn that its log was not a valid event and
-  report no run.
-- A schema-4 run's pre-flight, on `upstroke run` and on `upstroke resume`, now refuses the run when
-  Claude Code's account, or a Claude Code pool's `profile`, is not signed in, as `claude
-  --setting-sources "" auth status --json` reports it, before anything is spawned for the run. The
-  check asks in a worker's settings context, with no user, project or local settings loaded, so a
-  credential that only a settings file supplies (an `apiKeyHelper`, say) does not count, and
-  `upstroke connect` and `upstroke capacity`, which call the same discovery, now report the answer a
-  worker would get. It checks every account
-  Claude Code's pools use, each once: each `profile` they name, and the default account when any of
-  them names none or Claude Code has no pool, stopping at the first account that fails and refusing
-  an agent whose pools use more than sixteen distinct accounts. A run with a signed-out account used
-  to start and fail at its first attempt on Claude Code (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`). A CLI that cannot say
-  whether it is signed in still passes.
-- When a usage limit stops a schema-4 worker and the pools file has another pool for the same agent
-  that the run has not seen exhausted, the task now runs again at once on that pool, in a fresh
-  session under its `profile`, instead of waiting for the reset; with every pool of the agent
-  exhausted, the run waits for the earliest reset among them. If one of those resets has already
-  passed, the run waits only until two minutes past it, and once that time has gone there is no
-  reset wait, only the ordinary back-off. A reset is spent once its pool refuses again two minutes
-  or more past it: the run no longer waits for it or returns to the pool on it. An agent with one
-  pool, and a reviewer's limit, still wait only for a reset ahead, as before.
+  when it is the repository's latest.
+- A schema-4 run's pre-flight, on `upstroke run` and `resume`, now refuses it when Claude Code's
+  account or a Claude Code pool's `profile` is not signed in, as `claude --setting-sources ""
+  auth status --json` reports it; a CLI that cannot say whether it is signed in still passes
+  (`PR386-PROFILE-AUTH-NOT-PREFLIGHTED`).
+- When a usage limit stops a schema-4 worker and its agent has another pool the run has not seen
+  exhausted, the task now runs again at once on that pool instead of waiting for the reset.
 - A schema-4 run whose remaining tasks are deferred on a usage limit now waits until two minutes
-  past the reset Claude Code reported, if that is at most 5 h 15 min away, instead of three short
-  back-offs and a question; it prints what it is waiting for and records the wait as one deferral.
+  past the reset Claude Code reported, if that is at most 5 h 15 min away.
 - A schema-4 run now records `pool_exhausted` when a usage limit stops an attempt, with the reset
-  Claude Code reported, as a resumed older run already did. A schema-4
-  run appends it before the attempt's settlement, so a known reset is not lost when the run stops
-  between the two.
+  Claude Code reported, as a resumed older run already did.
 - `upstroke answer` now refuses a second answer to a question that already has one published,
-  however the two are timed. Two answers started together, or, on a run an older binary created
-  (schema 1–3), a second answer to a parked question while no engine drove it, used to both report
-  success while only one took effect (`PR381-ANSWER-PUBLISH-RACE`).
-- The startup census reclaims a marker-less run directory only on a complete listing, and removes
-  it as listed. A listing that fails now retains the directory, and `upstroke status <run-id>`
-  says it cannot be listed, with the error; it used to read as empty, so a transient failure could
-  delete a committed run's `events.jsonl` (`SWEEP-CLASSIFY-009`). An entry that appears before the
-  removal is kept, and one named `.creating.tmp` that is not a regular file is contents. A
-  reclaimable husk holding a name that is not valid UTF-8 is now removed (`SWEEP-NAMES-005`).
+  however the two are timed (`PR381-ANSWER-PUBLISH-RACE`).
+- The startup census reclaims a marker-less run directory only on a complete listing, and
+  `upstroke status <run-id>` reports one it cannot list (`SWEEP-CLASSIFY-009`, `SWEEP-NAMES-005`).
 - A `[routing.strategy]` table with an unknown key is now refused at load, naming the key and the
-  accepted `mode` and `spend_down_after`. It used to load with the key silently dropped, so a
-  misspelled `spend_down_afer = 0.7` left `spend_down_after` unset with nothing said. An
-  unrecognised `mode` value still warns and loads (`SWEEP-CONFIG-PARSE-008`).
-- `upstroke run` now creates schema-4 runs on the execution topology: a worktree per task, the
-  compare-and-swap merge queue, `max_parallel` above 1 bounded by `max_per_agent` and
-  `max_per_pool` slots, and the optional container runner. `upstroke resume` continues one from
-  its record, and `status` (with `--follow`), `answer` and `export-decisions` read one. A log of
-  schemas 1-3 still resumes, reports and exports on the sequential path, and a binary that reads
-  only up to schema 3 refuses a schema-4 log before any lock. A schema-4 run probes every agent
-  its chains and its review plan name before anything is committed, and a configured reviewer
-  whose CLI is missing fails its creation where the sequential engine dropped that reviewer. With
-  no pins and the default `frontier` review tier, the review plan names Codex's CLI beside Claude
-  Code's, so both must be installed, and Codex's local model catalog must list every catalogued
-  Codex model (`gpt-6-astra`, `gpt-5.6-sol`) with all five efforts
-  (`design/17`, "Which CLIs a schema-4 run needs"). This
-  supersedes the entries below that call schema 4 "unreleased and inert by default": it is still
-  unreleased, and no longer inert.
+  accepted `mode` and `spend_down_after`; an unknown `mode` still loads (`SWEEP-CONFIG-PARSE-008`).
+- `upstroke run` creates schema-4 runs on the execution topology (`max_parallel`, `max_per_agent`,
+  `max_per_pool`); still unreleased, no longer inert, superseding the entries below (`design/17`).
 - The container runner now gives a worker or reviewer its own permission-settings file, read-only,
-  where its CLI was handed a host path the container withholds; that one file, the one the engine
-  materialized for the invocation, and no other. On a Unix host every container runs as the
-  coordinator's effective numeric uid and gid, so the image and any credential volume must be
-  usable by that user; nothing changes their ownership. And a command's stdin now reaches its
-  container, which had read none: the prompt is written once, then EOF, by an attached start the
-  process funnel owns, and that start waits no longer than the invocation's deadline.
-- `[runner] mounts` now takes effect, as part of the run's recorded execution identity. A fresh
-  container run resolves each mount before any lock or probe and records its canonical source,
-  target, `read_only` and source identity (the device and inode on Unix; on Windows the volume
-  serial number and the full 128-bit file id) in the run's `RunnerPolicy`, so the
-  marker, `owner.json`, `run_started` and `report.json` carry it; a run without mounts keeps its
-  exact bytes and its policy digest. Every role and probe gets the recorded mounts, read-only for
-  review and probes and as written for implement and gate, so a gate can write through a mount
-  configured `read_only = false`. Refused before any lock: a relative or missing source, one that
-  is not a directory or regular file, one that is, contains or lies inside the repository, its
-  Git, the private root or a host credential location, a path the `--mount` option cannot carry
-  exactly (a `,`, a `"`, a control character, edge whitespace, or not UTF-8), and a target that is
-  `/`, not in normal form, at or under `/upstroke` or `/tmp`, or the same as or nested in another.
-  A config that wrote any of these was accepted while mounts were inert and is now refused. On a
-  resume the recorded mounts win: a recorded source that is gone or rebound refuses before any
-  spawn and the run stays resumable, and a different `mounts` today warns and is ignored. On
-  Windows a source must be on a drive letter, and a link, junction or other reparse point is
-  refused. A build for a platform that is neither Unix nor Windows refuses configured mounts.
-- A decline, or a lineage member's failed settlement, that meets an open verification of its lineage now
-  cancels the verification instead of releasing it: the schema-4 fold keeps the transaction, and its
-  pipeline and merge entitlements, until its one terminal, `merge_verification_interrupted`, which the
-  coordinator appends once the verification's processes have ended, after any
-  `merge_verification_charged` record of the review passes it charged, (a halt's closure, or the next
-  resume's recovery, when no live process settles it) before the pin, staging worktree and snapshots are
-  reclaimed; the fold refuses that verification any other terminal, a new integration or the run's end
-  until then (INV-07, L13).
+  where its CLI was handed a host path the container withholds. On Unix every container runs as the
+  coordinator's effective uid and gid, so the image and any credential volume must be usable by that
+  user, and a command's stdin now reaches its container.
+- `[runner] mounts` now takes effect on Unix and Windows, as part of the run's recorded execution
+  identity; a config accepted while mounts were inert may now be refused. On Windows a source must
+  be on a drive letter, and a link, junction or other reparse point is refused.
+- A decline, or a lineage member's failed settlement, meeting an open verification of its lineage
+  now cancels it instead of releasing it, ending in `merge_verification_interrupted` (INV-07, L13).
 - A schema-4 integration verification that ends with no terminal carrying the review passes it paid
-  for — its own error after a pass was charged, a reviewer whose end the Runner did not establish, a
-  halt, a shutdown, another pipeline's error, or a lineage failure that cancels it — now records
-  those passes in a new `merge_verification_charged` event before the command or the integration
-  ends, so a resumed run's reported spend, and the ceilings checked against it, count what the
-  incarnation before it paid. The record is not a terminal: it settles nothing, so cleanup,
-  readmission and recovery are unchanged, and a crash before its line is durable leaves the passes
-  unknown spend, as before. The fold admits one record per sequence and no terminal that carries
-  passes after it, so no pass is counted twice, and a binary without the kind refuses a log holding
-  one. Schema 4 is unreleased and inert by default, so no released run is affected (`DESIGN.md` §26,
-  "The unavailable terminal's spend").
-- The four Unix helper endings that give up on a helper — the cleanup reaper that never said
-  READY, the job-control guard whose descriptors could not be configured, the guard that never
-  said READY, and a guard aborted after it said READY — no longer wait for that helper without a
-  bound, and neither does the end of a cleanup reaper that did not acknowledge CLEANUP. Each asks
-  `waitpid(pid, …, WNOHANG)` and polls it for two seconds, after which a helper still there is
-  left for the process's exit to collect; the four endings' failure messages say so, naming what
-  they saw rather than claiming the helper. A helper in uninterruptible I/O with the `SIGKILL`
-  pending never becomes collectable, and the blocking wait these sites made did not return: the
-  reaper's callers hold the launch barrier, under which the signal monitor refuses to kill or stop
-  any registered group, so every running agent outlived a `SIGTERM` for as long as the kernel took.
-  A CLEANUP the reaper did not acknowledge, from a reaper that stayed alive, likewise kept the
-  supervisor from ever arming the fail-closed termination it answers that failure with. This
-  supersedes, for the four endings, the sentence below that neither guard path "makes its wait
-  again where it did not before": each now makes its wait again until the helper is collected or
-  the budget runs out. **The wait after a CLEANUP or CANCEL the reaper acknowledged is
-  deliberately still unbounded**, because the reaper's exit is what releases the run's cleanup
-  lease its caller is about to act on. What a host's syscall policy sees changes at the bounded
-  waits only: each is a `WNOHANG` poll made again until it collects the helper or the budget runs
-  out, `waitpid(pid, …, WNOHANG)` by number where it passed `0`, and with
-  `UPSTROKE_HELPER_IDENTITY=1` `waitid(P_PIDFD, fd, WEXITED | WNOHANG)` where it passed `WEXITED`.
-  A policy written for the identity path must therefore permit both sets of `waitid` options, as
-  `DESIGN.md` §15 now states; the acknowledged-exit wait still passes `0` by number and `WEXITED`
-  through the descriptor, and the status-pointer shape every wait passes is unchanged
-  (`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`).
-- Ending a Unix job-control guard the launch gives up on (its descriptors could not be configured,
-  or the signal monitor could not start after it said READY) now reports what `kill` and `waitpid`
-  answered, in the words a helper that missed READY already used, instead of discarding both
-  answers. A refused signal is a distinct outcome the message names, and a helper's ending left as
-  an unused expression statement is a build error. Both paths keep the `waitpid` they always
-  made: each asks for no exit status, as it did before, and says so rather than reporting one it
-  did not collect — so a host policy that refuses or kills a wait carrying a status pointer sees no
-  new call from either, and neither makes its wait again where it did not before. Measured under
-  both such policies, on each path. The retry the abort path has always made when a signal
-  interrupts its wait is now bounded, so a wait that is answered `EINTR` every time ends in a
-  reported failure rather than in a loop that never returns
-  (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
-- A schema-4 integration verification that ends unavailable — parked for a person, or deferred by
-  an infrastructure outage — now records the review passes it paid for, so a resumed run's reported
-  spend is the total the incarnation before it reached. `merge_verification_unavailable` gains a
-  required `reviews` field; a schema-4 log written without it is refused rather than replayed to a
-  total it cannot account for. Schema 4 is unreleased and inert by default, so no released run is
-  affected (`DESIGN.md` §26, "The unavailable terminal's spend").
-- A Unix private helper (the cleanup reaper, the job-control guard) can be ended through a name
-  the kernel cannot re-issue instead of through its pid. **Opt-in, Linux 5.4+, off by default:**
-  with `UPSTROKE_HELPER_IDENTITY=1` each helper is created by `clone3` with `CLONE_PIDFD`,
-  signalled with `pidfd_send_signal` and collected with `waitid(P_PIDFD, ...)`, and no other
-  call is made. Setting it asserts that the host's syscall policy permits those three calls.
-  With it unset, upstroke makes none of them and ending a helper stays the `kill` and the
-  `waitpid` it has always been, which `DESIGN.md` §15 now states is best effort against an
-  embedding host that reaps this process's children with wildcard waits.
+  for, now records those passes in a new `merge_verification_charged` event (`DESIGN.md` §26).
+- The four endings that give up on a Unix helper, and the end of a cleanup reaper that did not
+  acknowledge CLEANUP, now bound their wait: a two-second `WNOHANG` poll, `waitpid(pid, …,
+  WNOHANG)` by number where it passed `0`, and with `UPSTROKE_HELPER_IDENTITY=1` `waitid(P_PIDFD,
+  fd, WEXITED | WNOHANG)` where it passed `WEXITED`, so a syscall policy for the identity path must
+  permit both sets of `waitid` options. The wait after an acknowledged CLEANUP or CANCEL is
+  deliberately still unbounded (`DESIGN.md` §15, `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`).
+- Ending a Unix job-control guard the launch gives up on now reports what `kill` and `waitpid`
+  answered, instead of discarding both answers (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
+- A schema-4 integration verification that ends unavailable now records the review passes it paid
+  for, in a new required `reviews` field of `merge_verification_unavailable` (`DESIGN.md` §26).
+- A Unix private helper can be ended through a name the kernel cannot re-issue instead of its pid:
+  **opt-in, Linux 5.4+, off by default**, with `UPSTROKE_HELPER_IDENTITY=1` (`DESIGN.md` §15).
 - Relicensed to Apache-2.0 with a NOTICE file; earlier releases keep the terms recorded in their
   own tagged metadata and source notices (decided 2026-09-01).
-- The G2 checkpoint: the v0.2 parallel-execution machinery (worktree-per-task isolation, the
-  compare-and-swap merge queue, the optional container runner, the topology layer) merged to
-  master inert by default. The v0.1 sequential path is unchanged and schema-4 state engages only
-  by explicit schema choice; no `0.2.0` tag (G2 checkpoint promotion, decided 2026-08-31).
-- Retired the App-signed `upstroke-frontier-review` attestation gate: its two privileged workflows,
-  four scripts and fixture tests, and the signing environment are gone, and the default-branch
-  ruleset requires `upstroke-ci` and `upstroke-pr-policy` only. The review obligation is unchanged;
-  the owner's merge is the attestation (decided 2026-08-23).
-- Renamed project from `tactus` to `upstroke`. Binary, crate, env-var prefix (`UPSTROKE_*`),
-  user directory (`~/.upstroke`) and run directory (`.upstroke/`) all change; no aliases. The
-  transformation is `scripts/rename-tactus-to-upstroke.sh`.
+- The G2 checkpoint: the v0.2 parallel-execution machinery merged to master inert by default. The
+  v0.1 sequential path is unchanged; no `0.2.0` tag (2026-08-31).
+- Retired the App-signed `upstroke-frontier-review` attestation gate: the default-branch ruleset
+  requires `upstroke-ci` and `upstroke-pr-policy` only; the review obligation stands (2026-08-23).
+- Renamed project from `tactus` to `upstroke`. Binary, crate, env-var prefix (`UPSTROKE_*`), user
+  directory (`~/.upstroke`) and run directory (`.upstroke/`) all change; no aliases.
 - `upstroke export-decisions <run-id>`: a local, read-only JSONL/CSV projection of a finished run's
   plan and attempt log (`DESIGN.md` §25).
 
