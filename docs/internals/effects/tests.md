@@ -2164,8 +2164,8 @@ line of the comment-stripped text, and whether the file contained the test
 command anywhere; both survive an `echo`, and the strip existed only because
 the job's own comment spelled the needle.
 
-Every platform, and now every leg: the Linux suite runs as two shards in
-`test-linux` and the macOS suite as five in `test-macos`, and the oracle
+Every platform, and now every leg: the Linux suite runs as five shards in
+`test-linux` and the macOS suite as twelve in `test-macos`, and the oracle
 holds each job's matrix to the legs it derives from that job's row of
 `TEST_JOBS` (`test_leg_matrix_complaints` in the workflow notes).
 
@@ -2250,18 +2250,20 @@ as the workspace check above does, so no spelling of a key hides it.
 
 ## `fn no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach() {`
 
-The package has no host unit, and this is what keeps the macOS cross checks
+The package has no host unit, and this is what keeps the macOS cross check
 complete.
 
-Since #412, `lint (macos)` and the macOS `msrv` entry run on `ubuntu-latest`
-with `--target aarch64-apple-darwin` rather than on a Mac. `cfg` follows
-the target for the package's target code, so Clippy and the MSRV check see
+Since #412, `lint (macos)` runs on `ubuntu-latest` with
+`--target aarch64-apple-darwin` rather than on a Mac; it is the only macOS
+check that does. The macOS `msrv` entry ran there too until 2026-11-25 and
+is native again. Clippy lints only this package's own code, and `cfg`
+follows the target for its target code, so the cross-compiled lint sees
 every `#[cfg(target_os = "macos")]` region of it as a Mac would. A host
-unit -- a build script or a proc-macro -- compiles for the host instead,
-which there is Linux: its macOS branches would be neither linted nor
-compiled at the MSRV, and both legs would still pass. Absence is the
-contract, as for the files above: adding a host unit is a deliberate act,
-and the same change restores a native `macos-latest` Clippy and MSRV leg
+unit of this package -- a build script or a proc-macro -- would be linted
+for the host instead, which there is Linux: its macOS branches would never
+be linted, and the leg would still pass. Absence is the contract, as for
+the files above: adding a host unit is a deliberate act, and the same
+change restores a native `macos-latest` Clippy leg
 (`PR412-MACOS-HOST-UNITS-UNLINTED`).
 
 ## `fn no_repository_file_host_unit_check_names_each_host_unit() {`
@@ -2504,7 +2506,7 @@ variable is set, compiles it again with it, and turns the feature on where
 that compiles. Each also has Cargo run it again whenever the variable
 changes. Under the variable the three, and every harness built over them,
 are built otherwise than the legs of `test-linux` and `test-macos` and a user's machine build
-them, from a tree nobody changed, on these fourteen legs alone. That is read
+them, from a tree nobody changed, on these twenty-two legs alone. That is read
 from the three build scripts at the versions `Cargo.lock` held on
 2026-11-21; no build here was made with the variable set.
 
@@ -2559,8 +2561,8 @@ selection is, is the exact line's to hold
 
 The times are the one thing this step does that nothing downstream judges.
 Without them every leg runs its shard, clears its floor and is green; what
-is lost is the record a later change is to pack the legs from, on all fourteen
-at once, and no check would fail to say so. Measured by one edit in
+is lost is the record a later change is to pack the legs from, on all
+twenty-two at once, and no check would fail to say so. Measured by one edit in
 [`the_windows_suite_checks_refuse_a_second_run_and_a_masked_exit`], the
 two arguments removed; in the workflow alone,
 `MUT-TEST-WINDOWS-HOSTED-HARNESS-TIMES-DROPPED`.
@@ -2996,60 +2998,72 @@ every test runs in exactly one shard. The test reads no workflow. It was the
 proof that came before any line of `ci.yml` was derived from a table. All
 three matrices now are: `windows_shard_matrix_complaints` in the workflow notes is
 what holds the Windows shards' to the Windows table, and
-`test_leg_matrix_complaints` what holds `test-macos`'s five legs to the
-macOS table and `test-linux`'s two legs to the Linux table.
+`test_leg_matrix_complaints` what holds `test-macos`'s twelve legs to the
+macOS table and `test-linux`'s five legs to the Linux table.
 
 Five claims.
 
-1. The tables yield fourteen Windows selections, five macOS ones and two
-   Linux ones, as [`shard_selections`] derives them. Each table's first
+1. The tables yield twenty-two Windows selections, twelve macOS ones and
+   five Linux ones, as [`shard_selections`] derives them. Each table's first
    selection is its first filter list joined by spaces, with no skip, and
    the last Windows selection is exactly a `--skip` for each of the table's
-   69 filters, in table order: the two ends of the rule, stated a second
+   109 filters, in table order: the two ends of the rule, stated a second
    way.
-2. The Linux table's two are written out as literals, and a table with no
-   list gives one empty string -- one shard, no arguments, the whole suite.
-   No runner's table is empty since the Linux suite was divided; the empty
-   one stays as the rule's base case.
+2. The Linux table's five are written out as literals, the `tests:` values
+   of `test-linux`'s five legs in order, and a table with no list gives one
+   empty string -- one shard, no arguments, the whole suite. No runner's
+   table is empty since the Linux suite was divided; the empty one stays as
+   the rule's base case.
 3. Each of fourteen names is run by exactly one selection of each table
    under [`libtest_runs`], and by the one named beside it, in a column for
    each of the three tables; under the empty table's one selection every
    name runs. The names are the boundaries of the rule, with the Windows
    shard of each and the filter that puts it there:
-   - coordinator tests named `a_p...` (shard 4, `...tests::a_p`) and
-     `a_r...` (10, `...tests::a_r`), and two that no coordinator filter
-     names, `a_b...` and `halt...` (14);
-   - a test named `a_...` in the coordinator's `interleaving` module (12,
+   - coordinator tests named `a_pipeline_is_served_while_an...` (shard 16,
+     `...tests::a_pipeline_is_served_while_an`), which the filters that
+     open `a_pipeline_is_served_while_a_` do not reach, and `a_registry...`
+     (1, `...tests::a_reg`); one that no coordinator filter names,
+     `a_budget_stop_drains` (22); and `halt...` (6, `...tests::h`);
+   - a test named `a_...` in the coordinator's `interleaving` module (19,
      `...interleaving::a`), which the coordinator's `...tests::a_` filters
      do not reach because each is a substring that runs through `tests::a_`;
-   - a recovery test (1, `...recover::tests::k`) and an attempt test (13,
+   - a recovery test (12, `...recover::tests::k`) and an attempt test (17,
      `engine::topology::attempt::`);
-   - `engine::tests::host_acceptance_record` (14), which no
-     `engine::tests::` filter names, and `engine::tests::a_kept_pin...` (10,
+   - `engine::tests::host_acceptance_record` (22), which no
+     `engine::tests::` filter names, and `engine::tests::a_kept_pin...` (14,
      `engine::tests::a_k`);
-   - a runner test (3, `runner::container::`);
-   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (7,
+   - a runner test (5, `runner::container::`);
+   - `workspace_manager::tests::engine::a_name_with_a_filter_inside_it` (2,
      `workspace_manager::tests::e`), a name outside the engine that contains
-     `engine::`. The Windows table has no `engine::` filter, and the name
-     contains no `engine::tests::` one, so the workspace manager's filter
-     decides. The Linux table does have that filter. libtest's filter is a
-     substring, so there the `engine::` shard runs the name and every later
-     shard skips it: once, as for any other name;
-   - a workspace manager test named `a_...` (3, `workspace_manager::tests::a`);
-   - a library test that contains no filter (14), and a name with no module
+     `engine::`. No table has a bare `engine::` filter since the Linux one
+     was divided again on 2026-11-25, and the name contains no
+     `engine::tests::` filter: `engine::a_n` is not `engine::tests::a_n`.
+     So in each table the workspace manager's filter decides. libtest's
+     filter is a substring, so a filter that did occur inside the name
+     would run it in that filter's shard and every later shard would skip
+     it: once, as for any other name;
+   - a workspace manager test named `a_...` (9, `workspace_manager::tests::a`);
+   - a library test that contains no filter (22), and a name with no module
      before `tests::`, which is how a harness lists a test at its crate's
-     root, the bin harness's among them (14).
+     root, the bin harness's among them (22).
 
-   On macOS the same fourteen fall in shards 1, 3, 5, 5, 2, 3, 4, 5, 1, 4,
-   2, 3, 2 and 5: there the first list takes the coordinator's `a_p...`
-   tests and the engine's own `a_k...`; the second takes the `interleaving`
-   module, the workspace manager's `e...` tests and `effects::tests::`; the
-   third takes the coordinator's `a_r...` tests, the recovery tests named
-   `a_...` or `k...` and the workspace manager's named `a...`; the fourth
-   takes `runner::container::` and the attempt tests; and no macOS filter
-   names the coordinator's `a_b...` or `halt...`. In the Linux column
-   every name that contains `engine::` falls in shard 1, the first nine and
-   the eleventh, and the runner's test and the last three in shard 2.
+   On macOS the same fourteen fall in shards 10, 2, 12, 12, 7, 7, 10, 12,
+   3, 8, 6, 10, 12 and 12: there the tenth list takes the coordinator's
+   `a_pipeline_is_served_while_an...` tests, by a filter of that name, which
+   the fourth list's `...while_a_` does not reach, and with them the attempt
+   tests and the workspace manager's named `a...`; the second takes the
+   coordinator's `a_r...` tests; the third the engine's own `a_k...`; the
+   sixth the workspace manager's `e...` tests; the seventh the
+   `interleaving` tests named `a...` and the recovery tests named `k...`;
+   the eighth `runner::container::`; and no macOS filter names the
+   coordinator's `a_b...` or `halt...`. In the Linux column the
+   `interleaving` and recovery tests fall in shard 1, under
+   `...interleaving::` and `engine::topology::recover::`; the coordinator's
+   `a_r...` in 2; the attempt test, the engine's own two and the runner's
+   test in 3, under `engine::topology::attempt::`, `engine::tests::` and
+   `runner::container::`; the coordinator's `a_p...` and the workspace
+   manager's two in 4; and the coordinator's `a_b...` and `halt...` and the
+   last two in 5.
 4. In all three tables no list is empty, no filter is empty, contains
    whitespace or starts with `-`, and no filter appears twice anywhere in
    the table. An empty list is a shard with no filter, which runs every test
@@ -3060,9 +3074,9 @@ Five claims.
    skipped by its own later shard, or named twice by one.
 5. `WINDOWS_SHARD_FLOORS` has one entry for each Windows shard, each above
    zero, and they sum to [`WINDOWS_TEST_FLOOR`], 1700: the floor the whole
-   suite was held to as one job. The fourteen legs together must not accept
-   fewer passing tests than that job did. No script reads the 1700 now; it
-   is the sum the fourteen floors are held to.
+   suite was held to as one job. The twenty-two legs together must not
+   accept fewer passing tests than that job did. No script reads the 1700
+   now; it is the sum the twenty-two floors are held to.
 
 Fourteen names are examples, not a census of the suite, and the test does
 not ask whether a test of each name exists. That the rule divides every set
@@ -3077,7 +3091,8 @@ eight, by making [`libtest_runs`] read a skip string as a prefix of the
 name rather than a substring, and restoring it: this test failed on
 `workspace_manager::tests::engine::a_name_with_a_filter_inside_it`, run by
 Windows shards 4 and 5 of that table. It was not measured again for the
-ten, of 2026-11-19 or of the re-split, or for the fourteen of 2026-11-22.
+ten, of 2026-11-19 or of the re-split, for the fourteen of 2026-11-22, or
+for the twenty-two of 2026-11-25.
 
 ## `mod merge_gate_answers {`
 
@@ -3128,10 +3143,10 @@ Four claims. Three were held by nothing at all before this test: that the leg
 is enabled and unabsolved, that its command is the documented one *including*
 `--locked`, and that its matrix is every supported target. The matrix is one
 `include:` entry per target of [`CI_TARGETS`], each on that target's
-`check_runner` and compiling its tuple with `--target ${{ matrix.target }}`:
-Linux and Windows on their own runners, macOS from `ubuntu-latest` by triple,
-because GitHub runs at most five macOS jobs at once for the account and each
-run asked for seven (run 45175187088). The fourth, the
+`msrv_runner` and compiling its tuple with `--target ${{ matrix.target }}`:
+each target on its own platform, macOS on `macos-latest` since 2026-11-25,
+so that Cargo builds the dependencies' build scripts and procedural macros
+for macOS at the floor, as a user's Mac does. The fourth, the
 toolchain, was held loosely -- `.github/scripts/test-docs-consistency.sh`'s C2
 accepts `rust-version` "or a patch release of it" -- and is held exactly here.
 It is derived from the manifest and quoted from it on failure, because a
@@ -3289,12 +3304,13 @@ and which runs its `clippy_gate`. Linux and Windows are linted natively.
 `lint (macos)` runs on `ubuntu-latest` with `--target aarch64-apple-darwin`:
 `cfg` follows the target, not the host, so it evaluates every
 `#[cfg(target_os = "macos")]` region of the package's target code as a Mac
-would; a host unit -- a build script or a proc-macro -- would compile for
-Linux, and
+would; a host unit of this package -- a build script or a proc-macro --
+would be linted for Linux, and
 `no_repository_file_adds_a_host_unit_the_macos_cross_checks_cannot_reach`
-refuses one, and it left `macos-latest` because GitHub runs at most five
-macOS jobs at once for the account and each run asked for seven (run
-45175187088).
+refuses one. It left `macos-latest` when GitHub ran at most five macOS jobs
+at once for the account and each run asked for seven (run 45175187088), and
+it stays, because Clippy lints only this package's own code; the `msrv`
+macOS entry, which compiles dependency host units, is native again.
 
 **Why this is one test and not three.** `PR5D-MSVC-CLIPPY-NEVER-RUN` and
 `PR5-MACOS-CLIPPY-NEVER-RUN` are the same defect on two platforms, found
