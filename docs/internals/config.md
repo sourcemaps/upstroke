@@ -46,7 +46,7 @@ message quotes that is longer than 16 characters withheld (a key or schema
 name is kept up to 64). Only a key is refused: an unrecognised `mode` value
 still warns and the load succeeds.
 No forward-compatibility key is lost at the top level: nothing in the tree's
-fixtures, docs or examples writes a top-level key outside the seven.
+fixtures, docs or examples writes a top-level key outside the eight.
 
 ## `fn a_misspelled_top_level_section_is_refused_not_dropped() {`
 
@@ -1328,8 +1328,10 @@ refusal nor an acceptance from bytes it never held.
 
 ## `let repo = scratch("capturedpools-config.toml", "[engine]\nshell = \"bash\"\n");`
 
-Two files feed a load, and a capture that covered one of them would
-leave the other free to move unobserved between a check and its use.
+Up to three files feed a load: the repository's settings, the
+machine-level settings beside the pools file, and the pools file. A
+capture that covered only some of them would leave the rest free to
+move unobserved between a check and its use.
 
 ## `fs::write(`
 
