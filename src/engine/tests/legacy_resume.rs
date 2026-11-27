@@ -2274,7 +2274,7 @@ fn transcripts_live_outside_the_workspace_and_survive_a_rollback() {
     }
 }
 
-fn strip_run_started_field(paths: &RunPaths, field: &str) {
+pub(super) fn strip_run_started_field(paths: &RunPaths, field: &str) {
     let text = fs::read_to_string(paths.events()).expect("log");
     let mut stripped = false;
     let rewritten: Vec<String> = text

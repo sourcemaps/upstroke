@@ -56,7 +56,8 @@ Preview default per tier when no pin applies (also listed in [`CATALOG`]).
 Snapshot of the Claude Code, Copilot and Codex CLI rosters as of Aug 2026,
 plus the two exact frontier slugs added in Nov 2026 for the self-host
 binding (`claude-opus-5-5`, `gpt-6-astra`) and one more added later that
-month for explicit pins only (`claude-fable-5-2`).
+month for explicit pins only (`claude-fable-5-2`)
+and, on 2026-11-25, the two Codex 6.2 slugs `gpt-6.2-sol` and `gpt-6.2-astra`, appended last so no existing pick moves.
 
 **Table order is preference order.** [`different_family_at`] returns the
 first match, so moving an entry up promotes it for cross-family review.
@@ -178,6 +179,24 @@ is the string the CLI recorded for a turn it actually ran. Frontier
 because that is what it is and what it is for: the whole point of this
 pool is implementing at the top rung without the reviewer's window
 paying for it (§23.2, as scoped there).
+
+## `entry("codex", "gpt-6.2-sol", Tier::Frontier, Family::OpenAI),`
+
+Read from Codex CLI 0.172.0's `codex debug models` on the build machine on
+2026-11-25 (low through max, and ultra). Frontier and OpenAI by analogy with
+`gpt-6-astra` and `gpt-5.6-sol`, not from a published tier. Appended last in
+the table so it is chosen only when pinned. Because the Codex probe requires
+every catalogued slug, a Codex CLI whose catalog lacks it is now refused
+before spend.
+
+## `entry("codex", "gpt-6.2-astra", Tier::Frontier, Family::OpenAI),`
+
+Read from Codex CLI 0.172.0's `codex debug models` on the build machine on
+2026-11-25 (low through max, and ultra). Frontier and OpenAI by analogy with
+`gpt-6-astra` and `gpt-5.6-sol`, not from a published tier. Appended last in
+the table so it is chosen only when pinned. Because the Codex probe requires
+every catalogued slug, a Codex CLI whose catalog lacks it is now refused
+before spend.
 
 ## `pub fn example_binding(tier: Tier) -> CatalogEntry {`
 

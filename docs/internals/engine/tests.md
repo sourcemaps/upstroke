@@ -2,6 +2,19 @@
 
 Extended notes for [`src/engine/tests.rs`](../../../src/engine/tests.rs).
 
+The roster-upgrade regressions use `agent::codex::fixture::ConfiguredCodex`, an
+isolated shell CLI whose local roster can be changed without changing the run.
+`a_roster_upgrade_preserves_sequential_review_identity_until_a_compatible_retry`
+exercises schema 3 and schema 2 with and without recorded reviews. Both an absent
+added model and an added model missing an effort refuse before any worker build
+or event append; a restored full-roster retry and subsequent resume retain the
+original plan and actually review with `codex/gpt-6-astra`.
+`unrelated_codex_unavailability_keeps_the_sequential_optional_alternative_fallback`
+covers missing earlier models and efforts, malformed catalogs, failed commands
+whose stderr resembles the upgrade diagnostic, and genuinely absent CLIs.
+`schema_four_replays_its_codex_reviewer_after_roster_restoration` keeps schema-4
+required probing and reviewer identity across a refusal and compatible retry.
+
 ## `#![allow(clippy::disallowed_methods, clippy::disallowed_types)]`
 
 LEGACY-EFFECT: this module is in the **frozen legacy section** of

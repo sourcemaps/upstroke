@@ -525,39 +525,59 @@ fn parse_debug_models(text: &str) -> Result<DebugModels, UpstrokeError> {
 }
 
 fn validate_model_efforts(version: &str, models: &DebugModels) -> Result<(), UpstrokeError> {
-    for slug in catalog::known_models(ADAPTER_ID) {
-        let model = models
-            .models
-            .iter()
-            .find(|model| model.slug == slug)
-            .ok_or_else(|| UpstrokeError::Agent {
-                message: format!(
-                    "codex {version}'s local model catalog does not contain known model `{slug}`; \
-                     refusing before a configured `--model` fails at runtime"
-                ),
-            })?;
-        let supported: Vec<Effort> = model
-            .supported_reasoning_levels
-            .iter()
-            .filter_map(|level| Effort::parse(&level.effort))
-            .collect();
-        let missing: Vec<Effort> = Effort::ALL
-            .into_iter()
-            .filter(|effort| !supported.contains(effort))
-            .collect();
-        if !missing.is_empty() {
-            return Err(UpstrokeError::Agent {
-                message: format!(
-                    "codex {version} model `{slug}` does not advertise required reasoning \
-                     level(s): {}. Refusing before `model_reasoning_effort` can fail an attempt.",
-                    missing
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            });
-        }
+    const EARLIER_ROSTER: [&str; 2] = ["gpt-6-astra", "gpt-5.6-sol"];
+    for slug in EARLIER_ROSTER {
+        validate_model_effort(version, models, slug)?;
+    }
+    for slug in catalog::known_models(ADAPTER_ID)
+        .into_iter()
+        .filter(|slug| !EARLIER_ROSTER.contains(slug))
+    {
+        validate_model_effort(version, models, slug).map_err(|error| {
+            UpstrokeError::CodexRosterUpgrade {
+                message: error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_model_effort(
+    version: &str,
+    models: &DebugModels,
+    slug: &str,
+) -> Result<(), UpstrokeError> {
+    let model = models
+        .models
+        .iter()
+        .find(|model| model.slug == slug)
+        .ok_or_else(|| UpstrokeError::Agent {
+            message: format!(
+                "codex {version}'s local model catalog does not contain known model `{slug}`; \
+                 refusing before a configured `--model` fails at runtime"
+            ),
+        })?;
+    let supported: Vec<Effort> = model
+        .supported_reasoning_levels
+        .iter()
+        .filter_map(|level| Effort::parse(&level.effort))
+        .collect();
+    let missing: Vec<Effort> = Effort::ALL
+        .into_iter()
+        .filter(|effort| !supported.contains(effort))
+        .collect();
+    if !missing.is_empty() {
+        return Err(UpstrokeError::Agent {
+            message: format!(
+                "codex {version} model `{slug}` does not advertise required reasoning \
+                 level(s): {}. Refusing before `model_reasoning_effort` can fail an attempt.",
+                missing
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
     }
     Ok(())
 }
@@ -792,7 +812,284 @@ impl AdapterSource for CodexAdapter {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
+pub(crate) use tests::fixture;
+
+#[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    pub(crate) mod fixture {
+        use std::fmt::Write;
+        use std::fs;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::{Path, PathBuf};
+
+        use super::*;
+        use crate::runner::{RunnerError, RunnerRequest};
+
+        #[derive(Debug, Clone, Copy)]
+        pub(crate) enum Roster {
+            Full,
+            Earlier,
+            AddedEffortMissing,
+            EarlierModelMissing,
+            EarlierEffortMissing,
+            UnrelatedFailure,
+            Malformed,
+            Absent,
+        }
+
+        pub(crate) struct ConfiguredCodex {
+            directory: PathBuf,
+        }
+
+        impl ConfiguredCodex {
+            pub(crate) fn new(directory: &Path) -> Self {
+                fs::create_dir_all(directory).expect("isolated Codex fixture");
+                fs::write(
+                    directory.join("cli.sh"),
+                    r#"printf '%s\n' "$*" >> "$CODEX_FIXTURE/calls"
+case "$*" in
+  --version) echo 'codex-cli 0.147.0';;
+  'exec --help') echo '--json --sandbox --model -c, --config';;
+  'exec resume --help') echo '--json --model -c, --config';;
+  *upstroke_probe_deliberately_unknown*)
+    echo 'unknown key upstroke_probe_deliberately_unknown' >&2; exit 2;;
+  *upstroke-output-schema-must-not-exist.json*)
+    echo 'output schema upstroke-output-schema-must-not-exist.json does not exist' >&2; exit 2;;
+  'debug models')
+    if test -f "$CODEX_FIXTURE/failure"; then
+      cat "$CODEX_FIXTURE/failure" >&2; exit 2
+    fi
+    cat "$CODEX_FIXTURE/models.json";;
+  'login status') echo 'Logged in using ChatGPT';;
+  exec*) cat >/dev/null; cat "$CODEX_FIXTURE/verdict.jsonl";;
+  *) echo 'unexpected fixture command' >&2; exit 3;;
+esac
+"#,
+                )
+                .expect("fixture CLI");
+                let verdict = json!({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text":
+                        "```json\n{\"pass\":true,\"reasons\":[\"accepted\"],\"required_changes\":[]}\n```"}
+                });
+                fs::write(
+                    directory.join("verdict.jsonl"),
+                    format!("{verdict}\n{{\"type\":\"turn.completed\"}}\n"),
+                )
+                .expect("fixture verdict");
+                let stub = Self {
+                    directory: directory.to_path_buf(),
+                };
+                stub.roster(Roster::Full);
+                stub
+            }
+
+            pub(crate) fn roster(&self, roster: Roster) {
+                let failure = self.directory.join("failure");
+                if failure.exists() {
+                    fs::remove_file(&failure).expect("clear the scripted failure");
+                }
+                let absent = self.directory.join("absent");
+                if absent.exists() {
+                    fs::remove_file(&absent).expect("restore the configured CLI");
+                }
+                match roster {
+                    Roster::Absent => fs::write(absent, "absent").expect("absent CLI mode"),
+                    Roster::UnrelatedFailure => fs::write(
+                        failure,
+                        "codex roster upgrade: local model catalog does not contain gpt-6.2-sol",
+                    )
+                    .expect("stderr that must not classify the failure"),
+                    _ => {}
+                }
+                let models: Vec<_> = catalog::known_models(ADAPTER_ID)
+                    .into_iter()
+                    .filter(|slug| match roster {
+                        Roster::Earlier => ["gpt-6-astra", "gpt-5.6-sol"].contains(slug),
+                        Roster::EarlierModelMissing => *slug != "gpt-5.6-sol",
+                        _ => true,
+                    })
+                    .map(|slug| {
+                        let levels: Vec<_> = Effort::ALL
+                            .into_iter()
+                            .filter(|effort| {
+                                !(*effort == Effort::Max
+                                    && match roster {
+                                        Roster::AddedEffortMissing => slug == "gpt-6.2-astra",
+                                        Roster::EarlierEffortMissing => slug == "gpt-5.6-sol",
+                                        _ => false,
+                                    })
+                            })
+                            .map(|effort| json!({"effort": effort.to_string()}))
+                            .collect();
+                        json!({"slug": slug, "supported_reasoning_levels": levels})
+                    })
+                    .collect();
+                let text = if matches!(roster, Roster::Malformed) {
+                    "not JSON".to_owned()
+                } else {
+                    json!({"models": models}).to_string()
+                };
+                fs::write(self.directory.join("models.json"), text)
+                    .expect("configured local roster");
+            }
+
+            pub(crate) fn calls(&self) -> String {
+                fs::read_to_string(self.directory.join("calls")).expect("CLI calls")
+            }
+
+            fn command(&self, mut spec: CommandSpec) -> CommandSpec {
+                assert_eq!(spec.program, "codex");
+                let mut directory = String::new();
+                for byte in self.directory.as_os_str().as_bytes() {
+                    write!(directory, "\\0{byte:03o}").expect("octal fixture directory");
+                }
+                let mode = if self.directory.join("absent").exists() {
+                    "absent"
+                } else {
+                    "present"
+                };
+                spec.program = "sh".to_owned();
+                let mut args = vec![
+                    "-c".to_owned(),
+                    r#"CODEX_FIXTURE=$(printf '%b_' "$1")
+CODEX_FIXTURE=${CODEX_FIXTURE%_}
+export CODEX_FIXTURE
+mode=$2
+shift 2
+if test "$mode" = absent; then
+  exec "$CODEX_FIXTURE/missing-cli" "$@"
+fi
+exec sh "$CODEX_FIXTURE/cli.sh" "$@"
+"#
+                    .to_owned(),
+                    "codex-fixture".to_owned(),
+                    directory,
+                    mode.to_owned(),
+                ];
+                args.append(&mut spec.args);
+                spec.args = args;
+                spec
+            }
+        }
+
+        struct ConfiguredRunner<'a> {
+            cli: &'a ConfiguredCodex,
+            runner: &'a dyn Runner,
+        }
+
+        impl crate::runner::contract::tests::InlineRunner for ConfiguredRunner<'_> {
+            fn run_inline(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+                let mut configured = request.clone();
+                configured.command = self.cli.command(configured.command);
+                self.runner.run_blocking(&configured)
+            }
+        }
+
+        impl AgentAdapter for ConfiguredCodex {
+            fn id(&self) -> &'static str {
+                ADAPTER_ID
+            }
+
+            fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {
+                CodexAdapter.probe(&ConfiguredRunner { cli: self, runner })
+            }
+
+            fn discover(
+                &self,
+                runner: &dyn Runner,
+                caps: &Caps,
+            ) -> Result<Discovery, UpstrokeError> {
+                CodexAdapter.discover(&ConfiguredRunner { cli: self, runner }, caps)
+            }
+
+            fn build(&self, run: &TaskRun) -> Result<CommandSpec, UpstrokeError> {
+                CodexAdapter.build(run).map(|spec| self.command(spec))
+            }
+
+            fn parse(&self, output: &ProcessOutput) -> Result<Outcome, UpstrokeError> {
+                CodexAdapter.parse(output)
+            }
+        }
+
+        impl AdapterSource for ConfiguredCodex {
+            fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+                (id == ADAPTER_ID).then_some(self)
+            }
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn configured_fixture_preserves_directory_bytes_through_the_runner() {
+            use crate::runner::invocation::AttemptRole;
+            use crate::runner::{AgentId, InvocationId, worker_request};
+            use crate::topology::events::{AttemptNumber, GenerationId};
+            use crate::topology::registry::TaskKey;
+
+            let tree =
+                crate::rundir::scratch_tree::acquire(&std::env::temp_dir(), "codex-fixture-bytes")
+                    .expect("isolated fixture tree");
+            let directory = tree.path().join(std::ffi::OsStr::from_bytes(
+                b"codex-\xff '\"\\$(exit 19);`exit 23`\n\n",
+            ));
+            assert!(directory.to_str().is_none());
+            let codex = ConfiguredCodex::new(&directory);
+            let runner = crate::runner::host::HostRunner::new();
+            let caps = codex
+                .probe(&runner)
+                .expect("probe in a byte-valued directory");
+            assert_eq!(caps.version, "0.147.0");
+            let discovery = codex
+                .discover(&runner, &caps)
+                .expect("discovery in a byte-valued directory");
+            assert_eq!(discovery.auth, AuthState::Authenticated);
+            assert_eq!(discovery.models, catalog::known_models(ADAPTER_ID));
+
+            let mut command = codex
+                .build(&run(PermissionMode::ReadOnly, None))
+                .expect("configured execution command");
+            command.stdin = b"offline fixture prompt".to_vec();
+            let request = worker_request(
+                command,
+                directory,
+                AgentId::new(ADAPTER_ID),
+                Duration::from_secs(60),
+                InvocationId::attempt(
+                    TaskKey(0),
+                    GenerationId(0),
+                    AttemptNumber(1),
+                    AttemptRole::Worker,
+                    0,
+                ),
+            );
+            let output = runner
+                .run_blocking(&request)
+                .expect("execute the local stub");
+            assert_eq!(output.code, Some(0), "{output:?}");
+            let outcome = codex.parse(&output).expect("parse the fixture verdict");
+            assert_eq!(outcome.status, OutcomeStatus::Completed);
+            assert!(
+                outcome
+                    .detail
+                    .expect("fixture verdict")
+                    .contains("accepted")
+            );
+
+            let calls = codex.calls();
+            assert!(calls.lines().any(|call| call == "--version"), "{calls}");
+            assert!(calls.lines().any(|call| call == "debug models"), "{calls}");
+            assert!(calls.lines().any(|call| call == "login status"), "{calls}");
+            codex.roster(Roster::Absent);
+            let error = codex.probe(&runner).expect_err("missing local executable");
+            assert!(matches!(error, UpstrokeError::Agent { .. }), "{error}");
+            assert_eq!(codex.calls(), calls, "absence must not enter the stub");
+            codex.roster(Roster::Full);
+            codex.probe(&runner).expect("restored local executable");
+        }
+    }
+
     use std::collections::BTreeSet;
 
     use super::*;
@@ -1053,7 +1350,7 @@ mod tests {
     #[test]
     fn model_catalog_requires_every_effort_for_each_known_codex_model() {
         let known = catalog::known_models(ADAPTER_ID);
-        for slug in ["gpt-6-astra", "gpt-5.6-sol"] {
+        for slug in ["gpt-6-astra", "gpt-5.6-sol", "gpt-6.2-sol", "gpt-6.2-astra"] {
             assert!(known.contains(&slug), "`{slug}` is checked: {known:?}");
         }
         let required: Vec<String> = Effort::ALL.into_iter().map(|e| e.to_string()).collect();
