@@ -56,6 +56,17 @@ Deliberately not the display id. See the module documentation for why.
 
 Position of this key's entry in the dense registry.
 
+## `impl TaskKey` › `pub(crate) fn range(len: usize) -> impl DoubleEndedIterator<Item = Self> {`
+
+The representable keys of a dense registry or its task-state vector, shared
+by the selector and fold admissibility. Empty lengths yield nothing;
+otherwise the range is inclusive from zero through `min(len - 1, u32::MAX)`.
+Subtracting before narrowing keeps the maximum key when the length exceeds
+`u32::MAX`, and clamping the endpoint visits that key only once. Checked
+subtraction handles zero without underflow. No arithmetic needs to represent
+`u32::MAX + 1` in a `usize` on a 32-bit platform. The iterator allocates
+nothing and supports inspecting either endpoint without scanning the range.
+
 ## `pub enum Origin {`
 
 Where an entry came from.

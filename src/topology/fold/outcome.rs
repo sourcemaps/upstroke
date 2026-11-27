@@ -33,10 +33,7 @@ impl RunState {
     }
 
     pub(super) fn structurally_admissible(&self) -> bool {
-        let keys = u32::try_from(self.tasks.len()).unwrap_or(u32::MAX);
-        (0..keys)
-            .map(TaskKey)
-            .any(|key| self.ready(key) || self.ready_retry(key))
+        TaskKey::range(self.tasks.len()).any(|key| self.ready(key) || self.ready_retry(key))
             || self.integration_admissible()
     }
 

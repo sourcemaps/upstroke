@@ -21,6 +21,14 @@ impl TaskKey {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    pub(crate) fn range(len: usize) -> impl DoubleEndedIterator<Item = Self> {
+        len.checked_sub(1)
+            .map(|last| u32::try_from(last).unwrap_or(u32::MAX))
+            .into_iter()
+            .flat_map(|last| 0..=last)
+            .map(Self)
+    }
 }
 
 impl fmt::Display for TaskKey {

@@ -49,6 +49,25 @@ const ALPHA: TaskKey = TaskKey(1);
 const MID: TaskKey = TaskKey(2);
 const BETA: TaskKey = TaskKey(3);
 
+#[test]
+fn the_last_task_key_is_reached_at_every_length() {
+    assert_eq!(TaskKey::range(0).next_back(), None);
+    assert!(TaskKey::range(1).eq([TaskKey(0)]));
+    assert!(TaskKey::range(3).eq([TaskKey(0), TaskKey(1), TaskKey(2)]));
+    for (len, last) in [
+        (u64::from(u32::MAX), u32::MAX - 1),
+        (u64::from(u32::MAX) + 1, u32::MAX),
+        (u64::from(u32::MAX) + 2, u32::MAX),
+    ] {
+        if let Ok(len) = usize::try_from(len) {
+            let mut keys = TaskKey::range(len);
+            assert_eq!(keys.next(), Some(TaskKey(0)));
+            assert_eq!(keys.next_back(), Some(TaskKey(last)));
+            assert_eq!(keys.next_back(), Some(TaskKey(last - 1)));
+        }
+    }
+}
+
 fn sha(label: &str) -> CommitSha {
     let mut value: String = label
         .bytes()

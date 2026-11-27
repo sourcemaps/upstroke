@@ -453,7 +453,7 @@ fn eligible_integration(fold: &TopologyFold) -> Option<CandidateRef> {
 }
 
 fn first_ready_retry(fold: &TopologyFold) -> Option<(TaskKey, GenerationId, AttemptNumber)> {
-    keys(fold).find_map(|key| {
+    keys(fold.registry().map_or(0, |registry| registry.len())).find_map(|key| {
         if !fold.ready_retry(key) {
             return None;
         }
@@ -471,7 +471,7 @@ fn first_ready_retry(fold: &TopologyFold) -> Option<(TaskKey, GenerationId, Atte
 }
 
 fn first_ready(fold: &TopologyFold) -> Option<(TaskKey, GenerationId, bool)> {
-    keys(fold).find_map(|key| {
+    keys(fold.registry().map_or(0, |registry| registry.len())).find_map(|key| {
         if let Some(generation) = fold.eligible_continuation(key) {
             return Some((key, generation, true));
         }
@@ -500,11 +500,8 @@ fn open_generation(fold: &TopologyFold, key: TaskKey) -> Option<GenerationId> {
         .map(|generation| generation.id)
 }
 
-fn keys(fold: &TopologyFold) -> impl Iterator<Item = TaskKey> + '_ {
-    let len = fold.registry().map_or(0, |registry| {
-        u32::try_from(registry.len()).unwrap_or(u32::MAX)
-    });
-    (0..len).map(TaskKey)
+fn keys(len: usize) -> impl DoubleEndedIterator<Item = TaskKey> {
+    TaskKey::range(len)
 }
 
 fn backoff_pending(fold: &TopologyFold) -> bool {

@@ -11,6 +11,97 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Libtest's terse listing emits one `<qualified name>: test` record per test.
+/// The trailing module separator prevents a similarly named sibling matching.
+fn lists_test_under(listing: &str, prefix: &str) -> bool {
+    !prefix.is_empty()
+        && prefix.ends_with("::")
+        && listing
+            .lines()
+            .filter_map(|line| line.strip_suffix(": test"))
+            .filter_map(|name| name.strip_prefix(prefix))
+            .any(|tail| {
+                tail.split("::")
+                    .all(|segment| !segment.is_empty() && !segment.contains(char::is_whitespace))
+            })
+}
+
+#[test]
+fn registered_test_matching_accepts_direct_and_nested_tests() {
+    for name in ["adapter::tests::direct", "adapter::tests::nested::test"] {
+        assert!(
+            lists_test_under(&format!("{name}: test\n"), "adapter::tests::"),
+            "{name}: a registered test under the exact module is evidence"
+        );
+    }
+}
+
+#[test]
+fn registered_test_matching_rejects_siblings_empty_modules_and_source_text() {
+    for listing in [
+        "",
+        "0 tests, 0 benchmarks\n",
+        "adapter::sibling::test: test\n",
+        "adapter::tests_extra::test: test\n",
+        "other::adapter::tests::test: test\n",
+        "adapter::tests: test\n",
+        "adapter::tests::: test\n",
+        "adapter::tests::nested::: test\n",
+        "adapter::tests::test: benchmark\n",
+        "adapter::tests::test\n",
+        "// adapter::tests::test: test\n",
+        "adapter::tests::not a name: test\n",
+        "mod tests {}\nmod sibling { #[test] fn test() {} }\n",
+        "src/adapter/tests.rs: #[test] fn test() {}\n",
+    ] {
+        assert!(
+            !lists_test_under(listing, "adapter::tests::"),
+            "an empty module has no registered test of its own: {listing:?}"
+        );
+    }
+    for prefix in ["", "adapter::tests", "adapter::test"] {
+        assert!(
+            !lists_test_under("adapter::tests::test: test\n", prefix),
+            "{prefix:?}: a prefix must end at a module boundary"
+        );
+    }
+}
+
+#[test]
+fn every_adapter_exclusion_names_a_module_that_holds_a_test() {
+    let exe = std::env::current_exe().expect("the compiled test binary has a path");
+    let command =
+        crate::runner::CommandSpec::new(exe.to_str().expect("the test executable path is UTF-8"))
+            .arg("--list")
+            .arg("--format=terse");
+    let request = crate::runner::gate_request(
+        command,
+        repo_root(),
+        std::time::Duration::from_secs(60),
+        crate::runner::InvocationId::attempt(
+            crate::topology::registry::TaskKey(0),
+            crate::topology::events::GenerationId(0),
+            crate::topology::events::AttemptNumber(1),
+            crate::runner::invocation::AttemptRole::Gate(1),
+            0,
+        ),
+    );
+    let runner = crate::runner::host::HostRunner::new();
+    let listed = crate::runner::Runner::run_blocking(&runner, &request)
+        .expect("libtest listing completes through the bounded host runner");
+    assert!(
+        listed.code == Some(0) && !listed.timed_out && !listed.output_limited,
+        "libtest must successfully list the complete compiled suite: {listed:?}"
+    );
+    assert!(!ADAPTER_UNIT_TEST_MODULES.is_empty());
+    for prefix in ADAPTER_UNIT_TEST_MODULES {
+        assert!(
+            lists_test_under(&listed.stdout, prefix),
+            "{prefix}: no registered test under this excluded module in the compiled suite"
+        );
+    }
+}
+
 fn rust_sources(dir: &Path, into: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
