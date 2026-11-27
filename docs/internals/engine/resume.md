@@ -2,6 +2,14 @@
 
 Extended notes for [`src/engine/resume.rs`](../../../src/engine/resume.rs).
 
+Sequential preflight refuses the specific Codex roster-upgrade mismatch before
+this module appends any review identity or schema upgrade. Schema-2 logs with
+and without recorded reviews and schema-3 recorded reviews retain their durable
+bytes on that refusal. A compatible CLI retry preserves the independent
+reviewer, including through the subsequent replay of a schema-2 upgrade. Other
+pre-existing optional-alternative probe failures retain their prior fallback;
+schema-4 replay continues through its own required probe set.
+
 ## `#![allow(clippy::disallowed_methods)]`
 
 LEGACY-EFFECT: this module is in the **frozen legacy section** of

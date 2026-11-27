@@ -117,6 +117,49 @@ The strict local parser proves the exact key and the two role policy values. The
 separate zero-spend evidence for each model × effort pair, so every known Codex model must expose
 every shared effort level before a run can start.
 
+## `fn validate_model_efforts(version: &str, models: &DebugModels) -> Result<(), UpstrokeError> {`
+
+The earlier roster (`gpt-6-astra`, `gpt-5.6-sol`) is a historical compatibility
+boundary, not a second current model catalog. Validate it first with the same
+per-model validator, then validate the remaining `catalog::known_models` entries.
+Only a failure in that second group becomes `CodexRosterUpgrade`; the entire
+earlier roster and all preceding CLI contract probes must have passed. A missing
+model and a missing effort both qualify. Absent binaries, failed commands,
+malformed catalogs and earlier-contract failures retain their ordinary errors.
+No arbitrary stderr string is treated as roster evidence.
+
+This keeps the global four-model, five-effort probe strict. The typed distinction
+lets sequential preflight preserve independent review identity and lets connect
+preserve a saved Codex pool without either caller maintaining a model list or
+repeating a probe. The refusal tells the operator to restore a compatible CLI
+and retry. `fixture::ConfiguredCodex` runs isolated shell stubs through the real
+runner and this adapter's probe, discovery, build and parser for those regression
+tests; its configured paths never select a provider CLI or account. The shared
+Unix-only fixture lives inline in `tests::fixture`, re-exported as `fixture` for
+the engine and connect tests. It inherits this adapter's filesystem allowances.
+The configured runner clones each request as an owned snapshot, retaining the
+real invocation identity and execution boundary while substituting the local CLI.
+
+## `fn command(&self, mut spec: CommandSpec) -> CommandSpec`
+
+The Unix fixture encodes its directory's raw `OsStr` bytes as ASCII octal escapes
+in a separate argument. A fixed shell wrapper decodes them with `printf %b` and
+exports `CODEX_FIXTURE`; neither the directory nor the script path passes through
+a lossy display string. An underscore appended inside command substitution and
+removed afterward preserves trailing newlines. The original CLI arguments remain
+separate arguments, forwarded with quoted `"$@"`. The absent mode executes the
+missing local `missing-cli` path through the same wrapper, producing an ordinary
+command failure without selecting a provider CLI.
+
+`configured_fixture_preserves_directory_bytes_through_the_runner` exercises probe,
+discovery, execution, absence and restoration under a directory containing invalid
+UTF-8, shell metacharacters and trailing newlines. It checks the local call record
+and parsed verdict through the real host runner. This test is compiled on Linux only
+and run by the `test-linux` legs; APFS refuses the name with `EILSEQ` (run
+45895906029, `test (macos-latest, 12 of 12)`). A Linux filesystem that refuses the
+name fails the test at the fixture's `create_dir_all`. The fixture still runs on
+macOS through the connect and engine tests.
+
 ## `fn probe(&self, runner: &dyn Runner) -> Result<Caps, UpstrokeError> {` › `json_output: true,`
 
 Asked for and parsed, unlike Copilot's route, where the flag would promise an envelope no caller

@@ -27836,6 +27836,257 @@ impl AgentAdapter for AbsentAlternativeCli {
 const FRONTIER_IMPLEMENTS_CONFIG: &str =
     "[routing]\nimplement = { chain = [\"frontier\"], attempts_per = 1 }\n";
 
+#[cfg(unix)]
+struct RosterAdapters<'a> {
+    worker: &'a dyn AgentAdapter,
+    codex: &'a crate::agent::codex::fixture::ConfiguredCodex,
+}
+
+#[cfg(unix)]
+impl AdapterSource for RosterAdapters<'_> {
+    fn get(&self, id: &str) -> Option<&dyn AgentAdapter> {
+        if id == self.worker.id() {
+            Some(self.worker)
+        } else {
+            self.codex.get(id)
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_roster_upgrade_preserves_sequential_review_identity_until_a_compatible_retry() {
+    use crate::agent::codex::fixture::{ConfiguredCodex, Roster};
+
+    for (schema, recorded) in [(3, true), (2, true), (2, false)] {
+        for mismatch in [Roster::Earlier, Roster::AddedEffortMissing] {
+            let (tree, repo) = temp_engine_repo("roster-resume");
+            seed(
+                &repo,
+                "## Work\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+                Some(&format!(
+                    "{FRONTIER_IMPLEMENTS_CONFIG}\n[interaction]\nmode = \"never\"\n"
+                )),
+            );
+            let codex = ConfiguredCodex::new(&tree.path().join("codex"));
+            let initial_worker = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+            let initial = run_with(
+                &options(&repo),
+                &RosterAdapters {
+                    worker: &initial_worker,
+                    codex: &codex,
+                },
+            )
+            .expect("a compatible run parks with an independent reviewer");
+            assert_eq!(initial.outcome(), RunOutcome::Parked);
+            let paths = paths_of(&repo, &initial.run_id);
+            let original = events::recorded_reviews(&events_of(&repo, &initial.run_id))
+                .cloned()
+                .expect("review plan recorded");
+            assert_eq!(
+                original
+                    .alternative
+                    .as_ref()
+                    .map(|binding| binding.model.as_str()),
+                Some("gpt-6-astra")
+            );
+            if schema == 2 {
+                rewrite_run_started_as_schema_two_missing_review_fields(
+                    &paths,
+                    &["pass_timeout_secs", "enabled", "alternative_available"],
+                );
+                if !recorded {
+                    strip_run_started_field(&paths, "reviews");
+                }
+            }
+            let before = fs::read(paths.events()).expect("persisted run");
+            let worker = CountedStub::new();
+            codex.roster(mismatch);
+            let error = resume_with(
+                &resume_options(&repo, &initial.run_id),
+                &RosterAdapters {
+                    worker: &worker,
+                    codex: &codex,
+                },
+            )
+            .expect_err("the added requirement cannot erase an independent reviewer")
+            .to_string();
+            assert!(error.contains("codex roster upgrade"), "{error}");
+            assert!(error.contains("Restore a compatible Codex CLI"), "{error}");
+            assert!(error.contains("retry the original command"), "{error}");
+            assert_eq!(worker.asked().1, 0, "no worker or primary review built");
+            assert_eq!(fs::read(paths.events()).expect("unchanged log"), before);
+            assert!(!codex.calls().lines().any(|line| line.contains("--model")));
+
+            codex.roster(Roster::Full);
+            let retry_worker = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+            let answer = || {
+                ScriptedAnswers::new(vec![Answer::Answered {
+                    text: "continue with the original plan".to_owned(),
+                }])
+            };
+            let retry = resume_harness(
+                &resume_options(&repo, &initial.run_id),
+                &Harness {
+                    adapters: &RosterAdapters {
+                        worker: &retry_worker,
+                        codex: &codex,
+                    },
+                    answers: Some(&answer()),
+                    sleeper: None,
+                },
+            )
+            .expect("restoring the full roster permits the original plan");
+            assert_eq!(retry.outcome(), RunOutcome::Parked);
+            let established = events::recorded_complete_reviews(&events_of(&repo, &initial.run_id))
+                .cloned()
+                .expect("the restored retry records complete review identity");
+            assert_eq!(established, original);
+            let completed = resume_harness(
+                &resume_options(&repo, &initial.run_id),
+                &Harness {
+                    adapters: &RosterAdapters {
+                        worker: &worker,
+                        codex: &codex,
+                    },
+                    answers: Some(&answer()),
+                    sleeper: None,
+                },
+            )
+            .expect("subsequent four-model resume replays the preserved plan");
+            assert_eq!(completed.outcome(), RunOutcome::Complete);
+            assert_eq!(task(&completed, "t1").review_models, ["gpt-6-astra"]);
+            assert!(codex.calls().contains("--model gpt-6-astra"));
+            assert_eq!(
+                events::recorded_complete_reviews(&events_of(&repo, &initial.run_id)),
+                Some(&original)
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unrelated_codex_unavailability_keeps_the_sequential_optional_alternative_fallback() {
+    use crate::agent::codex::fixture::{ConfiguredCodex, Roster};
+
+    for unavailability in [
+        Roster::EarlierModelMissing,
+        Roster::EarlierEffortMissing,
+        Roster::UnrelatedFailure,
+        Roster::Malformed,
+        Roster::Absent,
+    ] {
+        let (tree, repo) = temp_engine_repo("roster-optional");
+        seed(
+            &repo,
+            "## Work\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+            Some(&format!(
+                "{FRONTIER_IMPLEMENTS_CONFIG}\n[interaction]\nmode = \"never\"\n"
+            )),
+        );
+        let codex = ConfiguredCodex::new(&tree.path().join("codex"));
+        let initial_worker = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+        let initial = run_with(
+            &options(&repo),
+            &RosterAdapters {
+                worker: &initial_worker,
+                codex: &codex,
+            },
+        )
+        .expect("compatible initial run");
+        assert_eq!(initial.outcome(), RunOutcome::Parked);
+        codex.roster(unavailability);
+        let worker = TopologyStub::new(TOPOLOGY_STUB_EDIT, 0);
+        let answers = ScriptedAnswers::new(vec![Answer::Answered {
+            text: "continue".to_owned(),
+        }]);
+        let resumed = resume_harness(
+            &resume_options(&repo, &initial.run_id),
+            &Harness {
+                adapters: &RosterAdapters {
+                    worker: &worker,
+                    codex: &codex,
+                },
+                answers: Some(&answers),
+                sleeper: None,
+            },
+        )
+        .expect("pre-existing unavailability still permits optional fallback");
+        assert_eq!(resumed.outcome(), RunOutcome::Complete);
+        assert_eq!(task(&resumed, "t1").review_models, ["claude-opus-5"]);
+        assert!(
+            resumed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("same-model review"))
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn schema_four_replays_its_codex_reviewer_after_roster_restoration() {
+    use crate::agent::codex::fixture::{ConfiguredCodex, Roster};
+
+    let (tree, repo) = temp_engine_repo("roster-schema4");
+    seed(
+        &repo,
+        "## Work\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        Some(FRONTIER_IMPLEMENTS_CONFIG),
+    );
+    let codex = ConfiguredCodex::new(&tree.path().join("codex"));
+    let initial_worker = TopologyStub::new(TOPOLOGY_STUB_EDIT, 1);
+    let initial = run_with(
+        &topology_options(&repo),
+        &RosterAdapters {
+            worker: &initial_worker,
+            codex: &codex,
+        },
+    )
+    .expect("schema-4 run with the full roster");
+    assert_eq!(initial.outcome(), RunOutcome::Parked);
+    let first = first_line_of_the_log(&repo, &initial.run_id);
+    assert_eq!(first["data"]["schema"], 4);
+    assert_eq!(
+        first["data"]["probed_agents"],
+        serde_json::json!(["claude-code", "codex"])
+    );
+    codex.roster(Roster::Earlier);
+    let worker = CountedStub::new();
+    let error = resume_with(
+        &resume_options(&repo, &initial.run_id),
+        &RosterAdapters {
+            worker: &worker,
+            codex: &codex,
+        },
+    )
+    .expect_err("schema 4 still requires its recorded probe set")
+    .to_string();
+    assert!(error.contains("codex roster upgrade"), "{error}");
+    assert_eq!(worker.asked().1, 0);
+    codex.roster(Roster::Full);
+    let answers = ScriptedAnswers::new(vec![Answer::Answered {
+        text: "continue".to_owned(),
+    }]);
+    let resumed = resume_harness(
+        &resume_options(&repo, &initial.run_id),
+        &Harness {
+            adapters: &RosterAdapters {
+                worker: &worker,
+                codex: &codex,
+            },
+            answers: Some(&answers),
+            sleeper: None,
+        },
+    )
+    .expect("schema-4 retry after restoring the roster");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete);
+    assert_eq!(task(&resumed, "t1").review_models, ["gpt-6-astra"]);
+    assert_eq!(first_line_of_the_log(&repo, &initial.run_id), first);
+    until_released(&repo, &initial.run_id);
+}
+
 const FRONTIER_IMPLEMENTS_CROSS_FAMILY_OFF_CONFIG: &str = "[routing]\n\
      implement = { chain = [\"frontier\"], attempts_per = 1 }\n\
      review = { cross_family = false }\n";

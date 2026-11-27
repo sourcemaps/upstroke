@@ -108,6 +108,8 @@ pub const CATALOG: &[CatalogEntry] = &[
         Family::Anthropic,
     ),
     entry("codex", "gpt-5.6-sol", Tier::Frontier, Family::OpenAI),
+    entry("codex", "gpt-6.2-sol", Tier::Frontier, Family::OpenAI),
+    entry("codex", "gpt-6.2-astra", Tier::Frontier, Family::OpenAI),
 ];
 
 pub fn lookup(agent: &str, model: &str) -> Option<CatalogEntry> {
@@ -343,6 +345,33 @@ mod tests {
             Some("claude-opus-5"),
             "claude-code's first frontier entry, the repair ladder's pick, is still the default Opus"
         );
+    }
+
+    #[test]
+    fn the_two_6_2_codex_models_are_catalogued_last_and_change_no_pick() {
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let found = lookup("codex", model).expect("the Codex 6.2 model is catalogued");
+            assert_eq!((found.tier, found.family), (Tier::Frontier, Family::OpenAI));
+        }
+        assert_eq!(
+            known_models("codex"),
+            ["gpt-6-astra", "gpt-5.6-sol", "gpt-6.2-sol", "gpt-6.2-astra"]
+        );
+        assert_eq!(
+            different_family_at(Tier::Frontier, Family::Anthropic, everything)
+                .map(|picked| (picked.agent, picked.model)),
+            Some(("codex", "gpt-6-astra"))
+        );
+        for (agent, model) in [
+            ("codex", "gpt-6.2"),
+            ("codex", "gpt-6-2-sol"),
+            ("claude-code", "gpt-6.2-sol"),
+        ] {
+            assert!(
+                lookup(agent, model).is_none(),
+                "{agent}/{model} must stay unknown"
+            );
+        }
     }
 
     #[test]
