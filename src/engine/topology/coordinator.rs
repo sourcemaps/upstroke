@@ -24945,8 +24945,11 @@ git cat-file -e 'HEAD^{tree}'
     }
 
     fn f_policy_cases(width: usize) -> Vec<(String, Result<(), String>)> {
-        let three = f_stale_tasks();
-        let two = f_two_stale_tasks();
+        let what = if width == 3 {
+            "f-c1-4-width-three"
+        } else {
+            "f-c1-4-width-one"
+        };
         let mut cases = Vec::new();
         let shapes: [(&str, bool, bool, Option<&'static str>); 4] = [
             ("pruned whole, the store kept", true, true, None),
@@ -24955,92 +24958,77 @@ git cat-file -e 'HEAD^{tree}'
             ("commondir removed", true, true, Some("commondir")),
         ];
         for (index, (label, alpha, keeper, name)) in shapes.into_iter().enumerate() {
-            let tag = format!("f-c1-4-w{width}-{index}");
-            let tasks: &[WideTask] = if alpha { &three } else { &two };
-            let act_for = move |base: PathBuf| -> FCheckoutAct {
-                match name {
-                    Some(name) => f_removing(name),
-                    None => f_pruning(base),
-                }
-            };
-            let policy_base = std::sync::Arc::new(std::sync::Mutex::new(None::<PathBuf>));
-            let deferred: FCheckoutAct = {
-                let policy_base = Arc::clone(&policy_base);
-                Box::new(move |checkout| {
-                    let base = policy_base
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone()
-                        .expect("the base is set before the run");
-                    act_for(base)(checkout);
-                })
-            };
-            let policy = FPolicy::acting("merge", deferred);
-            let (wide, result) = if width == 3 {
-                let mut wide =
-                    Wide::durable(&tag, tasks, 3, WidePlans::default(), holding(tasks, &[]));
-                *policy_base
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(wide.env.fixture.base.clone());
-                if keeper {
-                    f_keep_the_store(&wide);
-                }
-                let mut hooks = wide.env.hooks();
-                let mut pipelines = wide.env.pipelines();
-                pipelines.input_policy = Arc::new(policy);
-                let runner = Arc::clone(&wide.env.runner);
-                let mut scheduler = if alpha {
-                    Scheduler::scripted(&runner, Box::new(alpha_waits_for_gammas_integration))
+            cases.push(f_bounded_case(format!("{what} {label}"), move || {
+                let three = f_stale_tasks();
+                let two = f_two_stale_tasks();
+                let tag = format!("f-c1-4-w{width}-{index}");
+                let tasks: &[WideTask] = if alpha { &three } else { &two };
+                let act_for = move |base: PathBuf| -> FCheckoutAct {
+                    match name {
+                        Some(name) => f_removing(name),
+                        None => f_pruning(base),
+                    }
+                };
+                let (wide, result) = if width == 3 {
+                    let mut wide =
+                        Wide::durable(&tag, tasks, 3, WidePlans::default(), holding(tasks, &[]));
+                    let policy = FPolicy::acting("merge", act_for(wide.env.fixture.base.clone()));
+                    if keeper {
+                        f_keep_the_store(&wide);
+                    }
+                    let mut hooks = wide.env.hooks();
+                    let mut pipelines = wide.env.pipelines();
+                    pipelines.input_policy = Arc::new(policy);
+                    let runner = Arc::clone(&wide.env.runner);
+                    let mut scheduler = if alpha {
+                        Scheduler::scripted(&runner, Box::new(alpha_waits_for_gammas_integration))
+                    } else {
+                        Scheduler::first(&runner)
+                    };
+                    let result = wide.run.run_concurrently(
+                        &wide.env.seams(),
+                        &pipelines,
+                        &mut hooks,
+                        Some(&mut scheduler),
+                    );
+                    drop(scheduler);
+                    drop(hooks);
+                    (wide, result)
                 } else {
-                    Scheduler::first(&runner)
+                    let mut wide = f_gamma_queued(
+                        &tag,
+                        tasks,
+                        RecordingRunner::new().answering(wide_responder(tasks, &[])),
+                    );
+                    let policy = FPolicy::acting("merge", act_for(wide.env.fixture.base.clone()));
+                    if keeper {
+                        f_keep_the_store(&wide);
+                    }
+                    let mut hooks = wide.env.hooks();
+                    let seams = crate::engine::topology::run::RunSeams {
+                        input_policy: &policy,
+                        ..wide.env.seams()
+                    };
+                    let result = f_step_to_error(&mut wide.run, &seams, &mut hooks);
+                    drop(hooks);
+                    (wide, result)
                 };
-                let result = wide.run.run_concurrently(
-                    &wide.env.seams(),
-                    &pipelines,
-                    &mut hooks,
-                    Some(&mut scheduler),
-                );
-                drop(scheduler);
-                drop(hooks);
-                (wide, result)
-            } else {
-                let mut wide = f_gamma_queued(
-                    &tag,
-                    tasks,
-                    RecordingRunner::new().answering(wide_responder(tasks, &[])),
-                );
-                *policy_base
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(wide.env.fixture.base.clone());
-                if keeper {
-                    f_keep_the_store(&wide);
-                }
-                let mut hooks = wide.env.hooks();
-                let seams = crate::engine::topology::run::RunSeams {
-                    input_policy: &policy,
-                    ..wide.env.seams()
+                let outcome = match result {
+                    Err(UpstrokeError::RegistryRefused { message })
+                        if message.contains("is not used")
+                            && message.contains("merge")
+                            && !kinds_of(&wide.env.durable_events())
+                                .contains(&"merge_verification_unavailable") =>
+                    {
+                        Ok(())
+                    }
+                    other => Err(format!(
+                        "{other:?}: {:?}",
+                        kinds_of(&wide.env.durable_events())
+                    )),
                 };
-                let result = f_step_to_error(&mut wide.run, &seams, &mut hooks);
-                drop(hooks);
-                (wide, result)
-            };
-            let outcome = match result {
-                Err(UpstrokeError::RegistryRefused { message })
-                    if message.contains("is not used")
-                        && message.contains("merge")
-                        && !kinds_of(&wide.env.durable_events())
-                            .contains(&"merge_verification_unavailable") =>
-                {
-                    Ok(())
-                }
-                other => Err(format!(
-                    "{other:?}: {:?}",
-                    kinds_of(&wide.env.durable_events())
-                )),
-            };
-            cases.push((label.to_owned(), outcome));
+                (label.to_owned(), outcome)
+            }));
         }
         cases
     }
@@ -25058,13 +25046,13 @@ git cat-file -e 'HEAD^{tree}'
     #[test]
     fn a_review_input_read_failing_in_a_staging_checkout_whose_registration_is_not_whole_is_refused_at_width_three()
      {
-        bounded("f-c1-4-width-three", || f_report(&f_policy_cases(3)));
+        f_report(&f_policy_cases(3));
     }
 
     #[test]
     fn a_review_input_read_failing_in_a_staging_checkout_whose_registration_is_not_whole_is_refused_at_width_one()
      {
-        bounded("f-c1-4-width-one", || f_report(&f_policy_cases(1)));
+        f_report(&f_policy_cases(1));
     }
 
     fn f_unavailable_of_gamma(events: &[TopologyEvent]) -> bool {
@@ -25079,8 +25067,8 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_review_input_git_error_in_a_whole_staging_registration_settles_an_outage_at_both_widths() {
-        bounded("f-c1-4-control", || {
-            for width in [3, 1] {
+        for width in [3, 1] {
+            bounded(&format!("f-c1-4-control width {width}"), move || {
                 let tasks = f_stale_tasks();
                 let policy = FPolicy::acting("merge", f_corrupting());
                 let tag = format!("f-c1-4-control-w{width}");
@@ -25100,8 +25088,8 @@ git cat-file -e 'HEAD^{tree}'
                     "width {width}: a corrupt index in a whole registration is an outage: {:?}",
                     kinds_of(&events)
                 );
-            }
-        });
+            });
+        }
     }
 
     fn f_answer_case(width: usize, delete: bool) -> (Wide, Result<Progress, UpstrokeError>) {
@@ -25117,9 +25105,10 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_review_input_problem_read_through_a_deleted_staging_index_is_refused_not_hidden() {
-        bounded("f-c1-4-answer", || {
-            let mut cases = Vec::new();
-            for width in [3, 1] {
+        let mut cases = Vec::new();
+        for width in [3, 1] {
+            let case = format!("width {width}");
+            cases.push(f_bounded_case(format!("f-c1-4-answer {case}"), move || {
                 let (wide, result) = f_answer_case(width, true);
                 let outcome = match result {
                     Err(UpstrokeError::RegistryRefused { message })
@@ -25133,16 +25122,16 @@ git cat-file -e 'HEAD^{tree}'
                         kinds_of(&wide.env.durable_events())
                     )),
                 };
-                cases.push((format!("width {width}"), outcome));
-            }
-            f_report(&cases);
-        });
+                (case, outcome)
+            }));
+        }
+        f_report(&cases);
     }
 
     #[test]
     fn a_review_input_problem_in_a_whole_staging_registration_is_a_review_input_failure() {
-        bounded("f-c1-4-answer-control", || {
-            for width in [3, 1] {
+        for width in [3, 1] {
+            bounded(&format!("f-c1-4-answer-control width {width}"), move || {
                 let (wide, result) = f_answer_case(width, false);
                 let progress = result.unwrap_or_else(|error| panic!("width {width}: {error}"));
                 assert!(
@@ -25156,8 +25145,8 @@ git cat-file -e 'HEAD^{tree}'
                      not published: {:?}",
                     kinds_of(&events)
                 );
-            }
-        });
+            });
+        }
     }
 
     fn f_one_task() -> [WideTask; 1] {
@@ -25168,15 +25157,14 @@ git cat-file -e 'HEAD^{tree}'
         tag: &str,
         width: u32,
         policy: FPolicy,
-        hooks_at: Option<(FSite, FPhase, FSharedAct)>,
-        configure: impl FnOnce(&mut Wide),
+        configure: impl FnOnce(&mut Wide) -> Option<(FSite, FPhase, FSharedAct)>,
         responder: Option<crate::engine::topology::scaffold::Responder>,
     ) -> (Wide, Result<Progress, UpstrokeError>) {
         let tasks = f_one_task();
         let runner = RecordingRunner::new()
             .answering(responder.unwrap_or_else(|| wide_responder(&tasks, &[])));
         let mut wide = Wide::started_with(tag, &tasks, width, WidePlans::default(), runner);
-        configure(&mut wide);
+        let hooks_at = configure(&mut wide);
         let result = if width == 1 {
             let mut hooks = FHooks::over(&wide);
             if let Some((site, phase, act)) = hooks_at {
@@ -25293,18 +25281,13 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn an_attempts_review_input_problem_read_through_a_deleted_index_is_refused_not_hidden() {
-        bounded("f-c1-ap", || {
-            let mut cases = Vec::new();
-            for width in [1_u32, 3] {
+        let mut cases = Vec::new();
+        for width in [1_u32, 3] {
+            let case = format!("width {width}");
+            cases.push(f_bounded_case(format!("f-c1-ap {case}"), move || {
                 let policy = FPolicy::acting("tasks", f_unstaging(true));
-                let (wide, result) = f_attempt_run(
-                    &format!("f-c1-ap-w{width}"),
-                    width,
-                    policy,
-                    None,
-                    |_| {},
-                    None,
-                );
+                let (wide, result) =
+                    f_attempt_run(&format!("f-c1-ap-w{width}"), width, policy, |_| None, None);
                 let outcome = match result {
                     Err(UpstrokeError::RegistryRefused { message })
                         if message.contains("the attempt's review-input read")
@@ -25317,23 +25300,22 @@ git cat-file -e 'HEAD^{tree}'
                         kinds_of(&wide.env.durable_events())
                     )),
                 };
-                cases.push((format!("width {width}"), outcome));
-            }
-            f_report(&cases);
-        });
+                (case, outcome)
+            }));
+        }
+        f_report(&cases);
     }
 
     #[test]
     fn an_attempts_review_input_problem_in_a_whole_registration_fails_the_attempt() {
-        bounded("f-c1-ap-control", || {
-            for width in [1_u32, 3] {
+        for width in [1_u32, 3] {
+            bounded(&format!("f-c1-ap-control width {width}"), move || {
                 let policy = FPolicy::acting("tasks", f_unstaging(false));
                 let (wide, result) = f_attempt_run(
                     &format!("f-c1-ap-control-w{width}"),
                     width,
                     policy,
-                    None,
-                    |_| {},
+                    |_| None,
                     None,
                 );
                 let progress = result.unwrap_or_else(|error| panic!("width {width}: {error}"));
@@ -25349,8 +25331,8 @@ git cat-file -e 'HEAD^{tree}'
                      candidate: {:?}",
                     kinds_of(&events)
                 );
-            }
-        });
+            });
+        }
     }
 
     fn f_no_change_responder() -> crate::engine::topology::scaffold::Responder {
@@ -25376,56 +25358,33 @@ git cat-file -e 'HEAD^{tree}'
     #[test]
     fn an_attempts_failure_assessed_in_a_slot_whose_registration_is_not_whole_is_refused_not_spent()
     {
-        bounded("f-c1-p3", || {
-            let mut cases = Vec::new();
-            for width in [1_u32, 3] {
-                for (label, name, erroring) in [
-                    ("(a) a failed worker, gitdir removed", "gitdir", true),
-                    ("(b) a failed worker, index removed", "index", true),
-                    ("(b) a worker with no change, index removed", "index", false),
-                ] {
+        let mut cases = Vec::new();
+        for width in [1_u32, 3] {
+            for (label, name, erroring) in [
+                ("(a) a failed worker, gitdir removed", "gitdir", true),
+                ("(b) a failed worker, index removed", "index", true),
+                ("(b) a worker with no change, index removed", "index", false),
+            ] {
+                let case = format!("width {width}: {label}");
+                cases.push(f_bounded_case(format!("f-c1-p3 {case}"), move || {
                     let tag = format!("f-c1-p3-w{width}-{name}-{erroring}");
                     let policy = FPolicy::acting("tasks", Box::new(|_| {}));
                     let calls = Arc::clone(&policy.calls);
-                    let root_cell = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
-                    let act: FSharedAct = {
-                        let root_cell = Arc::clone(&root_cell);
-                        let once = std::sync::OnceLock::<FSharedAct>::new();
-                        Arc::new(move || {
-                            let act = once.get_or_init(|| {
-                                let root = root_cell
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .clone()
-                                    .expect("the root is set before the run");
-                                f_once_in_the_task_slot(root, name)
-                            });
-                            act();
-                        })
-                    };
-                    let configure = {
-                        let root_cell = Arc::clone(&root_cell);
-                        move |wide: &mut Wide| {
-                            *root_cell
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                                Some(wide.env.fixture.manager.execution_root().to_path_buf());
-                            if erroring {
-                                wide.env.adapters = Arc::new(
-                                    crate::engine::topology::scaffold::ScaffoldAdapters::erroring(),
-                                );
-                            }
+                    let configure = move |wide: &mut Wide| {
+                        let root = wide.env.fixture.manager.execution_root().to_path_buf();
+                        if erroring {
+                            wide.env.adapters = Arc::new(
+                                crate::engine::topology::scaffold::ScaffoldAdapters::erroring(),
+                            );
                         }
+                        Some((
+                            F_WRITE_TREE,
+                            FPhase::After,
+                            f_once_in_the_task_slot(root, name),
+                        ))
                     };
                     let responder = (!erroring).then(f_no_change_responder);
-                    let (wide, result) = f_attempt_run(
-                        &tag,
-                        width,
-                        policy,
-                        Some((F_WRITE_TREE, FPhase::After, act)),
-                        configure,
-                        responder,
-                    );
+                    let (wide, result) = f_attempt_run(&tag, width, policy, configure, responder);
                     let outcome = match result {
                         Err(UpstrokeError::RegistryRefused { message })
                             if message.contains("the attempt's assessed failure")
@@ -25440,26 +25399,26 @@ git cat-file -e 'HEAD^{tree}'
                             kinds_of(&wide.env.durable_events())
                         )),
                     };
-                    cases.push((format!("width {width}: {label}"), outcome));
-                }
+                    (case, outcome)
+                }));
             }
-            f_report(&cases);
-        });
+        }
+        f_report(&cases);
     }
 
     #[test]
     fn an_attempts_failure_assessed_in_a_whole_registration_is_spent() {
-        bounded("f-c1-p3-control", || {
-            for width in [1_u32, 3] {
+        for width in [1_u32, 3] {
+            bounded(&format!("f-c1-p3-control width {width}"), move || {
                 let (wide, result) = f_attempt_run(
                     &format!("f-c1-p3-control-w{width}"),
                     width,
                     FPolicy::acting("tasks", Box::new(|_| {})),
-                    None,
                     |wide| {
                         wide.env.adapters = Arc::new(
                             crate::engine::topology::scaffold::ScaffoldAdapters::erroring(),
                         );
+                        None
                     },
                     None,
                 );
@@ -25477,8 +25436,8 @@ git cat-file -e 'HEAD^{tree}'
                     "width {width}: the failure is judged and the attempt settled: {:?}",
                     kinds_of(&events)
                 );
-            }
-        });
+            });
+        }
     }
 
     struct FReview {
@@ -25923,8 +25882,9 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_genuinely_failing_gate_in_a_whole_snapshot_is_judged() {
-        bounded("f-c1-p2-gate-control", || {
-            for (subject, width) in F_MATRIX {
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            bounded(&format!("f-c1-p2-gate-control {case}"), move || {
                 let tasks = f_tasks_of(subject, "src/work.txt");
                 let responder = f_gate_responder(&tasks, subject, Arc::new(|_| 1));
                 let (wide, result) = f_drive_subject(
@@ -25954,15 +25914,16 @@ git cat-file -e 'HEAD^{tree}'
                         kinds_of(&events)
                     ),
                 }
-            }
-        });
+            });
+        }
     }
 
     #[test]
     fn a_gate_that_passes_through_a_deleted_index_is_refused_not_published() {
-        bounded("f-c1-p2-pass", || {
-            let mut cases = Vec::new();
-            for (subject, width) in F_MATRIX {
+        let mut cases = Vec::new();
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            cases.push(f_bounded_case(format!("f-c1-p2-pass {case}"), move || {
                 let tasks = f_tasks_of(subject, "x.forbidden");
                 let responder = f_gate_responder(&tasks, subject, f_forbidden_gate(true));
                 let (wide, result) = f_drive_subject(
@@ -25974,21 +25935,17 @@ git cat-file -e 'HEAD^{tree}'
                     WidePlans::default(),
                     None,
                 );
-                cases.push(f_refused_case(
-                    format!("{subject:?} width {width}"),
-                    &wide,
-                    result,
-                    &["the gates' verdicts", "index"],
-                ));
-            }
-            f_report(&cases);
-        });
+                f_refused_case(case, &wide, result, &["the gates' verdicts", "index"])
+            }));
+        }
+        f_report(&cases);
     }
 
     #[test]
     fn a_gate_reading_a_whole_index_fails_on_the_forbidden_file() {
-        bounded("f-c1-p2-pass-control", || {
-            for (subject, width) in F_MATRIX {
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            bounded(&format!("f-c1-p2-pass-control {case}"), move || {
                 let tasks = f_tasks_of(subject, "x.forbidden");
                 let responder = f_gate_responder(&tasks, subject, f_forbidden_gate(false));
                 let (wide, result) = f_drive_subject(
@@ -26018,36 +25975,35 @@ git cat-file -e 'HEAD^{tree}'
                         kinds_of(&events)
                     ),
                 }
-            }
-        });
+            });
+        }
     }
 
     #[test]
     fn a_passing_gate_that_reads_no_git_state_in_a_pruned_snapshot_is_refused() {
-        bounded("f-c1-p2-pass-liveness", || {
-            let mut cases = Vec::new();
-            for (subject, width) in F_MATRIX {
-                let tasks = f_tasks_of(subject, "src/work.txt");
-                let responder =
-                    f_gate_responder(&tasks, subject, f_blind_gate_in_a_pruned_snapshot());
-                let (wide, result) = f_drive_subject(
-                    &format!("f-p2-pass-liveness-{subject:?}-w{width}"),
-                    &tasks,
-                    subject,
-                    width,
-                    responder,
-                    WidePlans::default(),
-                    None,
-                );
-                cases.push(f_refused_case(
-                    format!("{subject:?} width {width}"),
-                    &wide,
-                    result,
-                    &["the gates' verdicts"],
-                ));
-            }
-            f_report(&cases);
-        });
+        let mut cases = Vec::new();
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            cases.push(f_bounded_case(
+                format!("f-c1-p2-pass-liveness {case}"),
+                move || {
+                    let tasks = f_tasks_of(subject, "src/work.txt");
+                    let responder =
+                        f_gate_responder(&tasks, subject, f_blind_gate_in_a_pruned_snapshot());
+                    let (wide, result) = f_drive_subject(
+                        &format!("f-p2-pass-liveness-{subject:?}-w{width}"),
+                        &tasks,
+                        subject,
+                        width,
+                        responder,
+                        WidePlans::default(),
+                        None,
+                    );
+                    f_refused_case(case, &wide, result, &["the gates' verdicts"])
+                },
+            ));
+        }
+        f_report(&cases);
     }
 
     fn f_gate_of(subject: FSubject, invocation: &InvocationId) -> bool {
@@ -26465,8 +26421,9 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_container_gate_launched_in_a_whole_snapshot_is_judged() {
-        bounded("f-c1-p2-launch-control", || {
-            for (subject, width) in F_MATRIX {
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            bounded(&format!("f-c1-p2-launch-control {case}"), move || {
                 let tasks = f_tasks_of(subject, "src/work.txt");
                 let launched = FLaunches::default();
                 let responder = f_launching_gate_responder(
@@ -26503,14 +26460,15 @@ git cat-file -e 'HEAD^{tree}'
                     "{subject:?} width {width}: no outage: {:?}",
                     kinds_of(&events)
                 );
-            }
-        });
+            });
+        }
     }
 
     #[test]
     fn a_gate_launch_failing_in_a_whole_snapshot_is_the_outage_it_was() {
-        bounded("f-c1-p2-launch-outage", || {
-            for (subject, width) in F_MATRIX {
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            bounded(&format!("f-c1-p2-launch-outage {case}"), move || {
                 let tasks = f_tasks_of(subject, "src/work.txt");
                 let launched = FLaunches::default();
                 let responder = f_launching_gate_responder(
@@ -26558,16 +26516,17 @@ git cat-file -e 'HEAD^{tree}'
                         );
                     }
                 }
-            }
-        });
+            });
+        }
     }
 
     #[test]
     fn a_cancelled_or_unresolved_gate_run_ends_the_command_as_it_did_whatever_the_registration() {
-        bounded("f-c1-p2-launch-fates", || {
-            let mut cases = Vec::new();
-            for (subject, width) in F_MATRIX {
-                for launch in [FLaunch::Cancelled, FLaunch::Unresolved] {
+        let mut cases = Vec::new();
+        for (subject, width) in F_MATRIX {
+            for launch in [FLaunch::Cancelled, FLaunch::Unresolved] {
+                let case = format!("{subject:?} width {width}: {launch:?}");
+                cases.push(f_bounded_case(format!("f-c1-p2-launch-fates {case}"), move || {
                     let tasks = f_tasks_of(subject, "src/work.txt");
                     let launched = FLaunches::default();
                     let responder =
@@ -26600,8 +26559,8 @@ git cat-file -e 'HEAD^{tree}'
                     let witnessed = f_first_launch(&launched)
                         .map(|first| first.failed.is_some() && !first.head_after)
                         .unwrap_or(false);
-                    cases.push((
-                        format!("{subject:?} width {width}: {launch:?}"),
+                    (
+                        case,
                         if as_it_did && witnessed {
                             Ok(())
                         } else {
@@ -26610,11 +26569,11 @@ git cat-file -e 'HEAD^{tree}'
                                 kinds_of(&wide.env.durable_events())
                             ))
                         },
-                    ));
-                }
+                    )
+                }));
             }
-            f_report(&cases);
-        });
+        }
+        f_report(&cases);
     }
 
     fn f_two_reviewers() -> WidePlans {
@@ -26673,8 +26632,9 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_review_verdict_read_in_a_whole_snapshot_is_judged() {
-        bounded("f-c1-p2-review-control", || {
-            for (subject, width) in F_MATRIX {
+        for (subject, width) in F_MATRIX {
+            let case = format!("{subject:?} width {width}");
+            bounded(&format!("f-c1-p2-review-control {case}"), move || {
                 let tasks = f_tasks_of(subject, "src/work.txt");
                 let stub = Arc::new(FReviewStub {
                     subject,
@@ -26707,8 +26667,8 @@ git cat-file -e 'HEAD^{tree}'
                         kinds_of(&events)
                     ),
                 }
-            }
-        });
+            });
+        }
     }
 
     #[test]
@@ -26888,9 +26848,10 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_retained_retry_over_a_pruned_populated_slot_refuses_and_keeps_the_generation_retained() {
-        bounded("f-c2-retained", || {
-            let mut cases = Vec::new();
-            for width in [1_u32, 3] {
+        let mut cases = Vec::new();
+        for width in [1_u32, 3] {
+            let case = format!("width {width}");
+            cases.push(f_bounded_case(format!("f-c2-retained {case}"), move || {
                 let (wide, result, kept) = f_retained_retry(
                     &format!("f-c2-retained-w{width}"),
                     width,
@@ -26934,10 +26895,10 @@ git cat-file -e 'HEAD^{tree}'
                         kinds_of(&events)
                     )),
                 };
-                cases.push((format!("width {width}"), outcome));
-            }
-            f_report(&cases);
-        });
+                (case, outcome)
+            }));
+        }
+        f_report(&cases);
     }
 
     fn f_closed_worktree_missing_of_alpha(events: &[TopologyEvent]) -> bool {
@@ -26953,8 +26914,8 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_retained_retry_over_a_whole_slot_that_no_longer_holds_its_tree_closes_and_scrubs() {
-        bounded("f-c2-retained-control", || {
-            for width in [1_u32, 3] {
+        for width in [1_u32, 3] {
+            bounded(&format!("f-c2-retained-control width {width}"), move || {
                 let (wide, result, _) = f_retained_retry(
                     &format!("f-c2-retained-control-w{width}"),
                     width,
@@ -26976,14 +26937,14 @@ git cat-file -e 'HEAD^{tree}'
                     "width {width}: a genuine mismatch in a whole registration closes as on master: {:?}",
                     kinds_of(&wide.env.durable_events())
                 );
-            }
-        });
+            });
+        }
     }
 
     #[test]
     fn a_retained_retry_reading_residue_closes_and_scrubs_whatever_the_registration() {
-        bounded("f-c2-retained-residue", || {
-            for width in [1_u32, 3] {
+        for width in [1_u32, 3] {
+            bounded(&format!("f-c2-retained-residue width {width}"), move || {
                 let (wide, result, _) = f_retained_retry(
                     &format!("f-c2-retained-residue-w{width}"),
                     width,
@@ -27003,8 +26964,8 @@ git cat-file -e 'HEAD^{tree}'
                     "width {width}: residue closes and scrubs as before: {:?}",
                     kinds_of(&wide.env.durable_events())
                 );
-            }
-        });
+            });
+        }
     }
 
     fn f_open_generation_left(tag: &str) -> Wide {
@@ -27862,10 +27823,10 @@ git cat-file -e 'HEAD^{tree}'
 
     #[test]
     fn a_verification_refused_after_its_passes_were_charged_records_them_under_o14b() {
-        bounded("f-o14b", || {
-            for width in [1, 3] {
-                for answer in [FAnswer::Unavailable, FAnswer::Pass] {
-                    let case = format!("width {width}, pass 1 {answer:?}");
+        for width in [1, 3] {
+            for answer in [FAnswer::Unavailable, FAnswer::Pass] {
+                let case = format!("width {width}, pass 1 {answer:?}");
+                bounded(&format!("f-o14b {case}"), move || {
                     let tasks = f_tasks_of(FSubject::Verification, "src/work.txt");
                     let stub = Arc::new(FCostedReviewStub {
                         target: FReviewStub {
@@ -27942,9 +27903,9 @@ git cat-file -e 'HEAD^{tree}'
                         "{case}: after the resume the replay counts both passes once: {replayed} \
                          vs {logged}"
                     );
-                }
+                });
             }
-        });
+        }
     }
 
     struct FCostedReviewStub {
