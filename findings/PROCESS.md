@@ -581,7 +581,13 @@ one-pass stopping rule is suspended for sweep lanes by owner ruling; it still go
 feature work.
 
 A fix confined to the pull request's own text, on `MAINTAINING.md` step 5's terms, is not a repair
-round and needs no further pass here either.
+round and needs no further pass here either. It uses step 5's interim clause and its personal
+read. The ledger exemption keeps a review only for a push confined to additions under `findings/`,
+or under `reviews/findings/` where the reviewed tree carries that directory. Ledger-only
+modifications, deletions or renames of existing entries, any change to `reviews/FINDINGS.md`, and
+other ledger paths outside that exemption are `ledger-rewrite`, NEEDS-ATTEST at best; they satisfy
+no `fixed` row and lift no witness. A panel-reviewed candidate still re-runs every seat on any head
+movement.
 
 ---
 
@@ -934,6 +940,9 @@ platform. The repair:
 - adds a pointer, under the rule above, for each finding a pass names;
 - adds nothing else.
 
-The repair gets a word-diff read, recorded in the body. It keeps the review under `MAINTAINING.md`
-step 5's rule for a push confined to the ledger. A P2 or worse that such a repair cannot settle
-goes to a ruling.
+The repair gets a word-diff read, recorded in the body. Corrections within `MAINTAINING.md`
+step 5's terms keep the review under its interim clause for the pull request's own text. The
+additions-only ledger exemption does not cover rewrites (§7): the audit still reports
+`fixed-but-head-unmoved:<id>` or `witnessed:<id>`, and the interim clause permits enqueueing past
+exactly those blockers for exactly the ids the body names as fixed in its text, and no others.
+A P2 or worse that such a repair cannot settle goes to a ruling.

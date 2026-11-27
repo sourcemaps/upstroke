@@ -79,8 +79,11 @@
 #     with its fenced JSON verdict, or the `<!-- upstroke-frontier-review -->` prose form) reviewed
 #     the head itself, or a commit the head differs from only by clean merge commits (git's own
 #     merge of the two parents, the branch diff byte-identical before and after, and no gate
-#     edited by the pull request) and pushes confined to findings/ or reviews/FINDINGS.md
-#     (MAINTAINING step 5 keeps the review across both)
+#     edited by the pull request) and verified additions under findings/, or reviews/findings/
+#     where the reviewed tree carries that directory. A push confined to ledger paths that
+#     rewrites existing entries (including the closed reviews/FINDINGS.md archive), or fails
+#     the addition exemption, is ledger-rewrite: NEEDS-ATTEST at best, never repair credit.
+#     Commit and tree reads, including archive lookups, must be complete and hash-verified.
 #   - the review is against the pull request's own base: the workflow form must record its base
 #     commit, which must lie on the current base branch (and, for a base other than master, not
 #     on master); no base change may be recorded on the pull request after the review was
@@ -117,7 +120,8 @@
 # unreadable as `body-policy-failed:127`, a body the parser refused or that did not arrive whole
 # as `ledger-parse-failed` and `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
-# `finding-file-lookup-failed`, and a gate-edit check that could not run as
+# `finding-file-lookup-failed`, a failed or incomplete movement read as
+# `ledger-status-read-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
 # run before the first pull request is judged. Every list request is paginated, because a first
 # page is not a list and 30 rows of nothing hid an active ruleset on page two.
@@ -167,7 +171,8 @@
 # `printf`, and a read that needs a file gets a real one whose write is checked.
 #
 # Other states: NEEDS-ATTEST (the head moved past the reviewed commit by more than clean merges
-# and ledger pushes: a repair-only push the owner reads and attests under step 5, a merge commit
+# and ledger additions: a ledger rewrite, a repair-only push the owner reads and attests under
+# step 5, a merge commit
 # that is not git's own merge of its parents, or a new change that needs another pass), MANUAL
 # (the review is prose the audit cannot judge: findings without ids, or a severity token outside
 # the numbered findings, so a person reads it), and NOT-READY with the blockers listed. MANUAL is
@@ -261,6 +266,27 @@ run_review_parser() {
   "$review_python" "$review_parser" "$1" --nul --out "$3" "$2"
 }
 
+# Only this typed answer crosses into Bash. Git bytes remain in the Python reader until whole
+# commit/tree objects have been checked; indeterminate evidence is never a repair or witness credit.
+read_movement() {
+  local output status=0
+  [[ -n "$review_python" ]] || return 127
+  output="$(mktemp)" || return 1
+  "$review_python" "$review_parser" movement --nul --out "$output" "$1" "$2" "$3" || status=$?
+  if ((status == 0)); then
+    if ! read_parser_fields "$output" movement 3 0 || [[ "${fields[2]}" != 0 ]]; then
+      status=1
+    else
+      case "${fields[1]}" in
+        ledger-only | ledger-rewrite | merges-only | repairs) moved="${fields[1]}" ;;
+        *) status=1 ;;
+      esac
+    fi
+  fi
+  rm -f "$output"
+  return "$status"
+}
+
 # read_parser_fields FILE TAG HEAD-COUNT PER-RECORD: fills the global array `fields` from the
 # parser's payload and returns non-zero unless the whole of it arrived.
 #
@@ -281,6 +307,7 @@ read_parser_fields() {
   local file="$1" tag="$2" head_count="$3" per_record="$4" one count
   fields=()
   while IFS= read -r -d '' one; do fields+=("$one"); done < "$file"
+  [[ -z "${one:-}" ]] || return 1   # an unterminated trailing field is not end-of-input
   ((${#fields[@]} >= head_count)) || return 1
   [[ "${fields[0]}" == "$tag" ]] || return 1
   count="${fields[$((head_count - 1))]}"
@@ -529,7 +556,7 @@ audit_state() {
   done
   if ((hard)); then
     state=NOT-READY
-  elif [[ "$moved" == repairs || "$moved" == merge-edits:* ]]; then
+  elif [[ "$moved" == repairs || "$moved" == ledger-rewrite || "$moved" == merge-edits:* ]]; then
     state=NEEDS-ATTEST
   elif ((manual)); then
     state=MANUAL
@@ -1158,7 +1185,7 @@ audit_one() {
       # resolution or a third parent is a new change that `--no-merges` below would hide), the
       # branch's diff against its base is byte-identical before and after the merge, and the pull
       # request edits no gate. Anything wider is reviewed again.
-      local merge_edits="" merges m expected before after touched t rest outside
+      local merge_edits="" merges m expected before after
       merges="$(git rev-list --merges "$reviewed..$head" --not "origin/$base")"
       for m in $merges; do
         local parents
@@ -1189,37 +1216,14 @@ audit_one() {
         fi
       fi
       # Commits the base already has arrived through a merge-in; only the branch's own count.
-      touched="$(git log --no-merges --name-only --format= "$reviewed..$head" --not "origin/$base" | sort -u)"
+      # The helper walks checked commit parents and derives every per-commit change from checked
+      # trees. A pathname repeated in another commit is another change; a move retains both sides.
+      # Failed reads, incomplete objects and unknown types block, without granting repair credit.
       if [[ -n "$merge_edits" ]]; then
         moved="merge-edits:${merge_edits:0:7}"
-      elif [[ -z "$touched" ]]; then
-        moved="merges-only"
-      else
-        # Which side of the ledger each touched path falls on, walked by expansion. Written as
-        # `! grep -vE ... <<< "$touched"` this was the exemption granted by a read that did not
-        # happen: grep's 1 is "every path is in the ledger", which keeps the review across the
-        # push, and a here-string bash could not spill to a temporary file returns that same 1
-        # with grep never run -- so a head moved by repairs, which is NEEDS-ATTEST, would have
-        # audited as ledger-only, which is READY.
-        outside=0
-        rest="$touched"
-        while [[ -n "$rest" ]]; do
-          t="${rest%%$'\n'*}"
-          if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
-          # An empty path is not a ledger path. `grep -v` returned a blank line as a line outside
-          # the ledger and this must agree with it: the rewrite is here to stop a failed read
-          # granting the exemption, not to widen who gets it.
-          # Either ledger prefix, for the reason finding_file_count gives: `$reviewed..$head` is
-          # the caller's range and a head cut before 2026-09-12 carries the ledger at
-          # reviews/findings/. Unwidened, a ledger-only push on such a head read as `repairs`,
-          # which is NEEDS-ATTEST -- the conservative direction, unlike the count above, but wrong
-          # about the same tree. reviews/FINDINGS.md is the closed ledger FILE and is a separate
-          # name, differing from the moved directory only in case.
-          [[ "$t" == findings/* || "$t" == reviews/findings/* || "$t" == reviews/FINDINGS.md ]] && continue
-          outside=1
-          break
-        done
-        if ((outside)); then moved="repairs"; else moved="ledger-only"; fi
+      elif ! read_movement "$reviewed" "$head" "origin/$base"; then
+        blockers+=("ledger-status-read-failed")
+        moved="indeterminate"
       fi
     fi
   fi
@@ -1397,6 +1401,7 @@ audit_one() {
         fi ;;
       rejected) blockers+=("manual:disposition-$disposition:$id") ;;   # the owner's call, not the audit's
       fixed)
+        # Ledger rewrites can remove or relabel evidence; they cannot establish a repair.
         [[ "$moved" == repairs || "$moved" == merge-edits:* ]] || blockers+=("fixed-but-head-unmoved:$id") ;;
       "") blockers+=("no-row:$id") ;;
       *) blockers+=("bad-disposition:$id=$disposition") ;;

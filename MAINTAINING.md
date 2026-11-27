@@ -160,11 +160,16 @@ source, documentation, workflows, release machinery and this file.
 
    A repair-only push after a pass that found no serious P1 needs no second pass: the owner reads
    `git diff <reviewed> <head>`, confirms it contains those repairs and nothing else — never a
-   workflow, gate script or validator edit — and says so in the body. A push confined to
-   the finding ledger (`findings/`, or `reviews/FINDINGS.md` on a branch cut before that ledger left
-   master), or a conflict-free merge of `master` that leaves `git diff master...HEAD`
-   byte-identical with CI green on the merged head and no gate edited by the pull request, keeps
-   the review as well; record both SHAs, and for the merge-in both base SHAs and the diff hash
+   workflow, gate script or validator edit — and says so in the body. A push confined to additions
+   under `findings/`, or under `reviews/findings/` where the reviewed tree carries that directory,
+   or a conflict-free merge of `master` that leaves `git diff master...HEAD` byte-identical with CI
+   green on the merged head and no gate edited by the pull request, keeps the review as well.
+   A push confined to ledger paths that modifies, deletes or renames existing entries, including
+   `reviews/FINDINGS.md`, is `ledger-rewrite`, NEEDS-ATTEST at best. Adding that closed archive,
+   adding under a legacy directory absent at review, or a ledger path outside the addition
+   exemption has the same classification. A ledger rewrite satisfies no `fixed` row and lifts no
+   witness.
+   Record both SHAs, and for the merge-in both base SHAs and the diff hash
    before and after. Anything wider is a new change and is reviewed again. A panel-reviewed
    checkpoint candidate is the exception: any head movement re-runs every seat.
 
