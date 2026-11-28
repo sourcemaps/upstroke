@@ -601,6 +601,7 @@ enum Pipeline {
     },
     Sequence(SequenceId),
     Preflight,
+    Decide,
 }
 
 impl Pipeline {
@@ -618,6 +619,7 @@ impl Pipeline {
             },
             InvocationId::Sequence { sequence, .. } => Self::Sequence(*sequence),
             InvocationId::Probe { .. } => Self::Preflight,
+            InvocationId::Decide { .. } => Self::Decide,
         }
     }
 }
@@ -637,6 +639,7 @@ impl Standing {
         } else {
             match pipeline {
                 Pipeline::Preflight => Holds::Preflight,
+                Pipeline::Decide => Holds::Nothing,
                 Pipeline::Attempt {
                     key,
                     generation,

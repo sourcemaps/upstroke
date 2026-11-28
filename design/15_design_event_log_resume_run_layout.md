@@ -17,6 +17,10 @@ The durable run artifacts are **split in two**, by who is allowed to read each h
     settings/<task>-<attempt>.json    # the per-attempt permission surface
     gates/<task>-<attempt>-<gate>.log
     gate-worktrees/                    # synced intents + disposable exact snapshots
+    decide/                            # `upstroke decide`'s claim of the run (§18); no run reads it
+        settings.json                  # its one call's permission settings
+        raw.out                        # its agent's raw output
+        proposal.json                  # the proposal: accepted with its record, or refused with a reason
 ~/.upstroke/workspaces/<repo-key>/<run-id>/  # v0.2; exact path recorded on run_started
     tasks/k<task>-g<generation>_<tag>/  # detached linked worktrees, one instance per incarnation
     merge/s<sequence>_<tag>/            # detached integration staging worktrees, likewise
@@ -71,6 +75,73 @@ The answer file is part of the run-scoped run-directory
 contents that the effects vocabulary's resource row R21 accounts for. This
 paragraph was added on 2026-11-13 to record what the answer readers already
 do, so that their tests have a design sentence to be held to.
+
+**A proposal is advice, and no run reads it.** `upstroke decide` (§18) writes
+only its claim, `decide/` in the run's private directory, the one `run_started`
+records, and nothing else of a run's public or private half or its answers, and
+appends no event; it holds the run's own lock (`run.lock`, the one `resume`
+takes) while it decides, and gives it back. The claim is the run's one spending
+claim: the command creates it with one exclusive `create_dir`, immediately
+before the run's one call, and whatever is at that name already (an earlier
+decide's claim, complete, partial or interrupted, an empty directory, a link,
+anything) is refused, never adopted: nothing in it is read, replaced or removed,
+and the command is refused with nothing written and no agent asked. Every copy
+of a checkout records the same private directory, so a checkout copied before
+its first decision shares the claim: each copy has a `run.lock` of its own, and
+it is the claim, not the lock, that a second command from either copy finds.
+Every file in the claim is created new and synced with its directory, the
+private directory is synced once the claim is created in it, and nothing is
+replaced or deleted; the claim stays after a failure or an interruption, so a
+run is decided once, about one question, and the one call decide makes for a
+run is made by the command that created its claim. Its three names are fixed,
+`settings.json`, `raw.out` and `proposal.json`, so no question id becomes a
+file name and no two ids can collide on a filesystem that folds case.
+
+**The claim relies on its parent's mode.** The claim directory is created with
+a plain `create_dir`, at whatever mode the process's umask gives it, and no mode
+is changed afterwards: what keeps it, and the files in it, from every other user
+is the private directory it is created in. So decide checks that directory at
+admission, before the reviewer's pre-flight, and again immediately before the
+claim and before each file is written: it must be a real directory, read
+without following a link (a symlink, a file, or on Windows a reparse point at
+its name is refused), and on Unix it must belong to the user decide runs as
+(its effective uid) and grant group and other nothing (no bit of `077`). The
+claim must still be a real
+directory of that user before each file is written in it; its own mode is not
+checked. A run whose private directory fails at admission or at the claim is
+refused with nothing written and no agent asked; one that fails after the claim
+leaves the run claimed with no proposal saved. The engine creates the private
+directory at the umask's mode (`rundir::create_private_dir`), so under a umask
+that leaves group or other bits, the common `022` among them, decide refuses the
+run until a person closes the directory (`chmod 700`). On Windows std reads no
+owner and no access list, so only the directory check is made there: neither
+the private directory's owner nor its access list is checked, and it keeps the
+access the system gave it.
+
+**What the checks leave: the interval between a check and its create.** Each
+check reads a path, and the `create_dir` of the claim or the `create_new` of a
+file that it admits comes next and resolves the path again. Nothing runs
+between the two: no call, no read and no other write, and the raw output's and
+the proposal's checks are made once the reviewer's call has returned, so a
+change made while the call runs is seen and nothing is written into it. But the
+check and the create are two operations, and no handle on the directory is
+held from one to the other: a process that renames the private directory or
+the claim in that interval, and puts a link at its name, has the create follow
+the link. On Unix only the user decide runs as, or root, can rename the claim
+or anything else in the private directory, since the checks admit only a
+private directory of that user's closed to group and other; on Windows its
+access list is not checked. Whoever can write the private directory's parent
+can rename the directory itself, on any platform, and that parent is not
+checked (`PR435-CHECK-TO-CREATE-INTERVAL`).
+
+A proposal records the run, the question, the decider's agent, model and effort,
+`status` (`accepted` with the parsed `record`, or `refused` with a `reason`),
+the `cost_usd` the agent reported or `null`, `settled` (whether the call was
+clean, successful and priced, and so settled at that price), the call's
+`ceiling_usd` (the run's whole allowance), and `raw_output`, the raw output's
+fixed name, `raw.out`, beside it in the claim. These paragraphs were added on
+2026-11-26 with `upstroke decide`; the claim moved from the checkout's
+`.upstroke/proposals/` into the run's private directory on 2026-11-27.
 
 A fresh sequential run reserves the global private root and its repository's
 public root with exclusive directory creation before creating skeleton files,

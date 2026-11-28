@@ -23,7 +23,7 @@ pub mod ledger;
 pub mod observe;
 pub mod permits;
 pub mod prelock;
-mod profiled;
+pub(crate) mod profiled;
 pub mod reachability;
 pub mod repair;
 pub mod report;

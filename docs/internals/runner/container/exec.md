@@ -176,8 +176,8 @@ The repo key.
 ## `pub const fn forces_configured_mounts_read_only(role: &ExecutionRole) -> bool {`
 
 Whether this role gets every recorded operator mount read-only, whatever
-the record says: review and both probes. A reviewer writes nothing, and a
-probe certifies a CLI rather than doing work. Implement and gate get each
+the record says: review, decide and both probes. A reviewer or a decider
+writes nothing, and a probe certifies a CLI rather than doing work. Implement and gate get each
 recorded mount as recorded, so **a gate can write through an explicitly
 read-write configured mount**: a gate is repository-controlled code, and
 an operator who writes `read_only = false` gives that code the directory.
@@ -1443,7 +1443,9 @@ and rebuild path, which by construction runs before any work — and an
 [`InvocationId::Attempt`] or [`InvocationId::Sequence`] is a worker, gate or
 reviewer invocation inside a run that is already spending. Deriving it from
 anything else (a flag on the runner, a phase the caller passes) would let
-the two disagree.
+the two disagree. An [`InvocationId::Decide`] has the reviewer's outcome: a
+decider is not the pre-flight, so a mismatch at its container is the
+mid-run outage, not a refusal before start.
 
 ## `pub enum ImageIdMismatch` › `RefusedBeforeStart,`
 

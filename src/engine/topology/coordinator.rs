@@ -17934,7 +17934,7 @@ git cat-file -e 'HEAD^{tree}'
                         Owner::SequenceSnapshot(sequence.0, format!("review{pass}"))
                     }
                 }),
-                InvocationId::Probe { .. } => None,
+                InvocationId::Probe { .. } | InvocationId::Decide { .. } => None,
             }
         }
 

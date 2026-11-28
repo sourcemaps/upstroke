@@ -855,7 +855,20 @@ nothing a slot may be requested under.
 ## `enum Pipeline {`
 
 The pipeline an invocation belongs to, read off its identity: the attempt
-`(key, generation, attempt)`, the integration `sequence`, or the pre-flight.
+`(key, generation, attempt)`, the integration `sequence`, the pre-flight,
+or a decider's.
+
+## `enum Pipeline` › `Decide,`
+
+A decider's identity ([`InvocationId::Decide`]) belongs to no attempt,
+sequence or pre-flight, so it is a pipeline of its own, and one that is
+never granted permission: [`Standing::of`] reads it as holding nothing
+whatever the fold shows, and the pre-flight's standing, and every standing
+read for another invocation, names a different pipeline. `admits` therefore
+refuses a decider under every standing, so a decider is never registered
+against a slot pair through the selector — in particular not under a
+pre-flight's permission, which a decider shares nothing with but being
+outside any attempt.
 
 ## `pub struct Standing {`
 
@@ -884,7 +897,7 @@ its settlement, and an identity from an earlier attempt is stale (INV-20).
 A sequence stands when the fold's open transaction is **that** sequence and
 its verification has started: verification processes run between
 `merge_verification_started` and its terminal. A probe always stands. A
-poisoned fold admits nothing.
+decider never does. A poisoned fold admits nothing.
 
 ## `impl Standing` › `pub const fn preflight() -> Self {`
 

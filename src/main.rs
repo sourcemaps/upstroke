@@ -156,6 +156,20 @@ enum Command {
         #[arg(long)]
         decline: bool,
     },
+    #[command(
+        about = "Ask a parked run's primary reviewer to propose an answer to one open question; it proposes and never answers"
+    )]
+    Decide {
+        #[arg(help = "The run's exact id")]
+        run_id: String,
+        #[arg(help = "The open question's exact id, byte for byte")]
+        question_id: String,
+        #[arg(
+            help = "The run's dollar allowance: a run is decided once, by one call capped at this"
+        )]
+        #[arg(long, default_value_t = upstroke::decide::DEFAULT_MAX_COST_USD)]
+        max_cost_usd: f64,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -198,7 +212,9 @@ enum CommandClass {
 
 const fn command_class(command: &Command) -> CommandClass {
     match command {
-        Command::Run { .. } | Command::Resume { .. } => CommandClass::Write,
+        Command::Run { .. } | Command::Resume { .. } | Command::Decide { .. } => {
+            CommandClass::Write
+        }
         Command::Connect { .. }
         | Command::Capacity { .. }
         | Command::Validate { .. }
@@ -431,6 +447,29 @@ fn execute(command: Command, _contained: Contained) -> anyhow::Result<ExitCode> 
             }
             Ok(ExitCode::SUCCESS)
         }
+        Command::Decide {
+            run_id,
+            question_id,
+            max_cost_usd,
+        } => {
+            let repo_root = std::env::current_dir().context("resolving current directory")?;
+            let runner = upstroke::runner::host::HostRunner::new();
+            let decided = upstroke::decide::decide(
+                &upstroke::decide::DecideOptions {
+                    repo_root,
+                    run_id,
+                    question_id,
+                    max_cost_usd,
+                    pools_path: None,
+                    environment: None,
+                },
+                &engine::BuiltinAdapters,
+                &runner,
+            )?;
+            print!("{}", decided.report);
+            decided.outcome()?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -509,6 +548,10 @@ mod tests {
                 "Export one settled run's local routing decisions to stdout",
             ),
             ("answer", "Answer a question a run is parked on (§12)"),
+            (
+                "decide",
+                "Ask a parked run's primary reviewer to propose an answer to one open question; it proposes and never answers",
+            ),
         ];
         for flag in ["-h", "--help"] {
             let root = rendered_cli_help(&["upstroke", flag]);
@@ -650,6 +693,11 @@ mod tests {
             &["upstroke", "answer", "q1", "--decline"],
             CommandClass::ReadOnly,
         ),
+        (
+            "decide",
+            &["upstroke", "decide", "01ABCDEF", "q-1"],
+            CommandClass::Write,
+        ),
     ];
 
     const ABSENT_PLAN: &str = "/upstroke-pr4-no-such-plan-33f1a9/plan.md";
@@ -668,8 +716,8 @@ mod tests {
             declared, tabled,
             "the dispatch and this table name different commands"
         );
-        assert_eq!(declared.len(), 8, "eight subcommands");
-        assert_eq!(DISPATCH.len(), 8, "eight rows, one per subcommand");
+        assert_eq!(declared.len(), 9, "nine subcommands");
+        assert_eq!(DISPATCH.len(), 9, "nine rows, one per subcommand");
 
         for (name, argv, expected) in DISPATCH {
             let cli = Cli::try_parse_from(*argv)
@@ -688,8 +736,9 @@ mod tests {
             .collect();
         assert_eq!(
             writes,
-            vec!["run", "resume"],
-            "the census names the write commands: `every topology write command (run, resume)`"
+            vec!["run", "resume", "decide"],
+            "the census names the write commands: `every topology write command (run, resume)` \
+             and `decide`, which starts an agent CLI"
         );
         assert_eq!(
             DISPATCH
@@ -745,6 +794,41 @@ mod tests {
         );
     }
 
+    /// `decide` decides one question per invocation: the question id is required, and it reaches
+    /// the decider as typed, its case kept.
+    #[test]
+    fn decide_takes_exactly_one_question_id_as_typed() {
+        assert!(
+            Cli::try_parse_from(["upstroke", "decide", "01ABCDEF"]).is_err(),
+            "a decide with no question id is a usage error, not every open question"
+        );
+        let Command::Decide {
+            run_id,
+            question_id,
+            max_cost_usd,
+        } = Cli::try_parse_from([
+            "upstroke",
+            "decide",
+            "01ABCDEF",
+            "q-A",
+            "--max-cost-usd",
+            "0.8",
+        ])
+        .expect("parse")
+        .command
+        else {
+            panic!("`decide 01ABCDEF q-A` did not parse as a decide");
+        };
+        assert_eq!(
+            (
+                run_id.as_str(),
+                question_id.as_str(),
+                max_cost_usd.to_string().as_str()
+            ),
+            ("01ABCDEF", "q-A", "0.8")
+        );
+    }
+
     #[test]
     fn no_command_but_capacity_takes_a_refresh() {
         for argv in [
@@ -774,17 +858,24 @@ mod tests {
     fn the_commands_that_spawn_outside_a_run_are_named_and_counted() {
         let outside: Vec<&str> = DISPATCH
             .iter()
-            .filter(|(name, _, _)| matches!(*name, "connect" | "capacity"))
+            .filter(|(name, _, _)| matches!(*name, "connect" | "capacity" | "decide"))
             .map(|(name, _, _)| *name)
             .collect();
-        assert_eq!(outside, vec!["connect", "capacity"]);
-        assert_eq!(outside.len(), 2, "two commands, and this is the count");
-        for name in &outside {
+        assert_eq!(outside, vec!["connect", "capacity", "decide"]);
+        assert_eq!(outside.len(), 3, "three commands, and this is the count");
+        for (name, class) in [
+            ("connect", CommandClass::ReadOnly),
+            ("capacity", CommandClass::ReadOnly),
+            ("decide", CommandClass::Write),
+        ] {
             let row = DISPATCH
                 .iter()
-                .find(|(n, _, _)| n == name)
+                .find(|(n, _, _)| *n == name)
                 .expect("a named command is in the table");
-            assert_eq!(row.2, CommandClass::ReadOnly);
+            assert_eq!(
+                row.2, class,
+                "`{name}`: only `decide` starts a full agent CLI, so only it joins the ambient job"
+            );
         }
     }
 
@@ -832,7 +923,7 @@ mod tests {
             vec!["upstroke", "run", "plan.md", "--dry-run"],
             CommandClass::Write,
         ));
-        assert_eq!(argvs.len(), 9, "eight subcommands and the dry-run preview");
+        assert_eq!(argvs.len(), 10, "nine subcommands and the dry-run preview");
 
         let mut joined = 0_usize;
         let mut skipped = 0_usize;
@@ -871,7 +962,10 @@ mod tests {
                 "{argv:?}: a failed join must stop exactly the write commands"
             );
         }
-        assert_eq!(joined, 3, "`run`, `resume`, and the dry-run preview");
+        assert_eq!(
+            joined, 4,
+            "`run`, `resume`, `decide`, and the dry-run preview"
+        );
         assert_eq!(skipped, 6, "the six read-only subcommands");
     }
 

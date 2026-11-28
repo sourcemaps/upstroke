@@ -184,6 +184,7 @@ disallowed-methods = [
     { path = "upstroke::connect::run_with", reason = "UPSTROKE-WRAPPER: creates a directory and writes the operator's upstroke.toml" },
     { path = "upstroke::tracker::refresh", reason = "UPSTROKE-WRAPPER: the capacity tracker; asks provider usage endpoints over HTTPS through a curl subprocess and stores what they report. Never an engine path (DESIGN.md §4 invariant 2): a run reads the stored reports, it does not ask for one" },
     { path = "upstroke::tracker::publish", reason = "UPSTROKE-WRAPPER: creates the machine's usage-report directory, stages a report and renames it into place, removing the staged file if either step fails" },
+    { path = "upstroke::decide::decide", reason = "UPSTROKE-WRAPPER: the decider; claims a run once by creating decide/ exclusively in the run's private directory, starts the run's primary review agent read-only through the Runner, and creates its settings, raw output and proposal files there, each new. Never an engine path: it proposes and never answers" },
     # The legacy engine's own conductors, in the classification domain since
     # #306 (`PR7-WRAPPERS-EMPTY-DOMAIN`): `pub(super)` items of the private
     # modules `engine::{attempt,coordinator,resume}`, which every module under

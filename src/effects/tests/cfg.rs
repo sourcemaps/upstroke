@@ -936,6 +936,7 @@ pub(crate) static WHOLE_FILE_TEST_MODULES: LazyLock<Vec<PathBuf>> = LazyLock::ne
     let written = [
         "agent/proc/test_support/readiness.rs",
         "agent/proc/tests.rs",
+        "decide/tests.rs",
         "effects/tests.rs",
         "engine/report/tests.rs",
         "engine/tests.rs",

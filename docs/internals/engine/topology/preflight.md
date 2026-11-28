@@ -222,7 +222,7 @@ certifies, its one discovery run under the spare's profile.
 The profile directory, or `None` for the default account: what a discovery
 under this account carries, and what two accounts are told apart by.
 
-## `pub(in crate::engine) fn coordinator_environment(key: &str) -> Option<OsString> {`
+## `pub(crate) fn coordinator_environment(key: &str) -> Option<OsString> {`
 
 The coordinator's own environment, read when the profile checks run: the one
 the host runner composes each child's environment from
@@ -231,10 +231,11 @@ run with no profiled pool reads nothing, and so that tests can stand in for it
 without changing the process environment, which every test in the binary
 shares.
 
-Two readers hand it to [`refuse_unusable_profiles`]: a `RunPreflight`, as its
-default `environment`, on a resume; and `RunOptions::profile_environment` on a
-fresh run. That is why it is visible to `engine` and not only here: the fresh
-path's reader is `RunOptions`', in `engine::options`. The sign-in check reads
+Three readers hand it to [`refuse_unusable_profiles`]: a `RunPreflight`, as
+its default `environment`, on a resume; `RunOptions::profile_environment` on a
+fresh run; and `DecideOptions::environment` in `upstroke decide`. That is why
+it is visible to the crate and not only here: the fresh path's reader is
+`RunOptions`', in `engine::options`, and the decider's is outside `engine`. The sign-in check reads
 no environment. Until it stopped checking Codex ([`SIGN_IN_CHECKED`]), it read
 this one too, through the same `RunPreflight` field on a resume and through a
 `RunnerProbes` field of its own on a fresh run, which is gone with it.
@@ -429,28 +430,46 @@ rather than an argument here.
 
 ## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let mut caps = Vec::with_capacity(self.agents.len());`
 
-(2) One probe per recorded agent, sequentially, in recorded order.
+(2) One probe per recorded agent, sequentially, in recorded order, each
+through [`certify_agent`] with the pools `with_pools` gave it, the
+`registering` boundary, and [`refused`] for the run's `policy` as its wording.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `let accounts = Account::of_agent(&self.pools, agent)?;`
+## `pub(crate) fn certify_agent(`
+
+One recorded agent's half of the pre-flight, shared by `certify` and by
+`upstroke decide`, which admits the run's recorded reviewer through it before
+it claims the run, writes anything or asks any agent: the agent's probe, then
+(3) and (4) below, in that order. `refuse` is the caller's wording for a failed
+probe or sign-in discovery: `certify` passes [`refused`] for the run's policy,
+so a run's pre-flight is refused in the same words as before the split; decide
+passes its own, which says nothing was written and no agent asked. The probe's
+capabilities are returned for `certify` to keep. Both hand it a boundary over
+the same `profiled` wrapper: a resume's `registering` sits over the runner
+`entry` profiled, and decide's runner is wrapped by `profiled_borrowing`, so
+the agent's own probes carry its first pool's profile on either path.
+
+## `pub(crate) fn certify_agent(` › `let accounts = Account::of_agent(pools, agent)?;`
 
 (3) Each agent's accounts, after its probe: [`Account::of_agent`] over the
-pools `with_pools` gave it. Its cap refusal is returned as it stands, with `?`,
+pools the caller gave it. Its cap refusal is returned as it stands, with `?`,
 before any discovery runs: its wording is shared with the fresh path and true
 here.
 
-## `fn certify(&self, policy: &RunnerPolicy) -> Result<(), UpstrokeError> {` › `refuse_signed_out(agent, adapter, &probed, &registering, &accounts).map_err(`
+## `pub(crate) fn certify_agent(` › `refuse_signed_out(agent, adapter, &probed, through, &accounts).map_err(`
 
 (4) Each agent's sign-in, under those accounts: [`refuse_signed_out`] with the
-caps the probe just returned. A [`SignIn::SignedOut`] refusal is returned as it
-stands, because its wording is shared with the fresh path and its closing is
-already true here. A [`SignIn::Undiscovered`] error is a discovery process that
-did not run to an answer, the same kind of failure as a probe's, so it takes
-[`refused`]'s shape, naming the agent's sign-in discovery.
+caps the probe just returned, through the same boundary the probe ran in. A
+[`SignIn::SignedOut`] refusal is returned as it stands, because its wording is
+shared with the fresh path and its closing is already true here. A
+[`SignIn::Undiscovered`] error is a discovery process that did not run to an
+answer, the same kind of failure as a probe's, so it takes `refuse`'s shape,
+naming the agent's sign-in discovery.
 
-## `pub(super) fn refuse_unusable_profiles(`
+## `pub(crate) fn refuse_unusable_profiles(`
 
 What a profiled run must hold before anything is spawned for it. This is the
-one place the profile refusals are made, and both paths call it:
+one place the profile refusals are made, and both paths call it, as does
+`upstroke decide` (below):
 
 - **A resume:** `RunPreflight::certify`, first, at recovery step (c): under
   the resume's worktree lease and run lock, after its run exclusion and its
@@ -466,7 +485,16 @@ one place the profile refusals are made, and both paths call it:
   `RunOptions::profile_environment`, which is [`coordinator_environment`] in
   production.
 
-So both paths refuse the same profiles in the same words. Only the pools that
+So both paths refuse the same profiles in the same words. `upstroke decide`
+(`src/decide.rs`) is the one caller outside `engine`, which is why this is
+`pub(crate)`: before it writes anything or starts a recorded run's reviewer, it
+passes this function the pools `config::load_for_report` read, the run's
+recorded `RunStarted4.runner` and [`coordinator_environment`], so a run a
+resume would refuse here is refused there in the same words. Those pools are
+read as `upstroke capacity` reads them, even where the settings beside them
+would refuse a resume before it reached this function, so a run a resume's
+loader refuses can still be checked here and admitted (`decide.md`). Only the
+pools that
 name a profile count (`ProfiledPool::of`). With none, it returns at once,
 reads no environment and leaves the run as it was before profiles existed.
 

@@ -53,7 +53,7 @@ What each item guarantees and refuses. The source carries no rustdoc; this secti
 | `reserved_keys()` | Every key an overlay may not name: `RESERVED_ALWAYS` plus every credential location. |
 | `credential_location(agent)` | The credential-location variable of one agent, if the host knows one. |
 | `supplies_credentials(role)` | Whether `host-v1` tells this role where an agent's credentials live. Exhaustive with no wildcard, so a new role must be classified rather than defaulting into the side that hands out credentials. |
-| `starts_in_the_started_checkout(role, worker_in_checkout)` | Whether this role starts in the checkout the coordinator was started in and so keeps the inherited Git context: every probe, and the implement role of a runner built for the legacy workspace. Exhaustive with no wildcard. |
+| `starts_in_the_started_checkout(role, worker_in_checkout)` | Whether this role starts in the checkout the coordinator was started in and so keeps the inherited Git context: every probe, `decide`'s reviewer, and the implement role of a runner built for the legacy workspace. Exhaustive with no wildcard. |
 | `give_work_tree_context(composed, overlay, case, run_common_dir)` | For a role in a work tree the engine made: removes the four inherited work-tree selectors and replaces an inherited `GIT_COMMON_DIR` that is not an absolute path with `run_common_dir`, matching names by `case` and leaving any name the overlay sets as the overlay set it. Refuses, before anything starts, when it must replace such a `GIT_COMMON_DIR` and `run_common_dir` is `None`. |
 
 ### `HostRunner`
@@ -490,7 +490,11 @@ A probe always keeps the coordinator's inherited Git context; the implement role
 `worker_in_checkout` is set, which `for_legacy_workspace` does because the legacy worker works in
 the started checkout. Gates and review passes always start in a gate or review snapshot, a work
 tree the engine made, under either conductor, and the topology worker starts in its slot, so a
-runner built by `new()` gives its implement role a work tree's context.
+runner built by `new()` gives its implement role a work tree's context. `decide` starts its
+reviewer in the checkout the command was run in, the started checkout, so it keeps that context as
+the probe that admitted the reviewer did, and is never refused for a relative `GIT_COMMON_DIR` it
+reads where it starts
+(`decide_answers_every_role_keyed_predicate_as_review_does_but_where_it_starts`).
 
 ## `give_work_tree_context`
 

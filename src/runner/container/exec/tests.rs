@@ -1909,6 +1909,63 @@ fn every_role_and_probe_gets_the_recorded_mounts_and_review_and_probes_get_them_
 
 #[cfg(unix)]
 #[test]
+fn a_decider_is_given_the_mounts_a_reviewer_is_given() {
+    let fixture = Fixture::new("decide-as-review", true);
+    let (policy, _, _) = fixture.mounted_policy();
+    let (_, reviewer_own) = materialized_settings(&fixture);
+    let claude = AgentId::new("claude-code");
+    let review = review_request(
+        naming_its_settings(&reviewer_own),
+        fixture.task_a.clone(),
+        claude.clone(),
+        Duration::from_secs(10),
+        review_pass_id(),
+    );
+    let decide = crate::runner::decide_request(
+        naming_its_settings(&reviewer_own),
+        fixture.task_a.clone(),
+        claude,
+        Duration::from_secs(10),
+        InvocationId::Decide { ordinal: 0 },
+    );
+    for (what, runner) in [
+        ("no recorded mounts", fixture.runner()),
+        ("the recorded mounts", fixture.runner_over(policy)),
+    ] {
+        let reviewed = runner.plan(&review).expect("a reviewer plans");
+        let decided = runner.plan(&decide).expect("a decider plans");
+        let workspace = target_of(decided.mounts(), "/upstroke/workspace");
+        assert_eq!(
+            workspace,
+            target_of(reviewed.mounts(), "/upstroke/workspace"),
+            "{what}: the worktree"
+        );
+        assert!(
+            workspace.is_some_and(Mount::read_only),
+            "{what}: a decider's worktree is read-only: {workspace:?}"
+        );
+        let settings = settings_mounts(decided.mounts());
+        assert_eq!(
+            settings,
+            settings_mounts(reviewed.mounts()),
+            "{what}: the settings file"
+        );
+        assert!(!settings.is_empty(), "{what}: the settings file is bound");
+        assert_eq!(
+            target_of(decided.mounts(), "/opt/tools"),
+            target_of(reviewed.mounts(), "/opt/tools"),
+            "{what}: the recorded read-write mount"
+        );
+        assert_eq!(
+            decided.mounts().len(),
+            reviewed.mounts().len(),
+            "{what}: one mount for every mount a reviewer is given"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn the_docker_argument_names_exactly_the_recorded_mount() {
     let fixture = Fixture::new("mount-argument", true);
     let (policy, shared, tools) = fixture.mounted_policy();
@@ -3019,7 +3076,9 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
     for role in ExecutionRole::all() {
         let agent = match &role {
             ExecutionRole::Probe(ProbeTarget::Agent(agent)) => Some(agent.clone()),
-            ExecutionRole::Implement | ExecutionRole::Review => Some(AgentId::new("claude-code")),
+            ExecutionRole::Implement | ExecutionRole::Review | ExecutionRole::Decide => {
+                Some(AgentId::new("claude-code"))
+            }
             ExecutionRole::Gate | ExecutionRole::Probe(ProbeTarget::Shell) => None,
         };
         let scope = RoleScope {
@@ -3116,10 +3175,10 @@ fn host_and_container_compose_the_same_environment_for_every_role() {
         }
         rows += 1;
     }
-    assert_eq!(rows, 5, "all five roles, both probe targets");
+    assert_eq!(rows, 6, "all six roles, both probe targets");
     assert_eq!(
-        supplied_locations, 3,
-        "implement, review and the agent probe get a location at both boundaries"
+        supplied_locations, 4,
+        "implement, review, decide and the agent probe get a location at both boundaries"
     );
     assert!(base.iter().any(|(key, _)| key == "CLAUDE_CONFIG_DIR"));
 }

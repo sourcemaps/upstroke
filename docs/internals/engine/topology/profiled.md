@@ -44,9 +44,12 @@ this wrapper would never have stamped. Only on a run with one pool per agent
 is a plan's pool always its agent's first, and there a worker gets the same
 directory it got when this wrapper stamped it.
 
-It is engine-side and private (`mod profiled;`, not `pub mod`) because it is
-an assembly detail of `entry`: nothing outside the topology engine builds a
-run's runner.
+It is engine-side and crate-private (`pub(crate) mod profiled;`, not
+`pub mod`): `entry` installs it over a run's runner, and the one caller outside
+the topology engine is `upstroke decide`, which wraps the runner it holds by
+reference in the same wrapper (`profiled_borrowing`) so that its reviewer's
+pre-flight probes, and its call, carry the profile a resume's would
+(`decide.md`). Nothing outside the topology engine builds a run's runner.
 
 **What it does not do.** It does not check the profile. Pre-flight does,
 where a refusal can be reported before any agent CLI is started: a fresh run
@@ -77,6 +80,14 @@ That is the choice the task left open ("wrap nothing, or wrap with an empty
 map"): wrapping nothing makes the pass-through a property of the type rather
 than of a code path, and no existing test can observe a difference.
 
+## `pub(crate) fn profiled_borrowing<'r>(`
+
+The same wrapper over a borrowed runner, for `upstroke decide`, which is handed
+its runner as `&dyn Runner` and so has no `Arc` to give `profiled`. It always
+wraps: with no profiled pool the map is empty and every request goes through
+unchanged, so the difference from `profiled` is the pointer, which nothing
+borrowing it can compare.
+
 ## `fn profiles(pools: &[Pool]) -> BTreeMap<String, PathBuf> {`
 
 The agent-to-profile map, built once per run from the run's pools. For each
@@ -91,11 +102,14 @@ its slot on, the pool `serving_pool` chose, which may be a later one. A later
 pool for the same agent never lends its profile to the first: if the agent's
 bound pool has `profile: None`, the agent contributes nothing.
 
-## `struct Profiled {`
+## `struct Profiled<R> {`
 
-The wrapper: the inner runner and the map. It holds nothing per request.
+The wrapper: the inner runner and the map. It holds nothing per request. The
+inner runner is anything that dereferences to a `Runner`: the run's
+`Arc<dyn Runner>` from `profiled`, or a borrowed `&dyn Runner` from
+`profiled_borrowing`. Both are one type and one stamping rule.
 
-## `impl Profiled` › `fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {`
+## `impl<R> Profiled<R>` › `fn stamped(&self, request: &RunnerRequest) -> Option<RunnerRequest> {`
 
 `Some` only when the request is not a worker's, carries no profile yet, is not
 a further account's probe, has an agent, and that agent has a profile; the
@@ -135,7 +149,7 @@ Whether `invocation` is an agent probe at an ordinal of
 pre-flight discovery. Read from the identity, which `UnderPool` sets, rather
 than from anything a request could carry beside it.
 
-## `impl Runner for Profiled {` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
+## `impl<R> Runner for Profiled<R>` › `fn run<'a>(&'a self, request: &'a RunnerRequest, call: RunnerCall<'a>) -> RunFuture<'a> {`
 
 An unstamped request is handed to the inner runner as is, the same reference
 and the same call. A stamped one is owned by the returned future, and the
@@ -145,7 +159,7 @@ passed alongside a borrow of a local. The re-lending takes the call apart
 with `into_parts` and rebuilds it from exactly those parts — the same
 cancellation, leases and hooks — so the inner runner sees the same call.
 
-## `impl Runner for Profiled {` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
+## `impl<R> Runner for Profiled<R>` › `fn composed_common_dir(&self, request: &RunnerRequest) -> ComposedCommonDir {`
 
 Delegated, over the same request `run` would hand the inner runner. Without
 it the trait's default (`Unknown`) would replace the host runner's answer and

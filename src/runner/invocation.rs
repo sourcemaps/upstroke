@@ -112,6 +112,9 @@ pub enum InvocationId {
         target: ProbeTarget,
         ordinal: u32,
     },
+    Decide {
+        ordinal: u32,
+    },
 }
 
 pub const LEGACY_GENERATION: GenerationId = GenerationId(0);
@@ -212,6 +215,7 @@ impl InvocationId {
                 };
                 format!("p.{target}.o{ordinal}")
             }
+            Self::Decide { ordinal } => format!("decide.o{ordinal}"),
         }
     }
 
@@ -220,10 +224,10 @@ impl InvocationId {
         parse_forms(value).ok_or_else(|| UpstrokeError::Refused {
             message: format!(
                 "`{value}` is not an invocation id: the identity is (key, generation, attempt, \
-                 role, ordinal), (sequence, role, ordinal), or (probe, target, ordinal) \
-                 (decisions.admission_and_leases.permits.invocation_identity), rendered \
-                 `k<key>.g<gen>.a<attempt>.<role>.o<n>`, `s<seq>.<role>.o<n>`, or \
-                 `p.shell.o<n>` / `p.agent-<id>.o<n>`"
+                 role, ordinal), (sequence, role, ordinal), (probe, target, ordinal) \
+                 (decisions.admission_and_leases.permits.invocation_identity), or (decide, \
+                 ordinal), rendered `k<key>.g<gen>.a<attempt>.<role>.o<n>`, \
+                 `s<seq>.<role>.o<n>`, `p.shell.o<n>` / `p.agent-<id>.o<n>`, or `decide.o<n>`"
             ),
         })
     }
@@ -232,7 +236,7 @@ impl InvocationId {
     pub const fn probe_target(&self) -> Option<&ProbeTarget> {
         match self {
             Self::Probe { target, .. } => Some(target),
-            Self::Attempt { .. } | Self::Sequence { .. } => None,
+            Self::Attempt { .. } | Self::Sequence { .. } | Self::Decide { .. } => None,
         }
     }
 }
@@ -272,6 +276,9 @@ fn validate(value: &str) -> Result<(), UpstrokeError> {
 fn parse_forms(value: &str) -> Option<InvocationId> {
     let parts: Vec<&str> = value.split(SEPARATOR).collect();
     match parts.as_slice() {
+        ["decide", ordinal] => Some(InvocationId::Decide {
+            ordinal: field(ordinal, "o")?,
+        }),
         ["p", target, ordinal] => {
             let target = if *target == "shell" {
                 ProbeTarget::Shell
@@ -813,5 +820,81 @@ mod tests {
             InvocationId::sequence(SequenceId(0), SequenceRole::Gate(0), 0).probe_target(),
             None
         );
+        assert_eq!(InvocationId::Decide { ordinal: 0 }.probe_target(), None);
+    }
+
+    #[test]
+    fn a_decide_identity_renders_and_parses_back_as_itself_and_no_other_form() {
+        let decides: Vec<InvocationId> = [0, 1, 7, 12, u32::MAX]
+            .into_iter()
+            .map(|ordinal| InvocationId::Decide { ordinal })
+            .collect();
+        assert_eq!(decides[2].render(), "decide.o7");
+        assert_eq!(
+            decides[2].to_string(),
+            "decide.o7",
+            "Display and render agree"
+        );
+        assert_eq!(decides[4].render(), "decide.o4294967295");
+        assert!(decides[4].render().len() <= MAX_LEN);
+        let mut rendered = BTreeSet::new();
+        for id in &decides {
+            let value = id.render();
+            validate(&value).expect("a decide identity is a valid value");
+            let read = InvocationId::parse(&value)
+                .unwrap_or_else(|error| panic!("`{value}` did not parse: {error}"));
+            assert_eq!(&read, id, "`{value}` parsed to a different identity");
+            assert!(
+                matches!(read, InvocationId::Decide { .. }),
+                "`{value}` parsed to another form: {read:?}"
+            );
+            assert_eq!(
+                serde_json::from_str::<InvocationId>(
+                    &serde_json::to_string(id).expect("serialize")
+                )
+                .expect("deserialize"),
+                *id,
+                "the wire form is the bare string"
+            );
+            rendered.insert(value);
+        }
+        assert_eq!(
+            rendered.len(),
+            decides.len(),
+            "distinct ordinals, distinct values"
+        );
+
+        for id in grid() {
+            let value = id.render();
+            assert!(
+                !rendered.contains(&value),
+                "`{value}` is a run's identity and a decider's"
+            );
+            let read = InvocationId::parse(&value).expect("the grid parses");
+            assert!(
+                !matches!(read, InvocationId::Decide { .. }),
+                "the existing token `{value}` parsed as a decider's identity"
+            );
+        }
+
+        for bad in [
+            "decide",
+            "decide.o",
+            "decide.o01",
+            "decide.1",
+            "decide.o1.o2",
+            "decide.o4294967296",
+            "decider.o1",
+            "Decide.o1",
+            "p.decide.o1",
+            "s1.decide.o1",
+            "k1.g1.a1.decide.o1",
+            "k1.g1.a1.decide0.o1",
+        ] {
+            assert!(
+                InvocationId::parse(bad).is_err(),
+                "`{bad}` was accepted as an invocation id"
+            );
+        }
     }
 }

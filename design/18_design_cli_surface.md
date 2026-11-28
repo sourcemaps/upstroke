@@ -8,6 +8,7 @@ upstroke run <plan> [--dry-run] [--budget <usd>] [--config <path>]
 upstroke resume <run-id>
 upstroke status [<run-id>] [--follow]
 upstroke answer <question-id> [--option N | --text "..."]
+upstroke decide <run-id> <question-id> [--max-cost-usd <usd>]  # an agent proposes one answer; it answers nothing
 upstroke capacity [--refresh] [--scope machine|repo]  # all pools: remaining, resets, active strategy effect
 upstroke export-decisions <run-id> [--format jsonl|csv] # landed 2026-08-12: local versioned attempt projection to stdout
 ```
@@ -46,6 +47,82 @@ classed with `run` and `resume`. That class governs how a command's process and 
 contained, not whether it writes files: `capacity --refresh` already stores reports under
 `~/.upstroke/capacity/usage/`. Until it exists, the
 sentence above stands: there is no daemon.
+
+`decide` is advisory and answers nothing; a person applies a proposal with `upstroke answer`. One
+invocation decides exactly one open question of one run, with one call: for a schema-4 run found
+by its exact id, it asks the run's recorded primary reviewer, at the run's recorded review effort,
+read-only, to propose an answer to the open question whose id is the one given, matched byte for
+byte (no case folding, no prefix). The run id is checked as a plain file-name component before
+any path is built from it. The command takes the run's own lock, the one `resume` takes, before
+the run is read, and holds it until the proposal is written or the command has failed, so no
+resume starts while it asks and nothing is asked of a run a coordinator holds. It spends only on
+a parked run: one whose log's last end is a `run_finished` recording `parked`, with no
+`run_resumed` after it. Nothing is written and no agent is asked when the run is unknown, held by
+something else, not schema 4, or not parked so (a run interrupted while one task's question is
+open and another task is still runnable records no end, `status` reports it interrupted, and it
+is refused like a run that is still running or ended any other way), or records no primary
+reviewer; when the question is not open, chooses which agent runs a task (left to a person), or
+has an answer a person published already, whose answer the run applies; nor when its admission
+refuses it: a run recorded on the container runner, since the call starts on this host; a run
+whose pools the credential pre-flight refuses (each pool's credential profile, and a token in this
+process's environment that would override one, checked as a run's pre-flight checks them); a
+reviewer whose adapter cannot guarantee all of cost reporting in dollars, a dollar ceiling per
+call, no web access and the run's private directory being unreadable (Claude Code alone claims
+them; Copilot and Codex report no dollar cost); a `--max-cost-usd` that is not a positive number;
+a private directory that is not a real directory or, on Unix, is not the user's own and closed to
+group and other (§15: the claim relies on it); a private directory no permission rule can name
+exactly; and a reviewer that fails the pre-flight a run makes of each recorded agent: its CLI
+probed under the profile a resume's pre-flight probes it under, and refused when an account its
+pools configure is reported signed out. Neither pre-flight is stricter than a run's. The pools
+are read as `capacity` reads them: where the repository's or the machine's settings would refuse
+a run, only their `[routing.strategy]` and `[capacity]` are read beside the pools file and the
+rest is set aside unreported, so a setting a resume refuses does not refuse decide, which is
+refused only when those cannot be read. An account whose CLI cannot say whether it is signed in
+passes, as it passes a run's pre-flight. Whether a person has answered the question is read again
+immediately before the call. A claim admits
+nothing by itself: the call's command is checked as built, and is refused before it is written or
+started unless it carries no environment overlay, exactly the recorded reviewer's `--model` and
+the recorded review effort as `--effort`, `-p` with `--output-format json`, `--max-budget-usd` at
+most the allowance, `--permission-mode dontAsk`, `--setting-sources ""`, `--strict-mcp-config`
+and no flag besides the call's own, and settings that allow `Read`, `Glob` and `Grep` at most and
+deny `WebFetch`, `WebSearch`, and reads of `.upstroke/**` and of the run's private directory. The
+prompt is built from the run's own record alone, its log and its frozen plan, and no plan file of
+the checkout goes into it: a plan file edited since the run started is not read, its changed text
+is withheld, and the reviewer is still asked, from the record. The call starts in the checkout the
+command was run in, its environment composed for that checkout. Every refusal and configuration
+error the command prints is one line. A run
+is decided once: immediately before its call the command claims it by creating `decide/` in the
+run's private directory exclusively (§15), and a run whose claim exists, complete, partial or
+anything else at that name, is refused, never adopted, with nothing written and no agent asked;
+the claim is never removed, after a failure or an interruption included. That directory is the
+run's one spending claim, and every copy of the checkout shares it, since each records the same
+private directory: a later decide of the run, of the same question or another, from this copy or
+any other, or one started beside it that loses the `create_dir`, is refused. Each file is
+created straight after the check that admits it, with no call between them, though the check
+and the create are two operations on a path (§15 states what that leaves). `--max-cost-usd`
+(default 5) is the run's dollar allowance, and the one call's own `--max-budget-usd`, whole:
+nothing is subtracted from it. Only a clean, successful and priced call (exit 0 within its
+limits, an outcome the adapter reads as completed, a result that itself reports success,
+`"subtype": "success"` with `"is_error": false`, and a cost of $0 or more) is settled, at its
+price, so a result the reviewer marks as an error never settles; any other outcome a call returns
+is saved as refused, its cost unknown beside what it reported. A call that reports more than its
+ceiling is saved as refused, settled or not, its reason saying so, and so fails the command. A reply
+is accepted only when it holds exactly one closed fenced `json` block, its fences whole lines, and
+no line outside that block holds three backticks or three tildes anywhere, a fence of another
+block or a run within a line alike (the block's own closing line is the block's), holding
+`choice`, `guidance`, `reasons`, `confidence`, `needs_a_person` and `citations`, whose `choice` is
+one of the question's options and never one that gives up, or `null` where there are none, and
+whose `guidance` is never one `upstroke answer --text` would read as declining. The reply,
+accepted or refused, is saved as §15 lays out, in `proposal.json` in the claim, whose path the
+report names for the person who applies it with `upstroke answer`. The report gives the question's
+decider, status, choice and the reply's fields, cost (`unknown` for a call that did not settle,
+beside any cost it reported) and saved path, then the directory that claims the run, and ends
+saying nothing was answered. Agent text,
+question text, file names and every refusal are data inside a line, sanitized as `status`
+sanitizes them. The command exits non-zero, after the whole report, when the reply was refused,
+saying its reason is saved in the proposal; a write that fails after the claim fails the command
+with no proposal saved, worded as the write it is, and says whether the call was made and what it
+cost, which no proposal then records, and that the run stays claimed.
 
 `--dry-run` executes everything except agents: parse, route, and print task → kind → chain (with source of each decision: config/annotation/override) → gates → pool + strategy effect, at zero spend. It exists from day one; it is both the config-iteration loop and the sales demo.
 

@@ -8,7 +8,7 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 ## Module
 
-The runner contract: `CommandSpec`, `AgentId`, `ProbeTarget`, `ExecutionRole`, `RunnerRequest` and its three role builders, `RunnerError`, the `Runner` trait, `SPAWN_SITE` and `HarnessHooks`; and the censuses that pin where a request, a command, a profile and an allowance are built. Every item was `src/runner/mod.rs`'s until #318's third round moved it here, unchanged, and re-exported it from the root (`pub use contract::*`), so `upstroke::runner::CommandSpec` and the rest resolve as they did.
+The runner contract: `CommandSpec`, `AgentId`, `ProbeTarget`, `ExecutionRole`, `RunnerRequest` and its four role builders, `RunnerError`, the `Runner` trait, `SPAWN_SITE` and `HarnessHooks`; and the censuses that pin where a request, a command, a profile and an allowance are built. Every item was `src/runner/mod.rs`'s until #318's third round moved it here, unchanged, and re-exported it from the root (`pub use contract::*`), so `upstroke::runner::CommandSpec` and the rest resolve as they did.
 
 ## `#![forbid(`
 
@@ -155,6 +155,33 @@ The recorded shell executing `exit 0`. Non-slotted.
 Which seat a process occupies (DESIGN.md:224), with the probe target the
 contract adds.
 
+## `pub enum ExecutionRole` › `Decide,`
+
+A decider: an agent CLI asked to read and answer, which writes nothing —
+a read-only agent invocation, as a review pass is.
+
+It is `Review` in every answer the runner keys on a role but one, written
+beside `Review` in each `match` rather than as an arm of its own, so the two
+cannot drift apart without one of those lines changing: slotted (R3,
+[`ExecutionRole::is_slotted`]); told its agent's credential location on the
+host (`host::supplies_credentials`) and in a container
+(`container::env::supplies_credential_location`); given the worktree,
+mounted read-only, with every configured mount forced read-only
+(`container::exec::receives_a_worktree`,
+`container::exec::forces_configured_mounts_read_only`, and the workspace
+mount's own `read_only`); and its settings file mounted the way a
+reviewer's is. The one is where it starts: a review pass starts in a work
+tree the engine made, and a decider in the checkout `upstroke decide` was
+run in, so the host composes it for the started checkout, beside `Probe`
+(`host::starts_in_the_started_checkout`). What else differs is its label,
+`decide`, and its identity: [`InvocationId::Decide`], a form no attempt,
+sequence or pre-flight renders, and one the topology selector never admits
+to a slot pair.
+
+Declared, and listed in [`ExecutionRole::all`], after `Review`, so every
+earlier role keeps its place in the derived order and in every grid built
+from the list.
+
 ## `impl ExecutionRole` › `pub fn all() -> Vec<Self> {`
 
 Every role, with both probe targets.
@@ -174,7 +201,7 @@ the broker that acts on it is PR11.
 ## `impl ExecutionRole` › `pub fn label(&self) -> String {`
 
 The role as it is written in a record: `probe(shell)`, `probe(<agent>)`,
-`implement`, `gate`, `review`.
+`implement`, `gate`, `review`, `decide`.
 
 ## `pub struct RunnerRequest {`
 
@@ -259,6 +286,19 @@ agent, carrying that pass's or re-ask's identity. See [`worker_request`].
 A reviewer is an agent CLI, so it is slotted and `host-v1` gives it its
 agent's credential location — the same rule as the worker, and the reason
 the two share a shape rather than each being spelled out where it is sent.
+
+## `pub fn decide_request(`
+
+One decider process: `ExecutionRole::Decide`, bound to the deciding agent,
+carrying a decider's identity ([`InvocationId::Decide`]), and no credential
+profile. See [`review_request`]: the request is the one it builds in every
+field but the role.
+
+The command passes through whole, so the environment overlay
+([`CommandSpec`]'s `env`) arrives exactly as the caller wrote it — order,
+repeated keys and values — and a spec with no `env` gives a request with an
+empty overlay. A profile is added the way any other role's is, with
+[`RunnerRequest::with_credential_profile`].
 
 ## `pub fn gate_request(`
 
@@ -821,25 +861,31 @@ effect-before-`run_started` (T-RUNSTART on a fresh run, T-RESUME on a
 resume) while the site it is recorded under says event-before-effect in
 T-ATTEMPT.
 
+Since 2026-11-25 `Decide` is a sixth role, and the third outside. `upstroke
+decide` starts it from the CLI against a run its log records parked, under
+that run's lock, never from a coordinator: no `attempt_started` precedes it, and it appends
+nothing to any run's event log, so there is no event for its spawn to
+follow at all.
+
 **The site's own variants are not this slice's to add.** The site enum,
 its adjacency and its fault row are `topology::effects` — PR3's, frozen
 here, and in its `sites.rs` and `vocab.rs` children since that module was
 split — and a probe context would be a *new variant* of an
 inventory the packet enumerates. That half is deferred, with an owner,
 in `48f2af7a:reviews/FINDINGS.md`. What this test contributes is that the
-mismatch is counted rather than silent: the two roles are named here,
+mismatch is counted rather than silent: the three roles are named here,
 so ST-07 evidence over `Process.Spawn` cannot be read as covering the
-probe prefixes.
+probe prefixes or a decider.
 
 **This count discharges nothing about the hooks themselves, and must
-not be read as if it did.** Counting that two roles fall outside the
+not be read as if it did.** Counting that three roles fall outside the
 site's declared context proves the mismatch exists; it does not prove
 the containment hooks execute on those roles, and a `HostRunner::run`
 that passed `NoHooks` for `Probe(_)` would leave this test green. That
 obligation is PR4's — `scope`'s "**probes**, workers, gates, reviews go
 through the Runner" and `proof_tests[3]`'s "containment sub-effect hook
-tests (ST-07 subset)" — and it is discharged at runtime, for all five
-roles, by `host::tests::every_role_reaches_the_containment_points_of_this_platform`
+tests (ST-07 subset)" — and it is discharged at runtime, role by role,
+by `host::tests::every_role_reaches_the_containment_points_of_this_platform`
 and `host::tests::a_fault_armed_at_any_containment_point_stops_any_role`.
 
 ## `fn the_spawn_site_files_every_role_under_one_context_and_the_count_says_which() {` › `assert_eq!(SPAWN_SITE, EffectSiteId::Process(ProcessSite::Spawn));`
@@ -850,7 +896,9 @@ Transcribed from PR3's inventory, not read back from PR4.
 
 Which roles this slice spawns, and whether each runs inside an
 attempt — i.e. after the durable event the site is adjacent to.
-Written from the packet's own ordering of a run's phases.
+Written from the packet's own ordering of a run's phases, and for
+`Decide` from where its one caller, `upstroke decide`, starts it:
+outside every run.
 
 ## `mod tests` › `fn the_containment_coordinates_are_pinned_against_written_literals() {`
 

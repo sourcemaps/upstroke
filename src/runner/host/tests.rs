@@ -60,6 +60,10 @@ fn review_invocation() -> InvocationId {
     )
 }
 
+fn decide_invocation() -> InvocationId {
+    InvocationId::Decide { ordinal: 0 }
+}
+
 fn fixture_agent() -> AgentId {
     AgentId::new(claude::ADAPTER_ID)
 }
@@ -301,7 +305,7 @@ fn every_composed_environment_disables_replacement_objects() {
     }
     assert_eq!(
         rows,
-        5 * 2 * KeyCase::ALL.len(),
+        6 * 2 * KeyCase::ALL.len(),
         "every role, both overlays"
     );
 }
@@ -400,7 +404,7 @@ fn the_v1_conductors_environment_confines_the_recorded_graph_to_its_repository()
     }
     assert_eq!(
         rows,
-        5 * 5 * KeyCase::ALL.len(),
+        6 * 5 * KeyCase::ALL.len(),
         "every role, every source, both key cases"
     );
 
@@ -1357,8 +1361,8 @@ fn every_credential_supplied_role_composes_one_environment_per_binding() {
         .collect();
     assert_eq!(
         bound.len(),
-        3,
-        "`supplies_credentials` names three roles: {bound:?}"
+        4,
+        "`supplies_credentials` names four roles: {bound:?}"
     );
 
     let mut cells = 0_usize;
@@ -1384,6 +1388,13 @@ fn every_credential_supplied_role_composes_one_environment_per_binding() {
                     agent.clone(),
                     Duration::from_secs(120),
                     review_invocation(),
+                ),
+                ExecutionRole::Decide => crate::runner::decide_request(
+                    command.clone(),
+                    workspace.clone(),
+                    agent.clone(),
+                    Duration::from_secs(120),
+                    decide_invocation(),
                 ),
                 other => panic!("`supplies_credentials` grew a role with no builder: {other}"),
             };
@@ -1422,7 +1433,7 @@ fn every_credential_supplied_role_composes_one_environment_per_binding() {
         }
     }
     let _ = std::fs::remove_dir_all(&workspace);
-    assert_eq!(cells, 9, "three bound roles x three shipped bindings");
+    assert_eq!(cells, 12, "four bound roles x three shipped bindings");
 }
 
 #[test]
@@ -1431,7 +1442,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
     let environment = HostEnvironment::with_base(base.clone(), KeyCase::current());
     let agent = AgentId::new(claude::ADAPTER_ID);
     let roles = ExecutionRole::all();
-    assert_eq!(roles.len(), 5, "the grid covers every role");
+    assert_eq!(roles.len(), 6, "the grid covers every role");
 
     let from_the_boundary = ["PATH", "HOME", "USERPROFILE"];
     assert_eq!(from_the_boundary.len(), 3);
@@ -1465,6 +1476,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
                 ExecutionRole::Probe(ProbeTarget::Agent(agent.clone())),
                 ExecutionRole::Implement,
                 ExecutionRole::Review,
+                ExecutionRole::Decide,
             ],
         ),
         (
@@ -1481,7 +1493,7 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
             .flat_map(|(_, group)| group.iter().cloned())
             .collect::<BTreeSet<_>>(),
         roles.iter().cloned().collect::<BTreeSet<_>>(),
-        "the two groups must partition the five roles, or a role is unasserted"
+        "the two groups must partition the six roles, or a role is unasserted"
     );
     for (passage, group) in certified {
         let first = environment.reserved_values(&group[0], Some(&agent), None);
@@ -1520,12 +1532,99 @@ fn the_reserved_values_every_role_gets_are_the_host_boundarys_own() {
 }
 
 #[test]
+fn decide_answers_every_role_keyed_predicate_as_review_does_but_where_it_starts() {
+    use crate::runner::container::env::supplies_credential_location;
+    use crate::runner::container::exec::{
+        ImageIdMismatch, forces_configured_mounts_read_only, receives_a_worktree,
+    };
+
+    type RolePredicate = fn(&ExecutionRole) -> bool;
+    let predicates: &[(&str, RolePredicate)] = &[
+        ("ExecutionRole::is_slotted", ExecutionRole::is_slotted),
+        ("host::supplies_credentials", supplies_credentials),
+        (
+            "container::env::supplies_credential_location",
+            supplies_credential_location,
+        ),
+        ("container::exec::receives_a_worktree", receives_a_worktree),
+        (
+            "container::exec::forces_configured_mounts_read_only",
+            forces_configured_mounts_read_only,
+        ),
+    ];
+    assert_eq!(
+        predicates.len(),
+        5,
+        "every role-keyed predicate the decider touched, but where it starts"
+    );
+    // The one predicate a decider does not answer as a review pass does: a review pass starts
+    // in a work tree the engine made, and `decide` in the checkout it was run in, so its
+    // environment is composed as a probe's, for the started checkout.
+    for worker_in_checkout in [true, false] {
+        assert!(
+            starts_in_the_started_checkout(&ExecutionRole::Decide, worker_in_checkout),
+            "a decider starts in the started checkout"
+        );
+        assert!(
+            !starts_in_the_started_checkout(&ExecutionRole::Review, worker_in_checkout),
+            "a review pass starts in a work tree the engine made"
+        );
+        assert_eq!(
+            starts_in_the_started_checkout(&ExecutionRole::Decide, worker_in_checkout),
+            starts_in_the_started_checkout(
+                &ExecutionRole::Probe(ProbeTarget::Agent(fixture_agent())),
+                worker_in_checkout
+            ),
+            "a decider is composed for the checkout the probe that admitted it ran in"
+        );
+    }
+    for (name, predicate) in predicates {
+        assert_eq!(
+            predicate(&ExecutionRole::Decide),
+            predicate(&ExecutionRole::Review),
+            "{name}: a decider answers as a review pass does"
+        );
+    }
+    assert!(
+        predicates
+            .iter()
+            .any(|(_, predicate)| predicate(&ExecutionRole::Review)
+                != predicate(&ExecutionRole::Gate)),
+        "no predicate tells a review from a gate, so the equalities above say nothing"
+    );
+
+    let environment = HostEnvironment::with_base(synthetic_base(), KeyCase::current());
+    let agent = fixture_agent();
+    assert_eq!(
+        environment.reserved_values(&ExecutionRole::Decide, Some(&agent), None),
+        environment.reserved_values(&ExecutionRole::Review, Some(&agent), None),
+        "host::HostEnvironment::reserved_values"
+    );
+    assert_eq!(
+        ImageIdMismatch::of(&decide_invocation()),
+        ImageIdMismatch::of(&review_invocation()),
+        "container::exec::ImageIdMismatch::of"
+    );
+    assert_eq!(
+        crate::engine::topology::identity::is_slotted(&decide_invocation()),
+        crate::engine::topology::identity::is_slotted(&review_invocation()),
+        "engine::topology::identity::is_slotted"
+    );
+    assert_eq!(
+        crate::engine::topology::identity::is_slotted(&decide_invocation()),
+        ExecutionRole::Decide.is_slotted(),
+        "the identity and the role answer the slot question the same way"
+    );
+}
+
+#[test]
 fn credential_locations_are_role_scoped() {
     let environment = HostEnvironment::with_base(synthetic_base(), KeyCase::current());
     let agent = AgentId::new(codex::ADAPTER_ID);
     let expected: Vec<(ExecutionRole, bool)> = vec![
         (ExecutionRole::Implement, true),
         (ExecutionRole::Review, true),
+        (ExecutionRole::Decide, true),
         (
             ExecutionRole::Probe(ProbeTarget::Agent(agent.clone())),
             true,
@@ -1540,8 +1639,8 @@ fn credential_locations_are_role_scoped() {
     );
     assert_eq!(
         expected.iter().filter(|(_, gets)| *gets).count(),
-        3,
-        "three roles execute an agent CLI"
+        4,
+        "four roles execute an agent CLI"
     );
     for (role, gets) in expected {
         let supplied = environment.reserved_values(&role, Some(&agent), None);
@@ -1575,6 +1674,7 @@ fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other()
     let runs_an_agent_cli = |role: &ExecutionRole| match role {
         ExecutionRole::Implement
         | ExecutionRole::Review
+        | ExecutionRole::Decide
         | ExecutionRole::Probe(ProbeTarget::Agent(_)) => true,
         ExecutionRole::Gate | ExecutionRole::Probe(ProbeTarget::Shell) => false,
     };
@@ -1632,11 +1732,11 @@ fn compose_gives_a_child_the_credential_location_of_its_own_agent_and_no_other()
             }
         }
     }
-    assert_eq!(supplied_count + denied_count, 2 * 5 * 5 * 3);
+    assert_eq!(supplied_count + denied_count, 2 * 6 * 5 * 3);
     assert_eq!(
         supplied_count,
-        2 * 3 * 3,
-        "two name rules x three agent-CLI roles x the one bound agent each"
+        2 * 4 * 3,
+        "two name rules x four agent-CLI roles x the one bound agent each"
     );
 }
 
@@ -3356,6 +3456,13 @@ fn production_request(
             crate::config::DEFAULT_REVIEW_PASS_TIMEOUT,
             review_invocation(),
         ),
+        ExecutionRole::Decide => crate::runner::decide_request(
+            agent_cli_command(REVIEW_STDIN.as_bytes()),
+            workspace.to_path_buf(),
+            fixture_agent(),
+            crate::config::DEFAULT_REVIEW_PASS_TIMEOUT,
+            decide_invocation(),
+        ),
     })
 }
 
@@ -3449,12 +3556,15 @@ fn the_role_grid_sends_the_shapes_production_sends() {
         })
         .collect();
     let _ = std::fs::remove_dir_all(&workspace);
-    assert_eq!(requests.len(), 5, "one request per role");
+    assert_eq!(requests.len(), 6, "one request per role");
 
     let labels: BTreeSet<String> = requests.iter().map(|r| r.role.label()).collect();
-    assert_eq!(labels.len(), 5, "five distinct roles: {labels:?}");
+    assert_eq!(labels.len(), 6, "six distinct roles: {labels:?}");
     let bound = requests.iter().filter(|r| r.agent.is_some()).count();
-    assert_eq!(bound, 3, "the worker, the reviewer and the agent probe");
+    assert_eq!(
+        bound, 4,
+        "the worker, the reviewer, the decider and the agent probe"
+    );
     assert_eq!(requests.len() - bound, 2, "the gate and the shell probe");
     for request in &requests {
         assert_eq!(
@@ -3466,7 +3576,7 @@ fn the_role_grid_sends_the_shapes_production_sends() {
         );
     }
     let ids: BTreeSet<String> = requests.iter().map(|r| r.invocation.render()).collect();
-    assert_eq!(ids.len(), 5, "five distinct identities: {ids:?}");
+    assert_eq!(ids.len(), 6, "six distinct identities: {ids:?}");
     assert_eq!(
         requests
             .iter()
@@ -3489,7 +3599,7 @@ fn the_role_grid_sends_the_shapes_production_sends() {
         .iter()
         .map(|r| (r.role.label(), r.agent.is_some(), r.invocation.render()))
         .collect();
-    assert_eq!(paired.len(), 5, "five distinct (role, binding, identity)");
+    assert_eq!(paired.len(), 6, "six distinct (role, binding, identity)");
 
     let carrying_a_payload: BTreeSet<String> = requests
         .iter()
@@ -3498,7 +3608,11 @@ fn the_role_grid_sends_the_shapes_production_sends() {
         .collect();
     assert_eq!(
         carrying_a_payload,
-        BTreeSet::from(["implement".to_owned(), "review".to_owned()]),
+        BTreeSet::from([
+            "implement".to_owned(),
+            "review".to_owned(),
+            "decide".to_owned(),
+        ]),
         "the roles whose adapter delivers a prompt on stdin"
     );
     let payloads: BTreeSet<&[u8]> = requests
@@ -3570,6 +3684,10 @@ fn the_role_grid_sends_the_shapes_production_sends() {
             ("gate".to_owned(), crate::config::DEFAULT_GATE_TIMEOUT),
             (
                 "review".to_owned(),
+                crate::config::DEFAULT_REVIEW_PASS_TIMEOUT
+            ),
+            (
+                "decide".to_owned(),
                 crate::config::DEFAULT_REVIEW_PASS_TIMEOUT
             ),
         ]),
@@ -3920,6 +4038,16 @@ fn the_cli_roles_of_the_grid_run_a_shim_shaped_program_through_the_funnel() {
             ),
         ),
         (
+            "decide",
+            crate::runner::decide_request(
+                agent_cli_command_at(&shim, REVIEW_STDIN.as_bytes()),
+                workspace.clone(),
+                fixture_agent(),
+                crate::config::DEFAULT_REVIEW_PASS_TIMEOUT,
+                decide_invocation(),
+            ),
+        ),
+        (
             "probe(claude-code)",
             crate::agent::probe_request(
                 claude::ADAPTER_ID,
@@ -4007,7 +4135,7 @@ fn every_role_reaches_the_containment_points_of_this_platform() {
     let roles = ExecutionRole::all();
     assert_eq!(
         roles.len(),
-        5,
+        6,
         "the grid covers every role this slice routes"
     );
     let points = per_spawn_points();
@@ -6017,6 +6145,13 @@ fn role_request_for(
             timeout,
             review_invocation(),
         )),
+        ExecutionRole::Decide => Some(crate::runner::decide_request(
+            spec,
+            workspace.to_path_buf(),
+            fixture_agent(),
+            timeout,
+            decide_invocation(),
+        )),
         ExecutionRole::Gate => Some(crate::runner::gate_request(
             spec,
             workspace.to_path_buf(),
@@ -6128,8 +6263,8 @@ fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {
         .collect();
     assert_eq!(
         requests.len(),
-        4,
-        "four of the five roles carry a caller's program: {:?}",
+        5,
+        "five of the six roles carry a caller's program: {:?}",
         requests.iter().map(|(role, _)| role).collect::<Vec<_>>()
     );
 
@@ -6149,7 +6284,7 @@ fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {
     assert_eq!(
         composed.len(),
         2,
-        "the four roles composed {} distinct environments; host-v1 scopes credential \
+        "the five roles composed {} distinct environments; host-v1 scopes credential \
          locations by role, so a gate's must differ from an agent's",
         composed.len()
     );
@@ -6172,7 +6307,7 @@ fn one_name_is_searched_once_for_a_boundary_and_asked_for_once_per_spawn() {
     );
     assert_eq!(
         program_resolutions(),
-        resolutions + 4,
+        resolutions + 5,
         "a program must be decided for every spawn, memo or no memo"
     );
     assert_eq!(
@@ -7626,6 +7761,13 @@ fn role_request(
             timeout,
             review_invocation(),
         ),
+        ExecutionRole::Decide => crate::runner::decide_request(
+            command,
+            workspace.to_path_buf(),
+            fixture_agent(),
+            timeout,
+            decide_invocation(),
+        ),
     }
 }
 
@@ -7682,9 +7824,12 @@ fn dumped_value<'a>(environment: &'a [String], name: &str) -> Option<&'a str> {
     })
 }
 
+/// Whether `role` keeps the inherited Git context: a probe, and `decide`'s reviewer, which
+/// starts in the checkout the command was run in, always do; the implement role only in the
+/// legacy workspace; a gate and a review pass, each in a work tree the engine made, never.
 const fn keeps_the_inherited_context(legacy: bool, role: &ExecutionRole) -> bool {
     match role {
-        ExecutionRole::Probe(_) => true,
+        ExecutionRole::Probe(_) | ExecutionRole::Decide => true,
         ExecutionRole::Implement => legacy,
         ExecutionRole::Gate | ExecutionRole::Review => false,
     }
@@ -7970,7 +8115,7 @@ fn a_role_in_a_work_tree_the_engine_made_sheds_only_the_work_tree_context() {
     }
     assert_eq!(
         rows_run,
-        KeyCase::ALL.len() * 2 * 5 * (rows.len() + 1 + 2),
+        KeyCase::ALL.len() * 2 * 6 * (rows.len() + 1 + 2),
         "every row ran"
     );
     assert!(

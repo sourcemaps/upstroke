@@ -153,6 +153,7 @@ pub fn is_slotted(invocation: &InvocationId) -> bool {
         InvocationId::Attempt { role, .. } => !matches!(role, AttemptRole::Gate(_)),
         InvocationId::Sequence { role, .. } => !matches!(role, SequenceRole::Gate(_)),
         InvocationId::Probe { target, .. } => matches!(target, ProbeTarget::Agent(_)),
+        InvocationId::Decide { .. } => true,
     }
 }
 
