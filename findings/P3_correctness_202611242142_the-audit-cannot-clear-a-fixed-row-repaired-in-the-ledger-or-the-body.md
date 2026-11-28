@@ -8,7 +8,7 @@ reviewed_sha: c5061b817c9e61993bf19cf43a06cf81720bdefe
 location: scripts/pr-ready-audit.sh:1400
 provenance: pre_existing
 first_bad: 112c4aff40c0f075348947dbb2541e79f2d3c60e
-guard: the fix-P2/ pull request that takes up PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE, whose proposal clears the findings/ shape; the body shape needs its own answer
+guard: a pull request of its own for the body and ledger repair shapes, starting from ruling R73's proposal recorded below; until it merges, MAINTAINING.md step 5's clause "A fix confined to the pull request's own text needs no further pass", under which the enqueue may pass exactly this finding's two audit lines for the ids the body names as fixed in its text
 ---
 
 # The readiness audit cannot clear a fixed row whose repair is in the ledger or in the body
@@ -67,7 +67,32 @@ The audit fails closed, so the cost is a ruling or a review pass, never a wrong 
 is the same ledger-only rule failing *open*: a ledger-only push keeps the review and can unfile an
 open finding. This one fails *closed*.
 
+## #433's withdrawn routes, and ruling R73's proposal
+
+- #433 (a draft, parked at `9740f686`, not merged) carried two routes from its first reviewed head,
+  `c0a81fd3`, that would have let the audit clear rows this finding names; `223c8670` withdrew both
+  under ruling R73, and neither is on `master`.
+- **The body route** (`a186f377`, with its validator exception `f2be3822`): at `c0a81fd3`, before
+  that exception, on a head the audit read as unmoved, `ledger-only` or `merges-only`, its `fixed`
+  arm printed `body-fixed:<id>` in place of `fixed-but-head-unmoved:<id>` where the review, not the
+  row, located the finding at `pr.md:<line>` (`scripts/pr-ready-audit.sh:1454-1459`; the flag is set
+  from the review's location, `scripts/pr-review-parse.py:552-558`, and the row gave its disposition
+  and severity alone, `scripts/pr-ready-audit.sh:1363`).
+- **The witness lift:** at `c0a81fd3`, a `fixed` row lifted `witnessed:<id>` on a head the audit
+  read as `repairs` or `merge-edits`, and on one it read as unmoved, `ledger-only` or `merges-only`
+  only where the review located the finding at `pr.md:<line>`
+  (`scripts/pr-ready-audit.sh:1382-1393`).
+- The body route's findings, as ruling R73 lists them: `PR433-LEDGER-BODY-LOCATION-MISMATCH`,
+  `PR433-BODY-PATH-CASE-FOLD`, `PR433-R3-TRACKED-BODY-EVIDENCE`, `PR433-R3-NONFIXED-ROW-LOCATION`.
+- The witness lift's findings: `PR433-MERGE-EDITS-CLEAR-WITNESS`,
+  `PR433-INVALID-LEDGER-STATUS-TOKEN`, `PR433-ARCHIVE-LOOKUP-ERROR`,
+  `PR433-R3-LEDGER-REWRITE-WITNESS`.
+- Ruling R73's proposal, recorded as its proposal and not as an adopted design: "the body flag from
+  the review alone, no validator edit, a witness lifted only by a repair outside the ledger, in a
+  pull request of its own".
+
 ## What the change that takes this up should do
 
-The `findings/` shape is cleared by the change that takes up
-`PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE`. The body shape needs its own answer.
+Both shapes go to that pull request. `PR382-ACCEPTED-P3-REPURPOSES-FINDING-FILE`'s change clears the
+ledger shape only if a ledger rewrite satisfies a `fixed` row, as its file proposes (a rewrite there
+reads as a repair); ruling R73 had #433's candidate refuse that. The choice is the owner's.
