@@ -21751,7 +21751,8 @@ fn container_acceptance_record() {
 
 /// The container-runtime seam observes only while armed, only on the arming
 /// thread, and only by wrapping what production constructs; unarmed, and on any
-/// other thread, it constructs exactly what production does and journals nothing.
+/// other thread, it journals nothing, and constructs for an inspection the runtime
+/// that answers as an absent one and for a runner exactly what production does.
 #[test]
 fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thread() {
     use crate::engine::topology::entry::container_runtime;
@@ -29534,6 +29535,10 @@ fn inherited_common_dir_mount_child() {
         0,
     )));
 
+    // The parent asserts on the machine's own runtime, so this must not meet the unarmed double.
+    let _armed = crate::engine::topology::entry::container_runtime::arm(
+        &crate::runner::container::observed::Journal::default(),
+    );
     let mut opts = topology_options(&repo);
     opts.config_path = Some(repo.with_file_name("container.toml"));
     let refused = run_with(&opts, &source).expect_err("a fresh run refuses the configured mount");
@@ -29658,6 +29663,10 @@ fn recorded_target_resume_child() {
         TOPOLOGY_STUB_EDIT,
         0,
     )));
+    // The parent asserts on the machine's own runtime, so this must not meet the unarmed double.
+    let _armed = crate::engine::topology::entry::container_runtime::arm(
+        &crate::runner::container::observed::Journal::default(),
+    );
     let refused = resume_with(&resume_options(&repo, &run_id), &source)
         .expect_err("a resume refuses the recorded target");
     let refusal =

@@ -3858,7 +3858,9 @@ lines, and the suite step's many `1 passed` summaries from child harnesses are n
 **Limits.**
 
 - Host only: the runner kind is `host` and `image` is null by design. No container is used, and
-  container capability on the macOS and Windows runners stays unknown.
+  container capability on the macOS and Windows runners stays unknown. Both runs' censuses met the
+  unarmed absent-runtime double of `engine::topology::entry::container_runtime`, so the record
+  shows nothing of a container runtime on any platform.
 - The owner witness observes only the adapter probes made through the adapter source. It is not
   a direct observation of the shell probe, or of every probe the run makes.
 - No provider is called.
@@ -4150,10 +4152,14 @@ The judgement of the native evidence is root's.
 
 ## `fn the_container_runtime_seam_observes_only_while_armed_and_only_on_its_own_thread() {`
 
-The seam's scope, in the ordinary suite with no runtime needed, since constructing a `DockerCli`
-starts nothing. An unarmed construction is not observed. An armed one on the arming thread is,
-with its call site and, for a runner, its identity. Another thread's construction while armed is
-not. Nothing is observed once the guard drops, and a construction performs no operation.
+The seam observes only while armed, only on the arming thread, and only by wrapping what
+production constructs. Unarmed, and on any other thread, it journals nothing, and constructs for an
+inspection the runtime that answers as an absent one and for a runner exactly what production does.
+The test runs in the ordinary suite with no runtime needed: constructing a `DockerCli` starts
+nothing, and the inspection runtime constructed unarmed asks no container runtime at all. An
+unarmed construction is not observed. An armed one on the arming thread is, with its call site and,
+for a runner, its identity. Another thread's construction while armed is not. Nothing is observed
+once the guard drops, and a construction performs no operation.
 
 ## `enum PrivateEntry {`
 
@@ -4604,9 +4610,14 @@ checkout), a child of this test binary whose environment alone carries it
 run and a resume and records both refusals; the parent requires the child's
 success and libtest's `1 passed`, and that both recorded refusals name the
 canonical common directory as the source's container. Afterwards the stub
-was never asked anything, so no image was inspected, no runner was built and
-no launch plan was made; the recorded log is byte-identical; and the runs
-root holds what it held.
+was never asked anything. The stub sees every runner's commands and the
+inspections of each child's test thread, which arms
+`engine::topology::entry::container_runtime`; an inspection on another thread
+of a child meets the unarmed absent-runtime double and would reach neither the
+stub nor the test (`PR444-MOUNT-TESTS-MISS-OTHER-THREAD-DOCKER-CALLS`). So on
+those threads no image was inspected, no runner was built and no launch plan
+was made; the recorded log is byte-identical; and the runs root holds what it
+held.
 
 With the fix removed (`MountContext` bound from the checkout's `.git`, the
 pre-J10 entry), the absolute cell fails: the fresh run accepts the mount, and
@@ -4643,8 +4654,13 @@ records the refusal; the parent requires the child's success and libtest's
 `1 passed`, a refusal that names the run, the mount, the target rule's words
 and that nothing was published, locked or written, and a log byte-identical
 to the one the child was given. Afterwards the stub was never asked
-anything, so the image's environment was not read, no runner was built and
-nothing was recovered; and the runs root holds what it held.
+anything. The stub sees every runner's commands and the inspections of each
+child's test thread, which arms `engine::topology::entry::container_runtime`;
+an inspection on another thread of a child meets the unarmed absent-runtime
+double and would reach neither the stub nor the test
+(`PR444-MOUNT-TESTS-MISS-OTHER-THREAD-DOCKER-CALLS`). So on those threads the
+image's environment was not read, no runner was built and nothing was
+recovered; and the runs root holds what it held.
 
 The public resume asks the runtime before recovery does: `prepare_resume`
 reads the recorded image's environment. With
