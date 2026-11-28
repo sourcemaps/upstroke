@@ -607,9 +607,9 @@ fn a_duplicated_site_is_refused_rather_than_resolved_by_order() {
 
 /// `PR28-REPLAY-UNBOUNDED`. `u64::MAX` parsed happily. Measured before the
 /// fix: the printed ladder's first rung asked for 2_049_638_230_412_172_119
-/// microseconds — about **64,949 years** — and `kill_git_child` sleeps
-/// unconditionally, so the run would have ended at CI's job timeout rather
-/// than at any assertion.
+/// microseconds — about **64,949 years** — and `kill_git_child` waits out
+/// its rung unconditionally, so the run would have ended at CI's job timeout
+/// rather than at any assertion.
 #[test]
 fn a_replay_budget_past_the_ceiling_is_refused() {
     let stage = EffectSiteId::Object(ObjectSite::CandidateStage);
@@ -13367,12 +13367,13 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
             //
             // This is the aim and only the aim — `PR5-R5-001`. These are
             // the parameters the caller passed, so `sample_site` computing
-            // a ladder is the whole of what they can witness: deleting
-            // `std::thread::sleep(after)` from `kill_git_child`, which
-            // fires every kill at the spawn instant and is the exact
-            // negation of the clause cited above, left this list a perfect
-            // ladder and the suite green on Linux and on the Windows guest.
-            // The two assertions after it are over what the kills *did*.
+            // a ladder is the whole of what they can witness: deleting the
+            // wait before the kill from `kill_git_child` (then
+            // `std::thread::sleep(after)`), which fires every kill at the
+            // spawn instant and is the exact negation of the clause cited
+            // above, left this list a perfect ladder and the suite green on
+            // Linux and on the Windows guest. The two assertions after it
+            // are over what the kills *did*.
             let delays: Vec<std::time::Duration> =
                 shape.iter().map(|launch| launch.after).collect();
             assert!(
@@ -13565,8 +13566,8 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
                 // artifact carries it, and `UPSTROKE_RESIDUE_BUDGET_US` feeds it
                 // back -- which is what makes this sampler reproducible, since
                 // it has no seed and this duration is the only variance a
-                // replay can pin. Wake times, Git's own progress, cache state
-                // and scheduling still vary between runs.
+                // replay can pin. Firing times, Git's own progress, cache
+                // state and scheduling still vary between runs.
                 "budget_us": u64::try_from(budget.as_micros()).unwrap_or(u64::MAX),
                 "budget_replayed": replayed,
                 "none": record.histogram.none,
@@ -13839,9 +13840,9 @@ struct SamplingRun {
     /// The timescale the kill ladder was cut from, and whether it was measured
     /// on this machine or replayed from `UPSTROKE_RESIDUE_BUDGET_US`. This is the
     /// only variance a replay can pin -- see [`measure_budget`] -- so it is the
-    /// most a recorded run can offer. It is not *all* the variance: actual wake
-    /// times, Git's progress, cache state and scheduling still differ, so a
-    /// replay reproduces the nominal ladder rather than the original run.
+    /// most a recorded run can offer. It is not *all* the variance: actual
+    /// firing times, Git's progress, cache state and scheduling still differ, so
+    /// a replay reproduces the nominal ladder rather than the original run.
     budget: std::time::Duration,
     replayed: bool,
     /// What `classify_object_residue` answered for each sample, in order.
@@ -14214,7 +14215,19 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
 
         let (args, cwd) = sampled_command(site, &fixture, &slot);
         let delay = budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1));
-        let kill = kill_git_child(&cwd, &args, delay);
+        let kill = kill_git_child(
+            &cwd,
+            &args,
+            delay,
+            std::time::Instant::elapsed,
+            std::thread::sleep,
+            |launch| {
+                SAMPLED_LAUNCHES
+                    .lock()
+                    .expect("the launch log")
+                    .push(launch)
+            },
+        );
 
         let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
         // `.ok()` is what the tally needs, and it is not what a reader of a
@@ -14362,8 +14375,8 @@ fn measure_budget(site: EffectSiteId, fixture: &Fixture) -> std::time::Duration 
 /// this machine at this moment. Load, page cache and disk move it; the fractions
 /// never move. So the measured budget is the only variance a replay can pin,
 /// and pinning it is the nearest thing to a reproducible failure available here
-/// -- the ladder becomes identical, though the wake times it produces and Git's
-/// own progress against them still vary run to run.
+/// -- the ladder becomes identical, though the firing times it produces and
+/// Git's own progress against them still vary run to run.
 ///
 /// A fixed default would be worse than the status quo: the point of re-measuring
 /// on every run is that the ladder lands in different places on different
@@ -14411,12 +14424,14 @@ enum BudgetSpecError {
 
 /// The largest replay budget a spec may ask for.
 ///
-/// Four sites each sleep a ladder summing to about four budgets, so the whole
-/// sampling costs roughly `16 x budget`. At five seconds that is 80 seconds of
-/// sleeping — generous, since the largest budget ever *measured* here is about
-/// 45 ms, and bounded, which unbounded input was not: `u64::MAX` parsed happily
-/// and asked its first rung to sleep about 64,949 years, ending only at CI's
-/// job timeout.
+/// Four sites each wait out a ladder summing to about four budgets, so the
+/// whole sampling costs roughly `16 x budget`. At five seconds that is 80
+/// seconds of waiting — generous, since red runs recorded budgets of
+/// 827.468 ms (`Object.CandidateStage`, hosted macOS, 2026-11-27, run
+/// 46020861627, job 140579863888) and, at the same site, 785.585 ms
+/// (2026-11-24, run 45479941648), and bounded, which unbounded input was
+/// not: `u64::MAX` parsed happily and asked its first rung to sleep about
+/// 64,949 years, ending only at CI's job timeout.
 const MAX_REPLAY_BUDGET_US: u64 = 5_000_000;
 
 /// Parse a replay spec, validating **every** entry, and return the budget for
@@ -14892,8 +14907,9 @@ impl SampledChild {
 }
 
 /// What [`kill_git_child`] recorded for the one child it launched, handed
-/// back to the sample that launched it: the very record it pushed to
-/// [`SAMPLED_LAUNCHES`], and the child itself, reaped.
+/// back to its caller (in [`sample_site`], the sample that launched it):
+/// the very record it handed to the recorder it was given (there, one that
+/// pushes it to [`SAMPLED_LAUNCHES`]), and the child itself, reaped.
 struct SampleKill {
     launch: SampledLaunch,
     /// The reaped child, kept so that [`report_sample`] can ask whether a
@@ -14903,9 +14919,38 @@ struct SampleKill {
     child: SampledChild,
 }
 
-fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> SampleKill {
+/// Launch the sampled Git child, wait out the rung `after` its kill is
+/// aimed at ([`wait_out_rung`]), kill it, reap it, and build the launch's
+/// record and hand it to `record`: the one function that does each of
+/// those, for every sample. The record is built here, after the reap, and
+/// handed to the recorder here, once.
+///
+/// The wait's clock (`elapsed`, read off the instant the child was
+/// spawned), its sleeper (`sleep`) and the recorder (`record`) are
+/// arguments so that a test can hand the sampler's own kill path a fake
+/// clock, a fake sleeper and a recorder that pushes the launch to a `Vec`
+/// the test owns, and fail when the wait stops going through
+/// [`wait_out_rung`]:
+/// `kill_git_child_waits_out_its_rung_on_the_clock_and_sleeper_it_is_given`.
+///
+/// What no test shows is that [`sample_site`] hands it the real clock
+/// (`std::time::Instant::elapsed`), `std::thread::sleep` and a recorder
+/// that pushes the launch to [`SAMPLED_LAUNCHES`]. An early clock there
+/// fails the sampler's `fired >= after`, and a recorder that pushes the
+/// launch anywhere but there fails its 4 × N launch count. A late clock
+/// delays every kill. No assertion bounds one firing from above, so a
+/// single late firing passes; a clock late enough that no kill lands fails
+/// the kill floor (`killed > 0`).
+fn kill_git_child(
+    cwd: &Path,
+    args: &[String],
+    after: std::time::Duration,
+    mut elapsed: impl FnMut(&std::time::Instant) -> std::time::Duration,
+    sleep: impl FnMut(std::time::Duration),
+    record: impl FnOnce(SampledLaunch),
+) -> SampleKill {
     let mut child = SampledChild::spawn(cwd, args);
-    std::thread::sleep(after);
+    wait_out_rung(after, || elapsed(&child.spawned), sleep);
     // Kept, not discarded. A kill can answer an error without anything being
     // wrong -- while the Windows kill was `Child::kill`, `TerminateProcess`
     // answered `ERROR_ACCESS_DENIED` for a child that had already exited --
@@ -14922,11 +14967,378 @@ fn kill_git_child(cwd: &Path, args: &[String], after: std::time::Duration) -> Sa
         end: launch_end(&status),
         group_ended: child.group_ended.unwrap_or_default(),
     };
-    SAMPLED_LAUNCHES
-        .lock()
-        .expect("the launch log")
-        .push(launch.clone());
+    record(launch.clone());
     SampleKill { launch, child }
+}
+
+/// How close to its rung [`wait_out_rung`] stops sleeping and spins on the
+/// clock. It is wider than the lateness measured. On hosted macOS on
+/// 2026-11-27 (run 46020861627, job 140579863888) the wait before each of
+/// the 32 kills of `sampled_git_child_kills_every_residue_classified_and_recovered`
+/// was `std::thread::sleep(after)`, and every kill fired late. The job
+/// measured each kill's lateness, 2.48 to 148.31 ms after its rung, read in
+/// [`SampledChild::kill`] after the wait had returned. It did not show when
+/// the sleeps returned: a sleep that returned on time, followed by a pause
+/// before the reading, reads the same as a late sleep. Why the kills fired
+/// late is not established.
+const RUNG_SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Return once `elapsed()` reads `after` or later: the rung a sampled kill
+/// is aimed at, waited out on the clock rather than on a sleep's return.
+///
+/// While more than [`RUNG_SPIN_WITHIN`] is left it sleeps for what is left
+/// less that margin, planned from a fresh reading. The margin covers two
+/// things together: any pause between that reading and the sleep planned
+/// from it, and that sleep's overshoot. A sleep returns short of the rung
+/// when the two, counted from that reading, come to less than the margin.
+/// Past that, the kill fires late by the excess, as a thread preempted in
+/// the spin does. On a fake clock, the wait for a rung of 735.527593 ms
+/// returned 18.311690 ms past it after a 120 ms pause before its sleep and
+/// an overshoot of 148.311690 ms ([`RUNG_TEST_OVERSHOOT`]). On this file's
+/// fake clock ([`on_a_fake_clock`]), with an overshoot of exactly 250 ms,
+/// the wait returned 1 µs past the rung: the reading's own tick
+/// ([`RUNG_TEST_TICK`]).
+///
+/// Inside the margin it spins, on `std::hint::spin_loop` and not on
+/// `std::thread::yield_now`, which hands the core away and gets it back
+/// when the scheduler pleases, as a sleep does. It reads `elapsed()` afresh
+/// after every sleep and every spin, and returns at the first reading at or
+/// past `after`.
+///
+/// What it cannot do. A thread paused between a reading and the sleep
+/// planned from it for longer than the margin leaves after the sleep's
+/// overshoot, or preempted inside the margin, while it spins or between
+/// its last reading and the kill, still fires late: the wait cannot see
+/// time that passes between a reading and the sleep's start, and the spin
+/// keeps the core only for as long as the scheduler leaves it there. And on
+/// one core the spin delays the child it times: for up to the whole margin
+/// on every rung, the parent spins on the core the child needs.
+///
+/// `fixture::KillableGitChild::run_until` is not this wait. It reaps before
+/// it decides and sends no kill to a child already gone, which the
+/// sampler's exact per-command firing count forbids, and it sleeps to
+/// within 4 ms of its aim, less than the 148.31 ms by which the macOS job's
+/// latest kill was late. `elapsed` and `sleep` are arguments so that the
+/// tests below can hand this a fake clock and a fake sleeper.
+fn wait_out_rung(
+    after: std::time::Duration,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut sleep: impl FnMut(std::time::Duration),
+) {
+    loop {
+        let now = elapsed();
+        if now >= after {
+            return;
+        }
+        let left = after - now;
+        if left > RUNG_SPIN_WITHIN {
+            sleep(left - RUNG_SPIN_WITHIN);
+        } else {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// How far each reading of the [`wait_out_rung`] tests' fake clock moves it
+/// on, so that a spin ends: 1 µs, the unit the sampler prints its ladder
+/// in, and far under the 2.48 ms by which the least late of the macOS job's
+/// 32 kills fired after its rung.
+const RUNG_TEST_TICK: std::time::Duration = std::time::Duration::from_micros(1);
+
+/// How late the fake clock's sleeps return: 148.311690 ms, a test input
+/// taken from the lateness of the latest of the macOS job's 32 kills, which
+/// fired 148.31 ms after its rung. It is not a measured sleep: the job
+/// measured when its kills fired, not when its sleeps returned
+/// ([`RUNG_SPIN_WITHIN`]).
+const RUNG_TEST_OVERSHOOT: std::time::Duration = std::time::Duration::from_nanos(148_311_690);
+
+/// What [`wait_out_rung`] did on the fake clock of [`on_a_fake_clock`],
+/// run there directly ([`wait_out_rung_on_a_fake_clock`]) or by
+/// [`kill_git_child`].
+struct RungWait {
+    /// Every reading it took of the clock, in order.
+    readings: Vec<std::time::Duration>,
+    /// Every sleep it asked for, in order.
+    sleeps: Vec<std::time::Duration>,
+}
+
+impl RungWait {
+    /// Assert that the wait returned at its first reading at or past
+    /// `rung`. The fake clock refuses a reading taken after one at or past
+    /// the rung, so every reading before the last was short of it; this
+    /// asserts that there was a last reading, and that it was at or past
+    /// the rung.
+    #[track_caller]
+    fn assert_returned_at_first_reading_past(&self, rung: std::time::Duration) {
+        let Some(last) = self.readings.last() else {
+            panic!(
+                "the wait for {rung:?} returned without reading the clock, after asking for \
+                 the sleeps {:?}",
+                self.sleeps
+            );
+        };
+        assert!(
+            *last >= rung,
+            "the wait for {rung:?} returned at its reading {last:?}, short of the rung, after \
+             {} readings and the sleeps {:?}",
+            self.readings.len(),
+            self.sleeps
+        );
+    }
+}
+
+/// A fake clock whose first reading is `start`, for a wait on `rung`: it
+/// hands `body` a reading of the clock and a sleeper, and returns every
+/// reading taken and every sleep asked for. The reading reads the clock,
+/// then moves it on by [`RUNG_TEST_TICK`]; the sleeper records each
+/// duration it is asked for and moves the clock on by that much plus
+/// `overshoot`, how late the sleep returns. That is a test input and not a
+/// measured sleep: the tests here pass [`RUNG_TEST_OVERSHOOT`], taken from
+/// the lateness of the macOS job's latest kill.
+///
+/// Each refuses, with a panic, what a wait on this clock never does. A
+/// reading taken after one at or past the rung: the wait should have
+/// returned, and one that never does would read for ever. A sleep asked
+/// with no reading of this clock since the last sleep, or since the start:
+/// the wait asking it ignores the clock it was given, and fails at once
+/// rather than asking this sleeper for sleeps that pass no time on the
+/// clock it reads.
+fn on_a_fake_clock<B>(
+    rung: std::time::Duration,
+    start: std::time::Duration,
+    overshoot: std::time::Duration,
+    body: B,
+) -> RungWait
+where
+    B: FnOnce(&mut dyn FnMut() -> std::time::Duration, &mut dyn FnMut(std::time::Duration)),
+{
+    let clock = std::cell::Cell::new(start);
+    // Whether the clock has been read since the last sleep, or since the
+    // start.
+    let read_since_sleep = std::cell::Cell::new(false);
+    let mut readings: Vec<std::time::Duration> = Vec::new();
+    let mut sleeps: Vec<std::time::Duration> = Vec::new();
+    body(
+        &mut || {
+            let now = clock.get();
+            if let Some(passed) = readings.last().filter(|last| **last >= rung) {
+                panic!(
+                    "the wait read the clock again, at {now:?}, after its reading {passed:?} \
+                     was at or past its rung {rung:?}"
+                );
+            }
+            readings.push(now);
+            read_since_sleep.set(true);
+            clock.set(now + RUNG_TEST_TICK);
+            now
+        },
+        &mut |asked| {
+            if !read_since_sleep.replace(false) {
+                let since = match sleeps.last() {
+                    Some(last) => format!("its last sleep, of {last:?}"),
+                    None => "the start".to_owned(),
+                };
+                panic!(
+                    "the wait asked to sleep {asked:?} with no reading of the fake clock since \
+                     {since}: it ignores the clock it was given"
+                );
+            }
+            sleeps.push(asked);
+            clock.set(clock.get() + asked + overshoot);
+        },
+    );
+    RungWait { readings, sleeps }
+}
+
+/// Run [`wait_out_rung`] for `rung` on the fake clock of
+/// [`on_a_fake_clock`], whose first reading is `start` and whose sleeps
+/// return `overshoot` late.
+fn wait_out_rung_on_a_fake_clock(
+    rung: std::time::Duration,
+    start: std::time::Duration,
+    overshoot: std::time::Duration,
+) -> RungWait {
+    on_a_fake_clock(rung, start, overshoot, |reading, sleeper| {
+        wait_out_rung(rung, reading, sleeper);
+    })
+}
+
+/// A rung inside [`RUNG_SPIN_WITHIN`], from a clock at zero, is spun out
+/// and never slept: a sleep there would have no margin left to take up its
+/// overshoot, and the test's overshoot, [`RUNG_TEST_OVERSHOOT`], is as late
+/// as the macOS job's latest kill fired.
+#[test]
+fn a_rung_inside_the_spin_margin_is_never_slept() {
+    // A number, not a fraction of `RUNG_SPIN_WITHIN`: a rung taken from the
+    // margin would shrink with it, and a margin of zero would leave this
+    // test nothing to wait.
+    let rung = std::time::Duration::from_millis(200);
+    let wait = wait_out_rung_on_a_fake_clock(rung, std::time::Duration::ZERO, RUNG_TEST_OVERSHOOT);
+    assert!(
+        wait.sleeps.is_empty(),
+        "a rung of {rung:?} from a clock at zero is inside the {RUNG_SPIN_WITHIN:?} margin, \
+         and the wait asked for the sleeps {:?}",
+        wait.sleeps
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+}
+
+/// A sleep that returns 148.311690 ms late, inside the margin, does not
+/// make the kill late: the wait sleeps only to the margin short of the
+/// rung, the overshoot and the one pause this clock puts before the sleep,
+/// the reading's own tick, end inside that margin, and the spin carries the
+/// clock the rest of the way. That overshoot, [`RUNG_TEST_OVERSHOOT`], is a
+/// test input and not a measured sleep: it is as late as the latest of the
+/// macOS job's 32 kills fired, 148.31 ms after its rung, behind
+/// `std::thread::sleep(after)`.
+#[test]
+fn a_sleep_that_overshoots_inside_the_margin_does_not_make_the_kill_late() {
+    let rung = std::time::Duration::from_nanos(735_527_593);
+    let wait = wait_out_rung_on_a_fake_clock(rung, std::time::Duration::ZERO, RUNG_TEST_OVERSHOOT);
+    // What was left at the first reading, the whole rung, less the 250 ms
+    // margin; a number, for the reason the test above gives.
+    assert_eq!(
+        wait.sleeps,
+        [std::time::Duration::from_nanos(485_527_593)],
+        "the wait for {rung:?} from a clock at zero sleeps once, for the rung less the 250 ms \
+         margin"
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+    let returned = *wait.readings.last().expect("the wait read the clock");
+    let late = returned.saturating_sub(rung);
+    assert!(
+        late < RUNG_TEST_TICK,
+        "the wait for {rung:?} returned at {returned:?}, {late:?} after the rung: the kill \
+         after it would fire that late, as the macOS job's did"
+    );
+}
+
+/// A rung the clock has already passed at the wait's first reading is
+/// neither slept nor spun: the wait reads the clock once and returns.
+#[test]
+fn a_rung_already_passed_returns_without_waiting() {
+    let rung = std::time::Duration::from_millis(1);
+    let start = std::time::Duration::from_millis(3);
+    let wait = wait_out_rung_on_a_fake_clock(rung, start, RUNG_TEST_OVERSHOOT);
+    assert!(
+        wait.sleeps.is_empty(),
+        "the clock read {start:?}, past the rung {rung:?}, and the wait asked for the sleeps {:?}",
+        wait.sleeps
+    );
+    // A spin is followed by a reading, so a single reading is no spin.
+    assert_eq!(
+        wait.readings,
+        [start],
+        "the wait reads the clock once, finds it past the rung and returns"
+    );
+}
+
+/// [`kill_git_child`], the sampler's own kill path, waits out its rung
+/// through [`wait_out_rung`], on the clock and the sleeper it is handed. A
+/// real `git --version` child is aimed at a rung of 735.527593 ms, on a fake
+/// clock at zero whose sleeps return [`RUNG_TEST_OVERSHOOT`] late (a test
+/// input, not a measured sleep): the wait sleeps once, on the fake sleeper,
+/// for the rung less the 250 ms margin, and returns at its first reading of
+/// the fake clock at or past the rung; and the one launch is handed to the
+/// recorder it is given, which pushes it to a `Vec` the test owns, aimed at
+/// that rung and fired at.
+///
+/// Three regressions of the kill path fail here. A sleep of the whole rung
+/// put back in place of the wait asks the fake sleeper for nothing. A wait
+/// on the child's own clock asks it for a sleep before any reading of the
+/// fake clock, which it refuses at once. A launch pushed to the sampler's
+/// own log in place of the recorder leaves the test's `Vec` empty. The
+/// three tests above drive [`wait_out_rung`] itself, and stayed green with
+/// the first.
+///
+/// The 735.527593 ms pass on the fake clock alone, so the launch's `fired`,
+/// which [`SampledChild::kill`] reads off the real clock, is asserted to be
+/// there and not when. Nothing is asserted of how the child ended either:
+/// the kill races `git --version`'s own exit.
+#[test]
+fn kill_git_child_waits_out_its_rung_on_the_clock_and_sleeper_it_is_given() {
+    let tree = scratch("sampled-git-rung-wait");
+    let args = ["--version".to_string()];
+    // A log of its own: the sampler's is asserted to hold exactly the 4 × N
+    // launches of its four sites.
+    let mut launches: Vec<SampledLaunch> = Vec::new();
+    let rung = std::time::Duration::from_nanos(735_527_593);
+    let wait = on_a_fake_clock(
+        rung,
+        std::time::Duration::ZERO,
+        RUNG_TEST_OVERSHOOT,
+        |reading, sleeper| {
+            kill_git_child(
+                tree.path(),
+                &args,
+                rung,
+                |_| reading(),
+                sleeper,
+                |launch| launches.push(launch),
+            );
+        },
+    );
+    // What was left at the first reading, the whole rung, less the 250 ms
+    // margin: a number, for the reason
+    // `a_rung_inside_the_spin_margin_is_never_slept` gives.
+    assert_eq!(
+        wait.sleeps,
+        [std::time::Duration::from_nanos(485_527_593)],
+        "kill_git_child's wait for {rung:?} from a fake clock at zero sleeps once, on the \
+         sleeper it is handed, for the rung less the 250 ms margin"
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+    let [launch] = launches.as_slice() else {
+        panic!(
+            "kill_git_child handed {} launches to the recorder it was given, not one",
+            launches.len()
+        );
+    };
+    assert_eq!(
+        launch.after, rung,
+        "the launch kill_git_child logged is aimed at the rung it was handed"
+    );
+    assert!(
+        launch.fired.is_some(),
+        "kill_git_child logged a launch it never fired at"
+    );
+}
+
+/// A wait whose first reading is part-way into its rung sleeps for what is
+/// left of the rung less the margin, and returns at its first reading at or
+/// past the rung. Here a rung of 735.527593 ms is waited out on a fake
+/// clock whose first reading is 200 ms and whose sleeps return
+/// [`RUNG_TEST_OVERSHOOT`] late, a test input and not a measured sleep:
+/// 535.527593 ms are left, the one sleep is for 285.527593 ms and returns
+/// 101.687310 ms short of the rung, inside the 250 ms margin, and the spin
+/// carries the clock the rest of the way.
+///
+/// The two tests above that sleep start their clocks at zero, where what is
+/// left is the whole rung, so a sleep planned from the whole rung passed
+/// them both. From 200 ms in, that sleep returns 98.312690 ms past the rung,
+/// and this test fails on it.
+#[test]
+fn a_wait_begun_part_way_into_its_rung_sleeps_only_for_what_is_left() {
+    let rung = std::time::Duration::from_nanos(735_527_593);
+    let start = std::time::Duration::from_millis(200);
+    let wait = wait_out_rung_on_a_fake_clock(rung, start, RUNG_TEST_OVERSHOOT);
+    // What was left at the first reading, the rung less the 200 ms the clock
+    // had passed, less the 250 ms margin: a number, for the reason
+    // `a_rung_inside_the_spin_margin_is_never_slept` gives.
+    assert_eq!(
+        wait.sleeps,
+        [std::time::Duration::from_nanos(285_527_593)],
+        "the wait for {rung:?} from a clock at {start:?} sleeps once, for what is left of the \
+         rung less the 250 ms margin"
+    );
+    wait.assert_returned_at_first_reading_past(rung);
+    let returned = *wait.readings.last().expect("the wait read the clock");
+    let late = returned.saturating_sub(rung);
+    assert!(
+        late < RUNG_TEST_TICK,
+        "the wait for {rung:?} from a clock at {start:?} returned at {returned:?}, {late:?} \
+         after the rung: the kill after it would fire that late"
+    );
 }
 
 /// Which of [`recover_sample`]'s two removals refused, with its error.
