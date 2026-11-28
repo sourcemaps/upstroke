@@ -178,6 +178,89 @@ the failed assertion, so this run never reached it.
 
 Both ids were found as written. No other finding names this test or its tear fixture.
 
+## A second sighting, 2026-11-25
+
+| run | job | platform | date | pull request | head |
+|---|---|---|---|---|---|
+| `45706576310` (`merge_group`), attempt 1 | `139529985410`, `test (windows-latest, 4 of 22)` | a GitHub-hosted `windows-latest` runner, image `windows-2025-vs2026` version `20261116.315.1` (log lines 17-18) | 2026-11-25, 21:41:05Z to 21:47:17Z (the job's record; inside the leg's 40-minute limit, `.github/workflows/ci.yml:581`) | #432, in the merge queue | `a630311e`, the queue's merge of #432's head `4a774970` into `master` `d5aff4f5` (log line 96) |
+
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed
+(`~/selfhost-findings-20261128b/evidence/job-45706576310-139529985410.log`, SHA256
+`fa0e7a2ffeaf3ace1d8778f9f06324d829bd1be0e95438b49072406e841d567d`, the bytes of the copy saved on
+2026-11-25, `~/selfhost-kit/evidence-unfiled/windows-reds-20261125/job-139529985410.log`; `cmp`):
+
+- Line 414:
+  `test workspace::tests::a_snapshot_removal_beside_a_tear_its_writer_finishes_takes_the_registration ... FAILED <1.423s>`.
+  It is the only test line in the log that reads `... FAILED`.
+- Line 466: the test panicked at `src\workspace.rs:5821:9`. Lines 467 to 479 give the message,
+  "the snapshot's registration is gone:", and then the listing.
+- In the listing, the snapshot is the entry at line 471,
+  `C:/Users/runneradmin/AppData/Local/Temp/upstroke-legacy-remove-tear-83V93CZTSM/gate-store/worktrees/upstroke-gates-2532-01M8AAT1CV07BVCJAMHP3YXV9E`,
+  with `detached` (line 473) and `prunable gitdir file points to non-existent location` (line 474).
+- The foreign entry is at line 476, spelled
+  `C:/Users/RUNNER~1/AppData/Local/Temp/upstroke-legacy-remove-tear-83V93CZTSM/foreign-remove-checkout`,
+  with `HEAD c6e49ebb967c2c4d54009cfad15bfe746c248203` (line 477), `detached` (line 478) and
+  `prunable gitdir file points to non-existent location` (line 479). The repository, at line 467, is
+  spelled `C:/Users/runneradmin/AppData/Local/Temp/upstroke-legacy-remove-tear-83V93CZTSM/repo`.
+- Line 487:
+  `test result: FAILED. 88 passed; 1 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 185.79s`.
+
+Read from the run's attempt-1 job list as GitHub's API serves it, not from the log
+(`~/selfhost-findings-20261128b/evidence/job-records/run-45706576310-attempt-1-jobs.json`, SHA256
+`b8362aa05b26da050e3dfa66faa5487e871d2534373ddc5e8b7988c084243f63`): 44 of the run's 46 jobs
+succeeded, and the two failures were this job and the aggregate `upstroke-ci` (job `139535023330`).
+
+**What the test asserts**, by line at `a630311e`. There `src/workspace.rs` is the same as at
+`fe2b9bc5`, where this file's first sighting read it, and it is unchanged at `master` `d431d220`.
+The test is at line 5797, and the assertions this file lists are at their lines:
+`finished.is_some()` (`:5814`), the directory gone (`:5818`), and the listing with no
+`upstroke-gates-` entry (`:5821`), the one that failed; the first two run before it, so they held.
+
+**What #432 changed:** two finding files (`git diff --name-only d5aff4f5 a630311e`).
+
+**The same tree passed.** Run `45704197515` (`pull_request`, #432 at `4a774970`), job
+`139524514740`, the same leg, 21:30:32Z to 21:38:42Z, on image version `20261123.321.1` (line 18),
+checked out `94347fd` (line 109:
+`HEAD is now at 94347fd Merge 4a774970ee0b77cfffa9cba22bd7f2b5a456db27 into d5aff4f54cc4b84368a39c395cc994bea29852f6`),
+whose tree is `a630311e`'s (`84c7c4ec`). Line 431 logs the test `... ok <1.878s>`, line 479 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 221.53s`,
+and line 481 reads "shard 4 of 22 reported 92 passing tests; its floor is 40". Its log:
+`~/selfhost-findings-20261128b/evidence/job-45704197515-139524514740.log`, SHA256
+`75f3f0e4b2e3d5a8110ac1895f38627e9220c690e324e629bc4f381f9738d04d`, the bytes of the copy saved on
+2026-11-25 beside the red's (`cmp`). #432 merged at 2026-11-25T22:21:52Z.
+
+**It passed on the same tree three times more.** Run `45709568289` (`pull_request`, #432 at
+`4a774970`), job `139540165422`, the same leg, 22:01:17Z to 22:08:42Z, on image version
+`20261116.315.1` (line 18), checked out `94347fd` (line 109): line 431 logs the test
+`... ok <1.702s>`, and line 479 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 200.55s`.
+The merge-queue run `45711166772`, job `139545654825`, the same leg, 22:12:13Z to 22:19:47Z, on
+image version `20261123.321.1` (line 18), checked out `34604508` (line 96), a merge of `4a774970`
+into `d5aff4f5` like `a630311e` and with its tree, `84c7c4ec`: line 415 logs the test
+`... ok <1.739s>`, and line 463 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 203.97s`.
+The push run `45712585657` of that commit to `master`, job `139550490130`, the same leg, 22:21:57Z
+to 22:29:49Z, on image version `20261116.315.1` (line 18), checked it out too (line 96): line 415
+logs the test `... ok <1.784s>`, and line 463 reads
+`test result: ok. 89 passed; 0 failed; 4 ignored; 0 measured; 3821 filtered out; finished in 218.24s`.
+Their logs, as GitHub's API serves them with ANSI escape sequences removed:
+`~/selfhost-findings-20261128b/evidence/job-45709568289-139540165422.log`, SHA-256
+`52893340a55eecf73589ee8ede6f995f86c1d33a1c59fb9d1f7245c7a11644cb`;
+`~/selfhost-findings-20261128b/evidence/job-45711166772-139545654825.log`, SHA-256
+`1b93a96d7145b5eba71d43488ca8f1ad7b33c8ef024e17da8b20ad6a1d5066e0`; and
+`~/selfhost-findings-20261128b/evidence/job-45712585657-139550490130.log`, SHA-256
+`76fa70865138a73a026ea90d7a4db957fe8369900621ddb68ad2e5e8433176bf`, each fetched for this record on
+2026-11-28.
+
+**What is and is not established for this sighting.**
+
+- **Established:** the same assertion failed once more on a hosted Windows runner, in the merge
+  queue, on a change of two finding files; the same tree passed this test in the pull request's
+  run `45704197515`.
+- The log does not show the cleanup's result, how many attempts the access made, or when the writer
+  finished the tear relative to them.
+- **Not established: the rate.**
+
 ## What the change that takes this up should do
 
 - **Make the failure report the registration's state and the writer's end beside the removal**,
