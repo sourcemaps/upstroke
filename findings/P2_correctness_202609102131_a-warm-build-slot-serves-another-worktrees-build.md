@@ -45,6 +45,17 @@ Five of the eight slots hold a top-level `debug/libupstroke.rlib` built from a *
 
 **The consequence is about evidence, not only about builds.** Every "gates green" claim made on this box is unattributable unless the run's own output named its crate path — including claims already recorded in merged pull request bodies. This pull request's gate table shows the shape: of three consecutive full-suite runs, run 2 returned rc=0 with **no crate-path line and was discarded as evidence for exactly that reason**, while runs 1 and 3 carried `Compiling upstroke v0.1.0 (/srv/worktrees/fsweep-triage)`.
 
+## Reproduced, 2026-11-27, by both passes of #439's round four
+
+Both of #439's round-four review passes, on `449fcfb1`, reproduced one checkout passing on another's harness in a single wrapper slot. Each ran #439's category check, `.github/scripts/test-categories.py` at `449fcfb1`, from two throw-away checkouts, A and B, through `~/bin/upstroke-build`.
+
+- **The frontier pass:** "With two temporary checkouts and one wrapper slot, checkout B passed with A's two registrations. In a fresh slot, B failed and named `unfiled_only_in_b`." Its witness: "Ran the head's checker on A and B with UPSTROKE_SLOTS=1. B reused A's harness without compiling and exited 0. With a fresh wrapper pool, B compiled, exited 1, and named its additional unclassified test."
+- **The regression lens:** "I reproduced it with two disposable packages: checkout B passed in A's slot and was rejected by test name in a fresh slot."
+
+Their reports: `~/selfhost-catshards-20261125/evidence/review-frontier-449fcfb.md` (SHA-256 `8f8167db56aec4ba188561215affc4b8e34cced9c6c3b460f44e0b5b6bad0709`) and `~/selfhost-catshards-20261125/evidence/review-regression-449fcfb.md` (SHA-256 `6be3bda3613466e37b0824c9322a7fae01e64f681a54570d7dc11d6b2d4b60bf`), posted on #439 on 2026-11-27 at 16:25Z as comments 7223246918 (the frontier pass's text), 7223247413 (its verdict) and 7223247876 (the regression lens).
+
+**What this adds to the row:** the shape this row's failure sequence describes, a run handed the previous occupant's build that compiles nothing and exits 0, was reproduced on demand with one slot, and a fresh slot gave B's own answer. The check those passes ran is #439's, which is not on `master`; the slot it ran in is this wrapper's. This does not reproduce the 160-test difference above, and it does not establish which cargo decision let A's harness stand for B's.
+
 ## What the change that takes this up should do
 
 Owner, as the ledger records it: the project owner — the build box's tooling, not the tree. `~/bin/upstroke-build` is outside this repository, so **no pull request here can close this row**, on the same terms as `PR5D-TOOLBOX-DISCARDS-CLIPPY-OUTPUT`.

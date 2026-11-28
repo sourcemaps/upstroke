@@ -987,24 +987,60 @@ production item is above it. The production half beside
 
 ## `pub(crate) mod container_runtime {`
 
-Test-only: the observation seam of G7's native container acceptance record
-(`engine::tests::container_acceptance_record`). `arm(journal)` makes every
-`for_inspection` and `for_runner` call on the arming thread, until the
-returned `Armed` drops, construct a real `DockerCli` and hand it out wrapped
-in `runner::container::observed::ObservedRuntime`. The wrapper delegates every
-operation to that `DockerCli` and records what it asked and was answered in
-the shared `Journal`. Unarmed, or on any other thread, both functions
-construct `DockerCli::default()` and record nothing, which is what production
-does.
+Test-only: the test build's half of the one place this file constructs a
+container runtime. Armed, it is the observation seam of G7's native container
+acceptance record (`engine::tests::container_acceptance_record`).
+`arm(journal)` makes every `for_inspection` and `for_runner` call on the
+arming thread, until the returned `Armed` drops, construct a real `DockerCli`
+and hand it out wrapped in `runner::container::observed::ObservedRuntime`. The
+wrapper delegates every operation to that `DockerCli` and records what it
+asked and was answered in the shared `Journal`.
 
-**What it can and cannot do.** The seam cannot substitute a runtime: no fake,
-no proxy, and no second engine path. It always wraps the production type and
-returns the wrapped type's own results, errors included. Each construction is
-journaled with its call site (`#[track_caller]`: this file and line) and, for
-`for_runner`, the run's identity (run id, incarnation, repo key, private root,
-run directory). A reader of the record can therefore tell which runtime
-served which epoch, and that every runtime the public composition built was
-observed.
+Unarmed, or on any other thread, neither function records anything.
+`for_runner` constructs `DockerCli::default()`, which is what production does.
+`for_inspection` returns `AbsentRuntime`, the absent-runtime double: it asks
+no container runtime, and answers every question `RuntimeError::Unreachable`
+under the question's own operation with the one detail `UNARMED`. That is not
+`DockerCli`'s answer to every question on a machine without Docker: there a
+start that carries stdin (`DockerCli::start_attached`) is answered `Failed`.
+The test
+`runner::container::tests::an_unarmed_inspection_runtime_answers_as_an_absent_runtime`
+holds the double to those answers for twelve questions, every
+`ContainerRuntime` method but `reaper_program`, asked in-process; it does not
+show that no container runtime was asked
+(`PR444-UNARMED-TEST-MISSES-DOCKER-INVOCATIONS`).
+It is there so that tests that are not about a
+container runtime no longer depend on the CI machine's runtime answering the
+census's listing inside its bound (the Windows Docker-listing flake,
+`CI-FLAKE-WINDOWS-CENSUS-LISTING-PAST-ITS-QUESTION-BOUND`). With no container
+intent to account for, a census proceeds without a runtime it cannot reach,
+as on a machine that has none. Arming is therefore also how a test's
+inspections reach the machine's own runtime, and four tests arm because what
+they assert needs it:
+
+- the container acceptance record;
+- the two mount tests' children,
+  `engine::tests::inherited_common_dir_mount_child` and
+  `engine::tests::recorded_target_resume_child`, whose parents assert that the
+  stub `docker` first on the children's `PATH` was never asked. Arming is
+  thread-local, so the stub sees the arming thread's inspections and every
+  runner's, and an inspection on another thread meets the double unseen
+  (`PR444-MOUNT-TESTS-MISS-OTHER-THREAD-DOCKER-CALLS`);
+- the Docker-gated absent-image test,
+  `runner::container::resolve::tests::real_docker_a_schema_4_run_refuses_an_absent_image_before_the_worktree_lock`,
+  which asserts the refusal of an image the machine's own runtime does not
+  hold.
+
+**What it can and cannot do.** The seam adds no second engine path, and armed
+it cannot substitute a runtime: no fake and no proxy. It always wraps the
+production type and returns the wrapped type's own results, errors included.
+Each construction is journaled with its call site (`#[track_caller]`: this
+file and line) and, for `for_runner`, the run's identity (run id,
+incarnation, repo key, private root, run directory). A reader of the record
+can therefore tell which runtime served which epoch, and that every runtime
+the public composition built was observed. Unarmed, the absent-runtime double
+is its one substitute, and only for an inspection: a runner's runtime is the
+production type, wrapped or not.
 
 **Lifetime and coverage.** `engine::run_with` and `engine::resume_with` reach
 every site above synchronously on the caller's thread, before the coordinator

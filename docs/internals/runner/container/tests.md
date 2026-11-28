@@ -363,6 +363,36 @@ with one global boolean could not express it. The intersection here is
 The whole daemon down is the other end of the same toggle, and every
 operation reports it.
 
+## `fn an_unarmed_inspection_runtime_answers_as_an_absent_runtime() {`
+
+On an unarmed thread, every question of the inspection runtime (the
+absent-runtime double) of the engine's test-mode seam
+`engine::topology::entry::container_runtime` is answered
+`RuntimeError::Unreachable` under the question's own operation, with the
+seam's one detail, `UNARMED`. Each
+`ContainerRuntime` method that can answer with an error, which is all of them
+but `reaper_program`, is called once, the four effects last: twelve
+questions. They are asked in-process on every platform, and no invocation is
+counted, so the test shows the double's answers only: a double that also
+asked a container runtime and gave the same answers would pass it, and one
+that delegated an effect would act on the machine's runtime before the test
+failed (`PR444-UNARMED-TEST-MISSES-DOCKER-INVOCATIONS`).
+
+It lives in this module and not in `engine::tests` because it calls those
+four effects, `ContainerRuntime::create`, `start`, `stop` and `remove`.
+Clippy denies them outside the modules `effects/allowlist.toml` lists.
+`engine::tests` is on the allowlist, as this module is. The funnel census,
+`every_container_effect_in_the_tree_goes_through_the_funnel`, looks for eight
+spellings: the four effect calls `runtime.create(`, `runtime.start(`,
+`runtime.stop(` and `runtime.remove(`, and `view.materialize(`,
+`view.discard(`, `.materialize(` and `.discard(`. It looks in the production
+region of each Rust file under `src/` (`crate::effects::production_region`:
+the text before its first `#[cfg(test)]`), with comments and strings
+blanked. It skips the funnel and three files by name, this module's among
+them. The engine's test module has no `#[cfg(test)]` of its own, so its
+production region is the whole file, and the census would find the test's
+four effect calls there. That is why the test lives here.
+
 ## `fn a_seeded_container_carries_owner_labels_and_an_incarnation() {`
 
 (6) owner **labels**, **incarnations**, and the two image ids as separate
@@ -3405,3 +3435,32 @@ the daemon's no-such-image answer, and one error. The log holds the six
 questions once each, in order. No logged invocation and no recorded argv
 holds `pull`: the check reads the asked and recorded argv, not the record's
 prose, whose scope statement names what was not done.
+
+## `fn an_unanswered_docker_question_names_the_end_it_met_and_the_time_it_ran() {`
+
+`DOCKER-QUESTION-UNFINISHED-NAMES-NO-END-AND-NO-TIME`: the failure of a
+question that ended before it answered keeps its old words first, then names
+the end it met and how long it ran. Four outputs with no exit code are read
+through `answer_within`, with no daemon and no process: one its bound ended,
+one its bound ended that also came back limited, one limited with no bound, and
+one with neither flag. Each failure is asserted whole, so the old words, the
+end and the time are held together: the bound is read before the limit flag
+that collection can set after the kill, the limit is named only together with a
+signal, which the output cannot tell it from, and the time is the output's
+duration in whole milliseconds, rounded down (4.999 ms reads as 4 ms). The
+cancellation reading is not among them, because `answer_within` reads every
+outcome as that of a question whose stop never fired; the next test holds it.
+
+## `fn an_unanswered_docker_question_names_its_cancellation_only_when_its_stop_fired() {`
+
+An unfinished question names its invocation's cancellation as its end only
+when its stop fired. `answer_recording_stop` is given stand-in questions, with
+no daemon and no process funnel, that each return the same output with no exit
+code: one asks the stop of a cancelled invocation and is told true, one asks
+the stop of a live invocation and is told false, and one never asks the stop of
+a cancelled invocation. Only the first names `its invocation's cancellation`;
+the other two name `a signal`. The first two also hold that the stop passes the
+cancellation's answer through unchanged, and the third that the record is of a
+true answer the question was given and not of the invocation's state when the
+outcome is read: a cancellation the process funnel never acted on did not end
+the question.

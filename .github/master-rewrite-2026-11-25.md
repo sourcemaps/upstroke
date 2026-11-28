@@ -22,9 +22,6 @@ equals the tree it replaced. `master` moved from `0d45280c` to `50c11ded`. A sig
 re-created commit could not be kept, since it covered the old parents. Open pull requests were moved
 onto the new history the same way, with their diffs unchanged.
 
-`upstroke-pr-policy` refuses a pull request whose own commits carry a credit form listed in
-`.github/scripts/validate-pr-commits.sh`, a check added with this record.
-
 ## Old and new commit ids
 
 The map covers the commits that were on `master` at the rewrite. A commit id from the old `master`,

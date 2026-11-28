@@ -1322,7 +1322,7 @@ began and nothing has settled yet (`start_attached`, `settle_delivery`,
 began is the one its collection or removal settles, whichever clone does it.
 
 `unresolved_questions` holds, by container name, every process a bounded
-question about that container (`answer_within`, `unanswered`) started and could
+question about that container (`read_outcome`, `unanswered`) started and could
 not establish gone (`hold_unresolved`, root's PR12-J6-OBSERVATION-FATE-DROPPED).
 Shared by every clone in the same way, never cleared, and read by every
 settlement of that container (`settle_client_of`).
@@ -1365,7 +1365,7 @@ disagree.
 
 Run one `docker` subcommand and capture its stdout, bounded by the runtime's
 own bound (`own_bound`, [`QUESTION_BOUND`]) and read as every bounded question
-is read (`answer_within`).
+is read (`read_outcome`, through `answer_within`).
 
 `target` is what the call log names — the container, image or volume the
 operation is about, rather than the subcommand, so the trace of a real
@@ -1387,15 +1387,16 @@ as for any release that could not finish.
 ## `impl DockerCli` › `fn exec_streams(`
 
 The same bounded call, keeping **both** streams, for `docker logs`, and saying
-whether the funnel ended it at its output limit. A limited answer is not a
-failure: the collection keeps what was read and reports it limited
+whether its capture was cut at the funnel's output limit. A limited answer
+is not a failure: the collection keeps what was read and reports it limited
 (`ContainerExecution::output_limited`), as the runner's own bound did before
 K2, so a gate whose output overran the limit still fails as one. Otherwise an
 answer that ended before it answered fails (`unfinished`), a nonzero exit is
 classified (`classify_docker_failure`), and a question its supervisor did not
-answer keeps that supervisor's fate (`unanswered`). The funnel captures at
-most its own limit of each stream, so a stream that reached it ends the
-question, and the other stream is what had been read by then.
+answer keeps that supervisor's fate (`unanswered`). The funnel ends a question
+at its output limit only when it sees a capture cut before the question exits,
+the funnel's collection of the streams sets the flag, and a limited answer is
+returned whatever its exit.
 
 `PR6A-DOCKERCLI-MERGES-STDERR-INTO-STDOUT`: [`Self::exec`] returns only
 stdout and drops the child's stderr on success, so every container
@@ -1451,16 +1452,50 @@ PR12-ATTACHED-START-UNBOUNDED-DOCKER-OBSERVATION finding, J6), and since K2 the
 supervision's observations of the started container. It runs under the process
 funnel (`question`) with the time left as its timeout and the cancellation as
 its stop. A question whose deadline has passed, or whose invocation was
-cancelled, is not asked.
+cancelled, is not asked. `exec_within` hands its question to the method that
+records its stop (`answer_recording_stop`), so the failure of one that its
+cancellation ended names that end.
 
 ## `impl DockerCli` › `fn answer_within(`
 
-What one bounded question answered, read with its supervisor's fate kept
-(PR12-J6-OBSERVATION-FATE-DROPPED), whichever bound it was asked under:
+What one question `exec` asks under the runtime's own bound answered, read
+with its supervisor's fate kept (PR12-J6-OBSERVATION-FATE-DROPPED). Its stop
+answers false, and its outcomes are `read_outcome`'s:
 - a question its supervisor did not answer is read by `unanswered`;
-- a question its bound or a cancellation ended, which the funnel killed and
-  reaped, an answer longer than the runner reads, or a nonzero exit: `Failed`,
-  a nonzero exit through `classify_docker_failure`.
+- a question its bound ended, which the funnel killed and reaped, or an answer
+  longer than the runner reads: `Failed`; a nonzero exit is classified by
+  `classify_docker_failure`: `Unreachable` when its stderr means the daemon
+  was never reached (`is_unreachable_diagnostic`), and `Failed` otherwise.
+
+`answer_within` reads its outcome as that of a question whose stop never fired
+(`QuestionStop::NeverFired`): `exec` asks with a stop that answers false.
+
+## `impl DockerCli` › `fn answer_recording_stop(`
+
+One question asked with `cancellation` as its stop, and read knowing whether
+that stop fired. The question it is given is handed a stop predicate that
+answers `cancellation.is_cancelled()` unchanged and records
+`QuestionStop::Fired` whenever it answers true, and the outcome is then read by
+`read_outcome` with that record. So an unfinished question names its
+invocation's cancellation only when the predicate was asked and answered true,
+and the process funnel property under `unfinished` is what makes such an
+answer the question's end. The record is local to the call, so it is this one
+question's. `exec_within` gives it a question run under the process funnel
+(`question`), and
+`tests::an_unanswered_docker_question_names_its_cancellation_only_when_its_stop_fired`
+gives it stand-ins that ask the stop or do not, with no `docker` at all.
+
+## `impl DockerCli` › `fn read_outcome(`
+
+The reading `answer_within` and `answer_recording_stop` share, told by its
+caller whether the question's stop fired, which it passes on to `unfinished`
+alone. In order: a question its supervisor did not answer is read by
+`unanswered`; an output its bound ended, or one with no exit code, fails
+through `unfinished`; one the limit flagged fails as an answer longer than the
+runner reads; exit 0 answers its stdout; and any other exit is classified
+(`classify_docker_failure`). So an output with no exit code fails through
+`unfinished` even when it is limited, and only one that exited is an answer
+longer than the runner reads.
 
 ## `impl DockerCli` › `fn unanswered(`
 
@@ -1521,7 +1556,7 @@ The path, given that `create` passed `--interactive`:
   So does a question of the wait or of the diagnostic whose process could not
   be established gone: `await_started` reports such an observation as itself,
   even at the deadline or on a cancellation, and the settlement reads the
-  fact `answer_within` held;
+  fact `unanswered` held;
 - once the container has started, the client is kept, owned, by name, until
   its collection or its removal settles it.
 
@@ -1539,7 +1574,7 @@ diagnostic that stalls ends where the invocation does and adds nothing to the
 reason. It is best-effort by design: its answer only enriches a failure that
 is already decided, so its error is dropped (`.ok()`), and what that could
 hide is kept instead: a question whose process could not be established gone
-is held under the container (`answer_within`, `hold_unresolved`) and makes
+is held under the container (`unanswered`, `hold_unresolved`) and makes
 the settlement unresolved. Until J13 the question took a fresh `CLIENT_GRACE`
 from the moment it was asked: a 200 ms invocation took 1.64 s against a stub
 diagnostic that slept 1.5 s (the reviewer's stub witness).
@@ -1755,11 +1790,82 @@ discarded error that §7 binds in a body K2 changed. A free function, as
 
 A question as its diagnostics name it: `` `docker <args>` ``.
 
-## `fn unfinished(op: RuntimeOp, args: &[&str]) -> RuntimeError {`
+## `enum QuestionStop {`
+
+Whether a question's stop fired: `Fired` when the stop predicate it was handed
+answered true, which in the process funnel ends the question, and `NeverFired`
+when it never did. `answer_recording_stop` records it. `answer_within` and
+`exec_streams` pass `NeverFired`: `exec`, which reads through `answer_within`,
+and `exec_streams` ask with a stop that answers false. `end_and_time` reads it
+for `unfinished`, to say whether the end a question met was its invocation's
+cancellation.
+
+## `fn unfinished(`
 
 The failure of a question that ended before it answered: its bound passed, its
-invocation was cancelled, or a signal ended it. The funnel killed and reaped
-it, so it is `Failed`, not unresolved.
+invocation was cancelled, its output passed the limit, or a signal ended it.
+The funnel established the question's process gone before it returned the
+output, and killed it first when its bound, its cancellation or the output
+limit ended it, so it is `Failed`, not unresolved.
+
+The message keeps its old words first and then names the end the question met
+and how long it ran (`end_and_time`):
+
+```text
+`docker <args>` ended before it answered: the bound it was asked under passed, its invocation was cancelled, or a signal ended it; the end it met was <end>, after <N> ms
+```
+
+The end is the first of four readings that holds, in this order:
+
+1. `its bound`, when the funnel's timeout ended the question (`timed_out`);
+2. `its invocation's cancellation`, when the question's stop fired
+   (`QuestionStop::Fired`, which `answer_recording_stop` records);
+3. `the output limit or a signal`, when the output is limited
+   (`output_limited`);
+4. `a signal`, when none of those holds: its process exited with no exit code.
+
+The bound and the cancellation come first because the funnel acts on each
+inside its wait loop and leaves the loop there, so each is an end the funnel
+itself met, while the limit flag can also be set after the loop, when the
+output is collected: a question its bound ended can come back limited, and it
+still met its bound. The first two never both hold of one output, since the
+funnel checks its bound before it asks the stop and leaves the loop on either.
+
+The cancellation reading rests on a property of the process funnel: it
+consults a question's stop predicate only in its wait loop, where a true answer
+ends the question, so a recorded true answer is the funnel's stop end. Nothing
+enforces that property; it is how the wait loop is written. A funnel that asked
+the predicate anywhere else, or went on after a true answer, would make this
+reading name a cancellation that did not end the question.
+
+The limit names a pair because the output cannot tell the two apart. The drain
+keeps reading past the limit and flags it, each pass of the wait loop looks for
+an exit before it checks the limit, and collection sets the output's limit flag
+from the drains' own, so a question that a signal ended after writing more than
+16 MiB to either stream reads exactly as one the funnel killed at the limit: no
+exit code, not timed out, no stop fired, and the flag set.
+
+N is the output's `duration` in whole milliseconds, rounded down. The funnel
+measures it from just before the spawn to the end of its wait loop, so it
+includes the kill of a question the funnel ended and leaves out the drain that
+follows the loop.
+
+The old words stay first, with the end and the time after them rather than in
+their place, because rulings, findings and the operator's fingerprint checks
+match them by substring.
+
+In the process funnel, all at master `6513c22d`: `src/agent/proc.rs` lines 229
+and 414 (what N spans), 353 and 398 (where the stop is consulted), 439
+(collection sets the limit flag), and `src/agent/proc/drain.rs` lines 218 to
+224 (the drain reads past the limit).
+
+## `fn end_and_time(output: &ProcessOutput, stop: QuestionStop) -> String {`
+
+The clause `unfinished` appends to its old words, in the form
+`; the end it met was <end>, after <N> ms`. The end is the first of
+`unfinished`'s four readings that holds, and N is the output's `duration` in
+whole milliseconds, rounded down; their order, and what N spans, are under
+`unfinished`.
 
 ## `fn exit_text(exit: Option<i32>) -> String {`
 
@@ -2031,8 +2137,8 @@ given.
 
 Both streams, separately. `docker logs` writes the container's stdout
 to its own stdout and the container's stderr to its own stderr
-(measured, docker 29.7.2) — see [`Self::exec_streams`]. Whether the funnel
-ended `docker logs` at its output limit is carried as
+(measured, docker 29.7.2) — see [`Self::exec_streams`]. Whether the funnel's
+capture of `docker logs` was cut at its output limit is carried as
 `ContainerExecution::output_limited` (K2): the funnel keeps at most its limit
 of each stream, so the runner's own truncation (`exec::bounded`) could no
 longer see that a stream was cut, and a gate's verdict depends on it.

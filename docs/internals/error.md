@@ -145,3 +145,12 @@ The boxed primary breaks the recursive type without shared ownership.
 
 This adds a public error variant. Downstream exhaustive matches must handle
 `WithCleanup`; callers can inspect its primary and additional typed errors.
+
+## `CodexRosterUpgrade { message: String },`
+
+The local Codex catalog satisfies the entire earlier two-model, five-effort
+contract but fails an added requirement. This public variant lets callers
+protect saved review identity and pool settings without parsing diagnostics.
+Its display carries the failed requirement and instructions to restore a
+compatible CLI and retry. Other probe failures retain their original kinds;
+downstream exhaustive matches must also handle this variant.

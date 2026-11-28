@@ -3595,10 +3595,12 @@ impl std::fmt::Display for GroupOutlivedItsLeader {
 /// runs its `reset --hard` as a child of its own, and a kill of the leader
 /// alone leaves that child populating the worktree after the sample is
 /// taken — and to the direct child elsewhere. Both samplers' children are
-/// killed through here since PR10's round 5; until then only
+/// killed through here on Unix since PR10's round 5; until then only
 /// [`KillableGitChild`]'s were (round 2), and PR5's own sampler killed its
 /// leader alone (`PR136`'s first fingerprint, met on CI's macOS leg at
-/// `869e336a`).
+/// `869e336a`). On Windows PR5's sampler (`mod tests`'s `SampledChild`)
+/// kills a private job of its own instead, which holds every process its git
+/// started.
 #[cfg(unix)]
 pub(crate) fn kill_process_group(child: &mut std::process::Child) -> std::io::Result<()> {
     let pid =
@@ -3625,10 +3627,11 @@ pub(crate) fn kill_process_group(child: &mut std::process::Child) -> std::io::Re
 /// `DirectoryNotEmpty` at the forced removal, seen on CI's macOS leg at
 /// `869e336a` — and a member reparented to this process stays a zombie of
 /// the group until reaped, so each poll reaps what it can
-/// (`waitpid(-pgid, WNOHANG)`) and then asks the group (`kill(-pgid, 0)`,
-/// `ESRCH` once it is empty). Bounded by [`GROUP_END_BOUND`]. `cfg(unix)`:
-/// only there is the sampled child a group; elsewhere the kill is the direct
-/// child's and its reap the whole wait, as before.
+/// (`waitpid(-pgid, WNOHANG)`) and then asks the group
+/// ([`group_has_a_member`]: `kill(-pgid, 0)`, `ESRCH` once it is empty).
+/// Bounded by [`GROUP_END_BOUND`]. `cfg(unix)`: only there is the sampled
+/// child a group; elsewhere the kill is the direct child's and its reap the
+/// whole wait, as before.
 #[cfg(unix)]
 pub(crate) fn await_group_end(pgid: i32) -> Result<std::time::Duration, GroupOutlivedItsLeader> {
     let started = std::time::Instant::now();
@@ -3637,11 +3640,7 @@ pub(crate) fn await_group_end(pgid: i32) -> Result<std::time::Duration, GroupOut
         // group, `WNOHANG` never blocks, and a null status pointer is
         // permitted; nothing else is handed over.
         while unsafe { libc::waitpid(-pgid, std::ptr::null_mut(), libc::WNOHANG) } > 0 {}
-        // SAFETY: signal 0 delivers nothing; the call only asks whether a
-        // process of the group exists, and hands over no memory.
-        if unsafe { libc::kill(-pgid, 0) } == -1
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        {
+        if !group_has_a_member(pgid) {
             return Ok(started.elapsed());
         }
         let waited = started.elapsed();
@@ -3655,6 +3654,20 @@ pub(crate) fn await_group_end(pgid: i32) -> Result<std::time::Duration, GroupOut
 #[cfg(not(unix))]
 pub(crate) fn await_group_end(_pgid: i32) -> Result<std::time::Duration, GroupOutlivedItsLeader> {
     Ok(std::time::Duration::ZERO)
+}
+
+/// Whether a process of the group `pgid` exists at this moment: the
+/// question [`await_group_end`] asks on each poll, through this very call,
+/// asked once. Any answer but `ESRCH` is a member, as it is there, so a
+/// zombie member nobody has reaped yet counts. Nothing is reaped here: the
+/// census sampler's report of a failed sample asks it, and a report changes
+/// no state. `cfg(unix)`: only there is the sampled child a group.
+#[cfg(unix)]
+pub(crate) fn group_has_a_member(pgid: i32) -> bool {
+    // SAFETY: signal 0 delivers nothing; the call only asks whether a
+    // process of the group exists, and hands over no memory.
+    !(unsafe { libc::kill(-pgid, 0) } == -1
+        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
 }
 
 /// Whether `status` is the death `std::process::abort()` produces.

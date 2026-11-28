@@ -129,6 +129,11 @@ pub enum UpstrokeError {
     #[error("agent error: {message}")]
     Agent { message: String },
 
+    #[error(
+        "codex roster upgrade: {message}. Restore a compatible Codex CLI whose `codex debug models` advertises all catalogued models and all five required efforts, then retry the original command"
+    )]
+    CodexRosterUpgrade { message: String },
+
     #[error("git error: {message}")]
     Git { message: String },
 

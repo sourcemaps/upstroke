@@ -92,6 +92,64 @@ duration, from just before Git is started to just after it exits, recorded besid
 
 **Not established: the rate.** One sighting; the jobs of other runs on 2026-11-20 were not counted.
 
+## A second sighting, 2026-11-27
+
+| run | job | platform | date | pull request | checkout |
+|---|---|---|---|---|---|
+| `46020861627` (`pull_request`), attempt 1 | `140579864108`, `test (windows-latest, workspace 2 of 2 (guarded_reads, manager, reclaim, refs, registry, snapshots))` | a GitHub-hosted `windows-latest` runner, image `windows-2025-vs2026` version `20261116.315.1` (log lines 17-18) | 2026-11-27, 14:59:44Z to 15:08:27Z (8 min 43 s, inside the leg's 40-minute limit) | #439 at `449fcfb1` | `c91f148`, GitHub's merge of `449fcfb1` into `master` at `ca058512` (log line 109) |
+
+Read from the job's log as GitHub's API serves it, with ANSI escape sequences removed
+(`~/selfhost-findings-20261128/evidence/job-46020861627-140579864108.log`, SHA256
+`c7c69b75be18ecd8d57caaa347f9f67f2b953de3192e2e63abdb501ea888ddb0`):
+
+- Line 703:
+  `workspace_manager::tests::registry::an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing
+  ... FAILED <6.163s>`; line 785: it panicked at `src\workspace_manager\tests\registry.rs:1128:9` with (line 786):
+
+  > git-path: refused at once: 532.4028ms
+
+- Line 792:
+  `test result: FAILED. 210 passed; 1 failed; 18 ignored; 0 measured; 3696 filtered out; finished in 294.83s`. It
+  was the job's only failure.
+
+The add took **532.4 ms, 32.4 ms past the 500 ms bound**.
+
+**What the test asserts, by line at `449fcfb1`** (`c91f148` has its tree). #439 moved this test to
+`src/workspace_manager/tests/registry.rs` (line 1099); its lines there, 1047 to 1141, are `master` `ca058512`'s
+`src/workspace_manager/tests.rs:17971-18065` line for line (ruling r86 step 2's comparison, run again for this
+record: `~/selfhost-findings-20261128/evidence/test-text-449fcfb1.txt`, SHA256
+`0889db60fdd82e769744ec0301060812732a9323f1769e9195c1e18f97d2d13f`). Its assertions are the four this file numbers
+above, in the same order: `contended_attempts` unchanged, "one attempt, never attempted again" (line 1123);
+`took < REGISTRY_ACCESS_DEADLINE`, "refused at once" (line 1128), the one that failed; the message (line 1132); and
+the slot (line 1136). `REGISTRY_ACCESS_DEADLINE` is 500 ms in test builds (`src/workspace_manager.rs`, line 9524).
+
+**The same checkout passed.** Attempt 2 of run `46020861627`, under ruling r86, re-ran this job on the same
+checkout, `c91f148` (line 109 of its log): job `140607675103`, 15:54:27Z to 15:59:36Z, on image version
+`20261123.321.1` (line 18). Line 702: `... ok <1.445s>`. Line 779:
+`test result: ok. 211 passed; 0 failed; 18 ignored; 0 measured; 3696 filtered out; finished in 154.50s`. Line 791:
+the shard reported 217 passing tests against its floor of 94. Its log:
+`~/selfhost-findings-20261128/evidence/job-46020861627-140607675103.log`, SHA256
+`4bae152bb84a904c9843568f07819ee735d1a28092073059d34337d79356fd88`.
+
+**What is and is not established for this sighting.**
+
+- **Established:** one add of the `git-path` case, on a hosted Windows runner, took 532.4 ms from `add_worktree`'s
+  call to its return and failed the timing assertion; the `contended_attempts` assertion before it passed, so the
+  add was not attempted again; the same checkout passed the test on attempt 2, in 1.445 s.
+- The log does not show where in the call the time went: it records neither the attempt's own duration nor whether
+  any wait of the access slept.
+- **Inferred, not established:** the 532.4 ms was spent in the one `git worktree add` attempt.
+- **Inferred, not established:** the time was spent outside the Git process, in the add's other work or with the
+  test's thread not scheduled.
+- These readings are not exhaustive.
+- **Not established: the rate.**
+- `PR329-R14-A-CANDIDATE-NO-ENVIRONMENT-CHANGE-ANSWERS-HAS-NO-CLEARING-PROCEDURE`
+  (`findings/P2_liveness_202610081321_a-candidate-no-environment-change-answers-has-no-clearing-procedure.md:41-45`)
+  names this test among the tests it executed.
+- `CI-FLAKE-WINDOWS-WORKSPACE-TEAR-REGISTRATION-GONE`
+  (`findings/P3_correctness_202611220302_a-snapshot-removal-beside-a-tear-lost-its-registration-on-hosted-windows.md:174-177`)
+  names this finding as a different test, with a different assertion.
+
 ## What the change that takes this up should do
 
 - **Make the bound measure what "at once" means**: no wait for the registry deadline and no attempt beyond the first,
