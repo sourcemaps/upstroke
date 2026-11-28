@@ -18431,6 +18431,28 @@ fn commit_of(fixture: &Fixture, tree: &str) -> String {
 /// after one attempt, as a registry refusal carrying Git's message, never as
 /// Git state and never attempted again, with nothing left at the slot. That is
 /// R14's narrowing (`PR329-A-GENUINE-CHECKOUT-FAILURE-AFTER-THE-TAKEOVER-REFUSES`).
+///
+/// **"At once" is judged by the add's own waits**
+/// (`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`): no wait of the
+/// add's registry accesses slept, and none made an attempt beyond its first; it
+/// is not a wall time of the host. The add runs under the production deadline
+/// ([`PRODUCTION_REGISTRY_DEADLINE`]). A deadline bounds an access's waits and
+/// further attempts, not the runtime of an attempt or of its veto, and `took`
+/// times the whole add, with its two Git children: on hosted Windows this add
+/// took 3.39 s on 2026-11-20 and 532.4 ms on 2026-11-27, past the test build's
+/// 500 ms. Under the production deadline the wall bound on `took` is the
+/// deadline the add ran under: a pass rules out a refusal at that deadline, and
+/// a red says only that the whole add took that long. Both accesses, the gate's
+/// list and the add's own, run on this test's thread, each attempt, veto and
+/// wait inline, and every wait goes through [`NoHooks`]'s `registry_pause`,
+/// which sleeps on the calling thread, so the thread-local count of slept waits
+/// (`super::fixture::slept_pauses`) counts every wait of theirs that slept.
+///
+/// **A guarantee this test no longer makes**
+/// (`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`): before that finding
+/// its wall bound was the test build's 500 ms
+/// (`took < REGISTRY_ACCESS_DEADLINE`, on the monotonic clock). A delay in the
+/// add that is not a registry wait, and keeps it under ten seconds, now passes.
 #[test]
 fn an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_nothing() {
     for (label, kind) in [("git-path", 0_u8), ("name-too-long", 1)] {
@@ -18451,7 +18473,12 @@ fn an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_not
             .write_intent(&mut NoHooks, &beta)
             .expect("the intent");
         let common = fixture.manager.common_git_dir().to_path_buf();
+        let _deadline = super::RegistryDeadline::hold(
+            fixture.manager.common_git_dir(),
+            PRODUCTION_REGISTRY_DEADLINE,
+        );
         let before = contended_attempts(&common);
+        let slept = super::fixture::slept_pauses();
         let started = std::time::Instant::now();
         let result = fixture.manager.add_worktree(&mut NoHooks, &beta, &commit);
         let took = started.elapsed();
@@ -18461,9 +18488,14 @@ fn an_add_whose_checkout_cannot_be_made_refuses_after_one_attempt_and_leaves_not
             before,
             "{label}: one attempt, never attempted again"
         );
+        assert_eq!(
+            super::fixture::slept_pauses(),
+            slept,
+            "{label}: no wait of the add slept: {took:?}"
+        );
         assert!(
-            took < REGISTRY_ACCESS_DEADLINE,
-            "{label}: refused at once: {took:?}"
+            took < PRODUCTION_REGISTRY_DEADLINE,
+            "{label}: refused at once, not at its deadline: {took:?}"
         );
         assert!(
             message.contains("1 attempt(s)") && message.contains("is gone"),
@@ -19739,7 +19771,11 @@ fn a_list_over_a_registration_another_process_left_whole_and_unlistable_refuses(
 /// platform makes slow can spend the whole deadline first, and the access
 /// refuses with no second attempt (the record's §9.30.10 and §9.31). A test
 /// whose tear stays, and whose oracle is the refusal at the deadline, keeps
-/// the test build's.
+/// the test build's. A test whose oracle is a refusal at once, and not at the
+/// deadline, holds it as well, so that its wall bound is the deadline the
+/// access ran under and not the test build's 500 ms, which an add of such a
+/// test outlasted on hosted Windows
+/// (`CI-FLAKE-WINDOWS-ADD-REFUSAL-PAST-REGISTRY-DEADLINE`).
 const PRODUCTION_REGISTRY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// T10 (the legacy writer beside the manager): the legacy engine's gate
